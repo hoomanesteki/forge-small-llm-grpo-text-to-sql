@@ -101,6 +101,7 @@ strict_equality = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["scripts"]
 addopts = "-ra --strict-markers -p pytester"
 markers = [
     "phase(n): plan phase that introduced the test (required on every test)",
