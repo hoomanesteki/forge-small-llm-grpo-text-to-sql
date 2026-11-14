@@ -26,6 +26,11 @@ sql_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(sql_app, name="sql")
+eval_app = typer.Typer(
+    help="Check the checkers: gold scored against itself, and fast against official EX.",
+    no_args_is_help=True,
+)
+app.add_typer(eval_app, name="eval")
 
 
 @app.callback()
@@ -55,6 +60,8 @@ def doctor() -> None:
 DataSource = Literal["hf", "mirror", "gdrive"]
 SplitName = Literal["train", "val", "dev"]
 PromptVersionName = Literal["p1", "p2"]
+# The agreement check mutates training-side gold queries only (plan FG-108).
+AgreementSplitName = Literal["train", "val"]
 
 
 @data_app.command("fetch")
@@ -275,6 +282,155 @@ def _sql_value(value: object) -> str:
     if isinstance(value, bytes):
         return f"X'{value.hex()}'"
     return str(value)
+
+
+@eval_app.command("gold")
+def eval_gold(
+    split: Annotated[SplitName, typer.Option(help="Whose gold queries to score.")] = "val",
+) -> None:
+    """Score each gold query against itself with both checkers; exit 1 unless both give 100%.
+
+    The known failing golds are skipped. It runs no model, so a dev check is not one of
+    the six dev evaluations.
+    """
+    from forge.data.spider import FAILING_GOLD_IDS, DataNotFound, load_raw, resolve_data_dir
+    from forge.data.splits import split_examples
+    from forge.eval.agreement import GOLD_TIMEOUT_MS, gold_mutations, score
+    from forge.eval.testsuite import OfficialEvalTimeout
+    from forge.ops.paths import RepoRootNotFound
+
+    try:
+        data_dir = resolve_data_dir()
+        examples = split_examples(load_raw(data_dir))[split]
+        kept = [example for example in examples if example.id not in FAILING_GOLD_IDS]
+        if not kept:
+            raise ValueError(f"the {split} split has no questions in {data_dir}")
+        scores = score(gold_mutations(kept), data_dir=data_dir, pred_timeout_ms=GOLD_TIMEOUT_MS)
+    # ValueError covers GoldQueryFailed, a gold query that fails on its database.
+    except (DataNotFound, OfficialEvalTimeout, RepoRootNotFound, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    databases = len({example.db_id for example in kept})
+    skipped = len(examples) - len(kept)
+    typer.echo(f"data: {data_dir}")
+    typer.echo(
+        f"split {split}: {len(kept)} gold queries over {databases} "
+        f"database{'' if databases == 1 else 's'}"
+        + (f", {skipped} known failing golds skipped" if skipped else "")
+    )
+    for name, hits in (
+        ("fast EX", sum(s.fast for s in scores)),
+        ("official EX", sum(s.official for s in scores)),
+    ):
+        typer.echo(f"{name:<11}  {hits:>5}/{len(scores)}  {hits / len(scores):.2%}")
+    misses = [s for s in scores if not (s.fast and s.official)]
+    if misses:
+        typer.echo(f"error: {len(misses)} gold queries don't match themselves:", err=True)
+        for s in misses[:10]:
+            typer.echo(
+                f"  {s.mutation.example_id} ({s.mutation.db_id}): fast {s.fast}, "
+                f"official {s.official}: {s.mutation.gold_sql}",
+                err=True,
+            )
+        raise typer.Exit(1)
+
+
+@eval_app.command("agreement")
+def eval_agreement(
+    mutations: Annotated[
+        int, typer.Option(min=1, help="How many predictions to make from gold queries.")
+    ] = 2000,
+    split: Annotated[
+        AgreementSplitName, typer.Option(help="Whose gold queries to mutate.")
+    ] = "val",
+    seed: Annotated[int, typer.Option(help="Seed for picking and changing the queries.")] = 0,
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            dir_okay=False, help="Write the report here, not docs/audit/agreement-<date>.md."
+        ),
+    ] = None,
+) -> None:
+    """Fast against official EX on mutated gold queries; exit 1 under 98% agreement (I5)."""
+    from datetime import UTC, datetime
+
+    from forge.data.manifest import data_manifest_hash
+    from forge.data.spider import FAILING_GOLD_IDS, load_raw, resolve_data_dir
+    from forge.data.splits import split_examples
+    from forge.eval.agreement import (
+        AGREEMENT_TARGET,
+        AgreementRun,
+        agreement_mutations,
+        agreement_rate,
+        render_report,
+        score,
+    )
+    from forge.eval.testsuite import OfficialEvalTimeout
+    from forge.ops.paths import RepoRootNotFound, repo_root
+
+    try:
+        data_dir = resolve_data_dir()
+        examples = [
+            example
+            for example in split_examples(load_raw(data_dir))[split]
+            if example.id not in FAILING_GOLD_IDS
+        ]
+        if not examples:
+            raise ValueError(f"the {split} split has no questions in {data_dir}")
+        scores = score(
+            agreement_mutations(examples, mutations, seed=seed, data_dir=data_dir),
+            data_dir=data_dir,
+        )
+        day = datetime.now(UTC).date()
+        report = out or repo_root() / "docs" / "audit" / f"agreement-{day.isoformat()}.md"
+        run = AgreementRun(
+            command=f"forge eval agreement --mutations {mutations} --split {split} --seed {seed}",
+            split=split,
+            examples=len(examples),
+            databases=len({example.db_id for example in examples}),
+            seed=seed,
+            day=day,
+            git_sha=_report_git_sha(),
+            data_hash=data_manifest_hash(data_dir),
+        )
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(render_report(scores, run), encoding="utf-8")
+    # OSError covers a missing database (DataNotFound) and a report that can't be written;
+    # ValueError covers GoldQueryFailed.
+    except (OSError, OfficialEvalTimeout, RepoRootNotFound, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    rate = agreement_rate(scores)
+    agreeing = sum(s.agree for s in scores)
+    typer.echo(f"data: {data_dir}")
+    typer.echo(
+        f"split {split}: {run.examples} questions over {run.databases} "
+        f"database{'' if run.databases == 1 else 's'}, {len(scores)} predictions, seed {seed}"
+    )
+    typer.echo(
+        f"fast EX {sum(s.fast for s in scores)}, official EX {sum(s.official for s in scores)}"
+    )
+    typer.echo(f"agreement {rate:.2%} ({agreeing} of {len(scores)})")
+    typer.echo(f"report: {report}")
+    if rate < AGREEMENT_TARGET:
+        typer.echo(f"error: agreement is under the {AGREEMENT_TARGET:.0%} that I5 needs", err=True)
+        raise typer.Exit(1)
+
+
+def _report_git_sha() -> str:
+    """The commit a report came from, marked dirty when the tree has changes."""
+    import subprocess
+
+    from forge.ops.manifest import git_sha
+    from forge.ops.paths import RepoRootNotFound, repo_root
+
+    try:
+        return git_sha(repo_root(), allow_dirty=True)
+    except (OSError, RepoRootNotFound, subprocess.CalledProcessError):
+        # A wheel installed outside a checkout (a Kaggle kernel) has no history to name.
+        return "unknown (not run from a git checkout)"
 
 
 @ledger_app.command("add")
