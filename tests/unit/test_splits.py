@@ -1,7 +1,8 @@
-"""The val rule, splitting by database, and the reason and budget on dev."""
+"""The val rule, splitting by database, the manifests, and what training may load."""
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -13,17 +14,29 @@ from pathlib import Path
 import pytest
 
 from forge.core.types import Example, Split
-from forge.data.spider import DataNotFound
+from forge.data import spider, splits
+from forge.data.spider import FAILING_GOLD_IDS, ROWLESS_DBS, DataNotFound
 from forge.data.splits import (
+    MANIFEST_FILE,
+    SPLITS,
     VAL_SEED,
     SplitLeak,
     load_dev,
     load_train,
     load_val,
+    read_manifest,
+    read_split_ids,
     split_examples,
     val_databases,
+    write_manifests,
 )
 from forge.ops.dev_usage import MAX_DEV_USES, DevBudgetExceeded, read_uses
+
+TRAIN_PACKAGE = Path(__file__).resolve().parents[2] / "src" / "forge" / "train"
+
+# Everything that hands out val or dev questions: load_raw and split_examples count,
+# since their output holds both.
+FORBIDDEN_IN_TRAIN = frozenset({"load_dev", "load_raw", "load_val", "split_examples"})
 
 
 def _example(i: int, db_id: str, split: Split = "train") -> Example:
@@ -138,6 +151,32 @@ def test_split_refuses_a_database_in_train_and_dev() -> None:
 
 
 @pytest.mark.phase(1)
+def test_load_train_refuses_databases_the_manifests_hold_out(
+    spider_mini: Path, tmp_path: Path
+) -> None:
+    # A data directory whose train has concert_singer, a dev database in the committed
+    # manifests: the fresh split calls it train, and load_train still refuses it.
+    root = Path(shutil.copytree(spider_mini, tmp_path / "relabeled"))
+    items = json.loads((root / "train_spider.json").read_text(encoding="utf-8"))
+    for item in items:
+        if item["db_id"] == "dorm_1":
+            item["db_id"] = "concert_singer"
+    (root / "train_spider.json").write_text(json.dumps(items), encoding="utf-8")
+    (root / "database" / "concert_singer").mkdir()
+    (root / "database" / "concert_singer" / "concert_singer.sqlite").touch()
+
+    assert "concert_singer" in {e.db_id for e in split_examples(spider.load_raw(root))["train"]}
+    with pytest.raises(SplitLeak, match="10 val or dev example"):
+        load_train(root)
+    assert {e.db_id for e in load_train()} == {
+        "college_1",
+        "department_management",
+        "dorm_1",
+        "geo",
+    }
+
+
+@pytest.mark.phase(1)
 def test_load_dev_requires_reason(with_dev: Path, dev_log: Path) -> None:
     for reason in ("", "   ", "\n\t"):
         with pytest.raises(ValueError, match="needs a reason"):
@@ -161,3 +200,87 @@ def test_load_dev_requires_reason(with_dev: Path, dev_log: Path) -> None:
     with pytest.raises(DevBudgetExceeded):
         load_dev(reason="one more look", run_id="run-7", data_dir=with_dev)
     assert len(read_uses(dev_log)) == MAX_DEV_USES
+
+
+@pytest.mark.phase(1)
+def test_val_databases_have_rows_and_working_golds() -> None:
+    val = read_split_ids("val")
+    # Gold-vs-gold on val must reach 100% EX (the phase 1 demo), so no empty databases
+    # and none of the golds that fail on SQLite.
+    assert not {db_id for _, db_id in val} & ROWLESS_DBS
+    assert not {example_id for example_id, _ in val} & FAILING_GOLD_IDS
+
+
+@pytest.mark.phase(1)
+def test_manifests_round_trip_and_catch_edits(spider_mini: Path, tmp_path: Path) -> None:
+    fresh = split_examples(spider.load_raw())
+    written = write_manifests(fresh, tmp_path)
+    assert sorted(path.name for path in written) == sorted(
+        [MANIFEST_FILE, *(f"{name}.ids.txt" for name in SPLITS)]
+    )
+    assert read_manifest(tmp_path).seed == VAL_SEED
+    for name in SPLITS:
+        assert read_split_ids(name, tmp_path) == [(e.id, e.db_id) for e in fresh[name]]
+    assert (tmp_path / "val.ids.txt").read_bytes().startswith(b"spider-train-00010\tflight_1\n")
+
+    # Moving one question to another database is caught by the file's hash.
+    path = tmp_path / "val.ids.txt"
+    path.write_bytes(path.read_bytes().replace(b"\tflight_1\n", b"\tdorm_1\n", 1))
+    with pytest.raises(ValueError, match=r"val\.ids\.txt does not match its sha256"):
+        read_split_ids("val", tmp_path)
+
+
+def _forbidden_references(package: Path) -> list[str]:
+    """``<file>:<line>: <name>`` for each reference to a forbidden loader under ``package``."""
+    found: list[tuple[str, int, str]] = []
+    for path in package.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                name = node.id
+            elif isinstance(node, ast.Attribute):
+                name = node.attr
+            elif isinstance(node, ast.alias):
+                name = node.name.rpartition(".")[2]
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                name = node.value  # getattr(module, "load_dev") and the like
+            else:
+                continue
+            # A star import could bring any of them in unseen.
+            is_star = isinstance(node, ast.alias) and name == "*"
+            if name in FORBIDDEN_IN_TRAIN or is_star:
+                found.append((path.relative_to(package).as_posix(), node.lineno, name))
+    return [f"{rel}:{line}: {name}" for rel, line, name in sorted(found)]
+
+
+@pytest.mark.phase(1)
+def test_train_package_never_loads_val_or_dev(tmp_path: Path) -> None:
+    # Each name exists, so a rename can't leave the scan looking for nothing.
+    assert all(hasattr(splits, name) or hasattr(spider, name) for name in FORBIDDEN_IN_TRAIN)
+
+    package = tmp_path / "train"
+    (package / "rewards").mkdir(parents=True)
+    sources = {
+        "clean.py": (
+            "from forge.data.splits import assert_train_only, load_train\n\n"
+            "rows = load_train()\nassert_train_only(rows)\nshards = sorted(glob('*'))\n"
+        ),
+        "imported.py": "from forge.data.splits import load_dev as dev\n",
+        "star.py": "from forge.data.splits import *\n",
+        "called.py": "def f(examples):\n    return split_examples(examples)\n",
+        "rewards/attribute.py": "import forge.data.splits\n\nrows = forge.data.splits.load_val()\n",
+        "rewards/dynamic.py": "from forge.data import spider\n\nf = getattr(spider, 'load_raw')\n",
+    }
+    for rel, source in sources.items():
+        (package / rel).write_text(source, encoding="utf-8")
+    assert _forbidden_references(package) == [
+        "called.py:2: split_examples",
+        "imported.py:1: load_dev",
+        "rewards/attribute.py:3: load_val",
+        "rewards/dynamic.py:3: load_raw",
+        "star.py:1: *",
+    ]
+
+    # The real package arrives in phase 4; until then there is nothing to scan, and
+    # from then on this keeps val and dev out of it.
+    assert _forbidden_references(TRAIN_PACKAGE) == []
