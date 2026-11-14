@@ -1,3 +1,7 @@
+# Vendored from https://github.com/taoyds/test-suite-sql-eval at commit
+# e97acc546ecbee8fa27fa8dbf025ef61493a876c, Apache-2.0 (see LICENSE).
+# Changed for Forge, see CHANGES.md: relative imports; run the command line as
+# python -m test_suite_eval.evaluation.
 ################################
 # val: number(float)/string(str)/sql(dict)
 # col_unit: (agg_id, col_id, isDistinct(bool))
@@ -24,8 +28,8 @@ import json
 import sqlite3
 import argparse
 
-from process_sql import get_schema, Schema, get_sql
-from exec_eval import eval_exec_match
+from .process_sql import get_schema, Schema, get_sql
+from .exec_eval import eval_exec_match
 
 # Flag to disable value evaluation
 DISABLE_VALUE = True

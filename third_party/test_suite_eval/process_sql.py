@@ -1,3 +1,6 @@
+# Vendored from https://github.com/taoyds/test-suite-sql-eval at commit
+# e97acc546ecbee8fa27fa8dbf025ef61493a876c, Apache-2.0 (see LICENSE).
+# Changed for Forge, see CHANGES.md: nltk is imported lazily in tokenize().
 ################################
 # Assumptions:
 #   1. sql is correct
@@ -26,7 +29,6 @@
 
 import json
 import sqlite3
-from nltk import word_tokenize
 
 CLAUSE_KEYWORDS = ('select', 'from', 'where', 'group', 'order', 'limit', 'intersect', 'union', 'except')
 JOIN_KEYWORDS = ('join', 'on', 'as')
@@ -114,6 +116,10 @@ def get_schema_from_json(fpath):
 
 
 def tokenize(string):
+    # Forge: imported here so execution and hardness from a pre-parsed 'sql' dict
+    # work without nltk; only parsing a SQL string needs it
+    from nltk import word_tokenize
+
     string = str(string)
     string = string.replace("\'", "\"")  # ensures all string values wrapped by "" problem??
     quote_idxs = [idx for idx, char in enumerate(string) if char == '"']

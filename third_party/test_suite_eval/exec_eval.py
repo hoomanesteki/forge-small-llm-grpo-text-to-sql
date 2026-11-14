@@ -1,14 +1,19 @@
+# Vendored from https://github.com/taoyds/test-suite-sql-eval at commit
+# e97acc546ecbee8fa27fa8dbf025ef61493a876c, Apache-2.0 (see LICENSE).
+# Changed for Forge, see CHANGES.md: relative import, raw-string regex, read-only
+# connection, a timeout that interrupts sqlite, no prints.
 import os
 import re
 import asyncio
 import sqlite3
 import threading
+from pathlib import Path
 from typing import Tuple, Any, List, Set
 from itertools import product
 from collections import defaultdict
 import tqdm
 import random
-from parse import get_all_preds_for_execution, remove_distinct
+from .parse import get_all_preds_for_execution, remove_distinct
 import time
 import pickle as pkl
 import subprocess
@@ -19,6 +24,8 @@ from itertools import chain
 threadLock = threading.Lock()
 TIMEOUT = 60
 EXEC_TMP_DIR = 'tmp/'
+# Forge: sqlite VM instructions between two deadline checks in exec_on_db_
+PROGRESS_STEPS = 1000
 
 def permute_tuple(element: Tuple, perm: Tuple) -> Tuple:
     assert len(element) == len(perm)
@@ -124,27 +131,28 @@ def result_eq(result1: List[Tuple], result2: List[Tuple], order_matters: bool) -
 
 def replace_cur_year(query: str) -> str:
     return re.sub(
-        "YEAR\s*\(\s*CURDATE\s*\(\s*\)\s*\)\s*", "2020", query, flags=re.IGNORECASE
+        r"YEAR\s*\(\s*CURDATE\s*\(\s*\)\s*\)\s*", "2020", query, flags=re.IGNORECASE
     )
 
 
 # get the database cursor for a sqlite database path
 def get_cursor_from_path(sqlite_path: str):
-    try:
-        if not os.path.exists(sqlite_path):
-            print("Openning a new connection %s" % sqlite_path)
-        connection = sqlite3.connect(sqlite_path)
-    except Exception as e:
-        print(sqlite_path)
-        raise e
+    # Forge: read-only, so a predicted DROP TABLE fails instead of being committed to the
+    # file, and a missing path raises instead of being created as an empty database
+    uri = Path(sqlite_path).absolute().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
     connection.text_factory = lambda b: b.decode(errors="ignore")
     cursor = connection.cursor()
     return cursor
 
 
-async def exec_on_db_(sqlite_path: str, query: str) -> Tuple[str, Any]:
+async def exec_on_db_(sqlite_path: str, query: str, timeout: int = TIMEOUT) -> Tuple[str, Any]:
     query = replace_cur_year(query)
     cursor = get_cursor_from_path(sqlite_path)
+    # Forge: a blocking sqlite call can't be cancelled by asyncio.wait_for; a progress
+    # handler that returns True aborts the running statement, so the timeout holds
+    deadline = time.monotonic() + timeout
+    cursor.connection.set_progress_handler(lambda: time.monotonic() > deadline, PROGRESS_STEPS)
     try:
         cursor.execute(query)
         result = cursor.fetchall()
@@ -154,15 +162,16 @@ async def exec_on_db_(sqlite_path: str, query: str) -> Tuple[str, Any]:
     except Exception as e:
         cursor.close()
         cursor.connection.close()
+        # Forge: report an interrupted statement the way upstream reported a timeout
+        if isinstance(e, sqlite3.OperationalError) and time.monotonic() > deadline:
+            return "exception", TimeoutError
         return "exception", e
 
 async def exec_on_db(
     sqlite_path: str, query: str, process_id: str = "", timeout: int = TIMEOUT
 ) -> Tuple[str, Any]:
     try:
-        return await asyncio.wait_for(exec_on_db_(sqlite_path, query), timeout)
-    except asyncio.TimeoutError:
-        return ('exception', TimeoutError)
+        return await exec_on_db_(sqlite_path, query, timeout)
     except Exception as e:
         return ("exception", e)
 

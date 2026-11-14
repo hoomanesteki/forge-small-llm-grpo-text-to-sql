@@ -1,3 +1,6 @@
+# Vendored from https://github.com/taoyds/test-suite-sql-eval at commit
+# e97acc546ecbee8fa27fa8dbf025ef61493a876c, Apache-2.0 (see LICENSE).
+# Changed for Forge, see CHANGES.md: raw-string regexes.
 import re
 import sqlparse
 from typing import List, Tuple, Set, Iterator, Dict, Any, Union
@@ -54,12 +57,12 @@ def strip_query(query: str) -> Tuple[List[str], List[str]]:
         query = query.replace(val.strip(), VALUE_NUM_SYMBOL)
 
     query_tokenized = query.split()
-    float_nums = re.findall("[-+]?\d*\.\d+", query)
+    float_nums = re.findall(r"[-+]?\d*\.\d+", query)
     all_values += [qt for qt in query_tokenized if qt in float_nums]
     query_tokenized = [VALUE_NUM_SYMBOL if qt in float_nums else qt for qt in query_tokenized]
 
     query = " ".join(query_tokenized)
-    int_nums = [i.strip() for i in re.findall("[^tT]\d+", query)]
+    int_nums = [i.strip() for i in re.findall(r"[^tT]\d+", query)]
 
     all_values += [qt for qt in query_tokenized if qt in int_nums]
     query_tokenized = [VALUE_NUM_SYMBOL if qt in int_nums else qt for qt in query_tokenized]
@@ -67,7 +70,7 @@ def strip_query(query: str) -> Tuple[List[str], List[str]]:
 
     for tok in query_tokenized:
         if "." in tok:
-            table = re.findall("[Tt]\d+\.", tok)
+            table = re.findall(r"[Tt]\d+\.", tok)
             if len(table) > 0:
                 to = tok.replace(".", " . ").split()
                 to = [t.lower() for t in to if len(t) > 0]
@@ -203,7 +206,7 @@ def extract_all_comparison_from_query(query: str) -> List[Dict[str, Any]]:
 def extract_typed_value_in_comparison_from_query(query: str) -> List[Tuple[Tuple[Union[str, None], str], str]]:
     cmps = extract_all_comparison_from_query(query)
     typed_values = [(cmp['table_col'], cmp['val']) for cmp in cmps if 'table_col' in cmp]
-    for table, col, val1, val2 in re.findall('(?:([^\.\s]*)\.)?([^\.\s]+) between ([^\s;]+) and ([^\s;]+)', query, re.IGNORECASE):
+    for table, col, val1, val2 in re.findall(r'(?:([^\.\s]*)\.)?([^\.\s]+) between ([^\s;]+) and ([^\s;]+)', query, re.IGNORECASE):
         if table == '':
             table = None
         else:
