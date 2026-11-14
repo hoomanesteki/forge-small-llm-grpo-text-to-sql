@@ -20,7 +20,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-101 | Spike: data sources, licenses and official evaluator | 2 | done |  |  | Pinned HF zip, CC BY-SA 4.0, evaluator vendored read-only with a timeout, 5-db fixture |
 | FG-102 | Core types and hashing | 2 | done |  |  | Contracts as in 3.5, UTC-dated run ids, `build_manifest` returns a `RunManifest` |
 | FG-103 | Spider loader, checksums and fixture subset | 3 | done |  |  | Fetch from a pinned zip, 170 files checked against `spider.sha256`, 9,693 examples, 60-question fixture, real data hash |
-| FG-104 | Splits by database and dev guard | 3 | todo |  |  |  |
+| FG-104 | Splits by database and dev guard | 3 | done |  |  | val is 15 of 146 train dbs (872 questions) by hashed `db_id`, committed id manifests, `assert_train_only`, `load_dev` logs each use, ADR-0004 |
 | FG-105 | Schema serializer and prompt builder | 5 | todo |  |  |  |
 | FG-106 | Safe SQL executor | 5 | todo |  |  |  |
 | FG-107 | SQL extraction and result comparator | 3 | todo |  |  |  |
@@ -139,3 +139,15 @@ Work discovered along the way that is not a plan story.
   directory). Nobody has downloaded the Drive file in full to confirm it.
 - Fixture ids are positions in the fixture files, not Spider's: `spider-train-00010` there is
   Spider's item 343. Its README lists the original indices.
+- The val rule picks `flight_1` from the fixture as well as from the full data, so the
+  fixture's val is a real val database. The fixture now has 20 `flight_1` questions and 10
+  for each other database, still 60 in all.
+- Under `forge-val-v1` no row-less database ranks in the first 15, so skipping them changes
+  nothing today; it only matters if the seed changes. No val database holds a failing gold.
+- Most val questions come in pairs that share a gold query: 872 questions, 456 distinct
+  gold queries. Confidence intervals (FG-203) should allow for the pairs.
+- `load_train()` checks its examples against the committed manifests, so a seed or rule
+  change that moves a val or dev database into train needs `forge data splits --write`
+  (full data) before training will load.
+- Training code should call `assert_train_only()` on the dataset it builds (FG-401,
+  FG-505). The static check also bans `load_raw` and `split_examples` under `forge/train/`.
