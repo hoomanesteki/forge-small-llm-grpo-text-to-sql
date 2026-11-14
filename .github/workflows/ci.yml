@@ -12,6 +12,8 @@ concurrency:
 
 permissions:
   contents: read
+  # gitleaks lists a PR's commits through the API on pull_request events.
+  pull-requests: read
 
 jobs:
   lint-type:
