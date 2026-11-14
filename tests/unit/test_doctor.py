@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,7 +19,7 @@ CANARIES = {
 }
 
 
-def ok_run(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def ok_run(args: Sequence[str], env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
     # Echo the arguments back, so a token passed on the command line would show up.
     return subprocess.CompletedProcess(list(args), 0, stdout="ok " + " ".join(args), stderr="")
 
@@ -58,7 +58,7 @@ def test_never_prints_tokens(tmp_path: Path) -> None:
 
     ctx = make_ctx(tmp_path, dict(CANARIES), hf_whoami=leaky_whoami)
     checks = run_doctor(ctx)
-    out = render(checks, ctx.env)
+    out = render(checks, ctx.env, sorted(ctx.secrets))
     for value in CANARIES.values():
         assert value not in out
     assert "***" in out
@@ -99,3 +99,57 @@ def test_dotenv_never_overrides_environment(tmp_path: Path) -> None:
     assert parse_dotenv(dotenv.read_text()) == {"HF_TOKEN": "from-file", "OTHER": "1"}
     merged = merged_env({"HF_TOKEN": "from-shell"}, dotenv)
     assert merged == {"HF_TOKEN": "from-shell", "OTHER": "1"}
+
+
+@pytest.mark.phase(0)
+def test_token_from_file_is_redacted(tmp_path: Path) -> None:
+    token = f"canary-{secrets.token_hex(12)}"
+    (tmp_path / ".cache" / "huggingface").mkdir(parents=True)
+    (tmp_path / ".cache" / "huggingface" / "token").write_text(token + "\n")
+
+    def leaky_whoami(tok: str | None) -> dict[str, Any]:
+        return {"name": f"user-{tok}"}
+
+    ctx = make_ctx(tmp_path, {}, hf_whoami=leaky_whoami)
+    out = render(run_doctor(ctx), ctx.env, sorted(ctx.secrets))
+    assert token not in out
+    assert "logged in as user-***" in out
+
+
+@pytest.mark.phase(0)
+def test_kaggle_cli_sees_dotenv_credentials(tmp_path: Path) -> None:
+    seen: dict[str, str] = {}
+
+    def capture(args: Sequence[str], env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+        if "kernels" in args:
+            seen.update(env)
+        return subprocess.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+    token = f"canary-{secrets.token_hex(12)}"
+    ctx = make_ctx(tmp_path, {"KAGGLE_API_TOKEN": token}, run=capture)
+    kaggle = next(c for c in run_doctor(ctx) if c.name == "kaggle auth")
+    assert kaggle.ok
+    assert seen.get("KAGGLE_API_TOKEN") == token
+
+
+@pytest.mark.phase(0)
+def test_kaggle_timeout_is_a_failed_check(tmp_path: Path) -> None:
+    def slow(args: Sequence[str], env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+        if "kernels" in args:
+            raise subprocess.TimeoutExpired(list(args), 60)
+        return subprocess.CompletedProcess(list(args), 0, stdout="uv 0.12", stderr="")
+
+    ctx = make_ctx(tmp_path, {"KAGGLE_API_TOKEN": "x" * 10}, run=slow)
+    kaggle = next(c for c in run_doctor(ctx) if c.name == "kaggle auth")
+    assert not kaggle.ok and "timed out" in kaggle.detail
+
+
+@pytest.mark.phase(0)
+def test_dotenv_inline_comments_and_quotes() -> None:
+    text = "A=plain # note\nB=\"quoted # kept\" # note\nC=no#comment\nD='single'\n"
+    assert parse_dotenv(text) == {
+        "A": "plain",
+        "B": "quoted # kept",
+        "C": "no#comment",
+        "D": "single",
+    }
