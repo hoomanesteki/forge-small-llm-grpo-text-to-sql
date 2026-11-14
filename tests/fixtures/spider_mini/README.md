@@ -4,13 +4,15 @@ Five Spider 1.0 **training** databases, so CI can run the data, SQL and evaluati
 without the full download. None of them is a dev database. Point the code at this
 folder with `FORGE_DATA_DIR=tests/fixtures/spider_mini`.
 
-It has 60 questions, 12 per database, laid out like the full download so the same
-loader reads both:
+It has 60 questions: 20 over `flight_1`, the database the val split takes from this
+fixture (it is a val database in the full data too), and 10 over each of the other
+four, which make up the fixture's train split. It is laid out like the full download so
+the same loader reads both:
 
 | File | Contents |
 |---|---|
-| `train_spider.json` | 48 questions over `department_management`, `flight_1`, `college_1` and `dorm_1` |
-| `train_others.json` | 12 questions over `geo` |
+| `train_spider.json` | 50 questions over `department_management`, `flight_1`, `college_1` and `dorm_1` |
+| `train_others.json` | 10 questions over `geo` |
 | `dev.json` | Empty: no dev database is in the fixture |
 | `tables.json` | The five databases' entries from Spider's `tables.json` |
 | `database/<db>/<db>.sqlite` | The databases |
@@ -34,19 +36,19 @@ official evaluator's, computed from each example's parsed `sql` field.
 ## How the questions were chosen
 
 For each database, questions were taken in file order, one hardness level at a time
-(easy, medium, hard, extra, then round again), until there were 12. That gives 3 of each
-level, except `department_management`, which has only 2 hard and 2 extra questions in
-Spider and so gets 4 easy and 4 medium. The items are copied unchanged and kept in
-Spider's order, written with the same JSON layout (4-space indent for the questions,
-3 for `tables.json`).
+(easy, medium, hard, extra, then round again), until there were 20 for `flight_1` and
+10 for the others. That gives `flight_1` 5 of each level, so smoke runs on val see every
+level, and the other databases 3 easy, 3 medium, 2 hard and 2 extra. The items are
+copied unchanged and kept in Spider's order, written with the same JSON layout (4-space
+indent for the questions, 3 for `tables.json`).
 
 | File | Spider item indices (0-based) |
 |---|---|
-| `train_spider.json` | 0-9, 11, 13 (`department_management`); 343-347, 351, 359, 360, 377, 427, 428, 431 (`flight_1`); 3173-3179, 3183, 3207, 3213, 3214, 3223 (`college_1`); 5668-5670, 5672, 5673, 5676, 5692, 5693, 5698, 5699, 5702, 5712 (`dorm_1`) |
-| `train_others.json` | 0-2, 11-14, 30, 31, 41, 72, 233 (`geo`) |
+| `train_spider.json` | 0-6, 8, 11, 13 (`department_management`); 343-349, 351-353, 359, 360, 377, 378, 407, 427, 428, 431-433 (`flight_1`); 3173-3179, 3183, 3213, 3214 (`college_1`); 5668-5670, 5672, 5673, 5676, 5692, 5693, 5698, 5699 (`dorm_1`) |
+| `train_others.json` | 0, 1, 11-14, 30, 41, 72, 233 (`geo`) |
 
-Example ids come from the position in these files, so `spider-train-00012` here is
-Spider's item 343, not its item 12.
+Example ids come from the position in these files, so `spider-train-00010` here is
+Spider's item 343, not its item 10.
 
 `geo` has its tables but no rows, like every `train_others` database, so every gold
 query on it returns an empty result or a single row of 0 or NULL. It is here so tests

@@ -32,16 +32,17 @@ def test_fixture_subset_loads(spider_mini: Path) -> None:
     examples = load_raw()  # through FORGE_DATA_DIR
     assert examples == load_raw(spider_mini)
 
-    assert [e.id for e in examples] == [f"spider-train-{i:05d}" for i in range(48)] + [
-        f"spider-others-{i:05d}" for i in range(12)
+    assert [e.id for e in examples] == [f"spider-train-{i:05d}" for i in range(50)] + [
+        f"spider-others-{i:05d}" for i in range(10)
     ]
     assert {e.split for e in examples} == {"train"}
-    assert Counter(e.db_id for e in examples) == dict.fromkeys(FIXTURE_DBS, 12)
+    # flight_1, the fixture's val database, has 20 so smoke runs on val get 20 questions.
+    assert Counter(e.db_id for e in examples) == {**dict.fromkeys(FIXTURE_DBS, 10), "flight_1": 20}
     assert {e.db_id for e in examples if e.id.startswith("spider-others-")} == {"geo"}
 
     # Question and gold SQL come from Spider's JSON unchanged, in file order.
     raw = json.loads((spider_mini / "train_spider.json").read_text(encoding="utf-8"))
-    assert [(e.db_id, e.question, e.gold_sql) for e in examples[:48]] == [
+    assert [(e.db_id, e.question, e.gold_sql) for e in examples[:50]] == [
         (item["db_id"], item["question"], item["query"]) for item in raw
     ]
 
@@ -57,14 +58,16 @@ def test_hardness_assigned(spider_mini: Path) -> None:
 
     # One of each level, readable from the SQL: a single filter is easy, ORDER BY over
     # three columns medium, GROUP BY with ORDER BY and LIMIT hard, INTERSECT extra.
-    assert [examples[i].hardness for i in (0, 1, 8, 11)] == ["easy", "medium", "hard", "extra"]
-    assert "INTERSECT" in examples[11].gold_sql
+    assert [examples[i].hardness for i in (0, 1, 7, 9)] == ["easy", "medium", "hard", "extra"]
+    assert "INTERSECT" in examples[9].gold_sql
 
-    # The fixture took a round of each level at a time (see its README): 3 of each per
-    # database, except department_management, which has only 2 hard and 2 extra.
+    # The fixture took a round of each level at a time (see its README): 5 of each for
+    # flight_1, and 3, 3, 2 and 2 for the databases with 10 questions.
     by_db = {db: Counter(e.hardness for e in examples if e.db_id == db) for db in FIXTURE_DBS}
-    assert by_db.pop("department_management") == {"easy": 4, "medium": 4, "hard": 2, "extra": 2}
-    assert all(counts == dict.fromkeys(LEVELS, 3) for counts in by_db.values())
+    assert by_db.pop("flight_1") == dict.fromkeys(LEVELS, 5)
+    assert all(
+        counts == {"easy": 3, "medium": 3, "hard": 2, "extra": 2} for counts in by_db.values()
+    )
 
 
 @pytest.mark.phase(1)
