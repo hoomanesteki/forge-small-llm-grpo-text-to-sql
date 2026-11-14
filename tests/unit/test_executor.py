@@ -1,15 +1,73 @@
-"""Executor logic that needs no Spider database: error kinds and limits."""
+"""Executor logic that needs no Spider database: statement counting, error kinds, limits."""
 
 from __future__ import annotations
 
 import ast
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from forge.sql.executor import SqliteExecutor, classify_error
+from forge.sql.executor import SqliteExecutor, classify_error, statement_count
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "forge"
+
+STATEMENT_COUNTS = {
+    "": 0,
+    " \n\t": 0,
+    "-- comment": 0,
+    "/* comment */": 0,
+    "/* never closed": 0,
+    ";": 0,
+    " ; ; ": 0,
+    "SELECT 1": 1,
+    "SELECT 1;": 1,
+    ";SELECT 1": 1,
+    ";; SELECT 1 ;": 1,
+    "SELECT 1; -- done": 1,
+    "SELECT 1; /* done */ ": 1,
+    "SELECT 1; /* never closed": 1,
+    "SELECT 4/2, 3 - -1": 1,
+    "SELECT ';'": 1,
+    "SELECT 'it''s; fine'": 1,
+    'SELECT "a;b"': 1,
+    "SELECT `a;b`": 1,
+    "SELECT [a;b]": 1,
+    "SELECT 1 -- ;\n": 1,
+    "SELECT /* ; */ 1": 1,
+    "SELECT 'never closed;": 1,
+    "SELECT [never closed;": 1,
+    "SELECT 1;;": 2,
+    "SELECT 1; SELECT 2": 2,
+    "SELECT 1 -- ;\n; SELECT 2": 2,
+    "SELECT 1;\nDROP TABLE t;": 2,
+    "SELECT 1; x": 2,
+    "SELECT 1; SELECT 2; SELECT 3": 3,
+}
+
+
+@pytest.mark.phase(1)
+@pytest.mark.parametrize(("sql", "count"), STATEMENT_COUNTS.items())
+def test_statement_count(sql: str, count: int) -> None:
+    assert statement_count(sql) == count
+
+
+@pytest.mark.phase(1)
+def test_statement_count_agrees_with_sqlite3() -> None:
+    # CPython's execute refuses anything but whitespace and comments after the first
+    # statement (3.12 raises ProgrammingError, 3.11 sqlite3.Warning). Wherever it does,
+    # statement_count must see more than one, so its check is never the weaker one.
+    with closing(sqlite3.connect(":memory:")) as conn:
+        for sql, count in STATEMENT_COUNTS.items():
+            try:
+                conn.execute(sql).close()
+                refused = False
+            except (sqlite3.ProgrammingError, sqlite3.Warning) as exc:
+                refused = "one statement at a time" in str(exc)
+            except sqlite3.OperationalError:
+                refused = False  # unclosed quotes and unknown names: a single bad statement
+            assert refused == (count > 1), sql
 
 
 @pytest.mark.phase(1)

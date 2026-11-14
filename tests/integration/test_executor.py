@@ -195,6 +195,43 @@ def test_row_cap_truncates(executor: SqliteExecutor) -> None:
 
 
 @pytest.mark.phase(1)
+def test_multiple_statements_rejected(executor: SqliteExecutor) -> None:
+    for sql in (
+        "SELECT 1; SELECT 2",
+        "SELECT count(*) FROM head; DELETE FROM head",
+        "SELECT 1;\nDROP TABLE head;",
+        "SELECT 1;;",
+        "SELECT ';'; SELECT 2",
+        "SELECT 1 /* ; */; SELECT 2 -- ;",
+    ):
+        result = executor.run(DB, sql)
+        assert (result.ok, result.error_kind) == (False, "denied"), (sql, result)
+        assert result.error == "more than one statement; only a single statement may run"
+    assert executor.run(DB, "SELECT count(*) FROM head").rows == [(10,)]
+
+    # One statement, however it is dressed: semicolons in strings, names and comments,
+    # stray leading semicolons, and a trailing semicolon or comment.
+    for sql, rows in (
+        ("SELECT 1;", [(1,)]),
+        ("  SELECT 1 ;  -- done", [(1,)]),
+        ("SELECT 1; /* unterminated", [(1,)]),
+        (";SELECT 1", [(1,)]),
+        ("SELECT 'a;b', 'it''s; fine'", [("a;b", "it's; fine")]),
+        ('SELECT 1 AS [x;y], 2 AS "p;q", 3 AS `r;s`', [(1, 2, 3)]),
+        ("SELECT /* ; */ 1 -- ;\n", [(1,)]),
+    ):
+        result = executor.run(DB, sql)
+        assert (result.ok, result.rows) == (True, rows), (sql, result)
+
+
+@pytest.mark.phase(1)
+def test_empty_sql(executor: SqliteExecutor) -> None:
+    for sql in ("", "   \n\t", "-- just a comment", "/* nothing */", ";", " ; ; "):
+        result = executor.run(DB, sql)
+        assert (result.ok, result.error_kind, result.error) == (False, "empty_sql", "no SQL"), sql
+
+
+@pytest.mark.phase(1)
 def test_bad_utf8_handled(tmp_path: Path) -> None:
     # Only wta_1, a dev database, has text that isn't UTF-8, so make one.
     path = _db_file(tmp_path, "odd")
