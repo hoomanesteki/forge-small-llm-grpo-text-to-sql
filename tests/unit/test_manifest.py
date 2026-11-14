@@ -60,3 +60,24 @@ def test_manifest_records_hashes(repo: Path) -> None:
     assert m["config_hash"] == config_hash({"lr": 2e-4})
     assert m["data_manifest_hash"] == "unset"
     assert m["status"] == "running"
+
+
+@pytest.mark.phase(0)
+def test_append_only_logs_do_not_make_tree_dirty(repo: Path) -> None:
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "compute-ledger.md").write_text("| header |\n")
+    (docs / "dev-usage.md").write_text("| header |\n")
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "logs")
+    (docs / "compute-ledger.md").write_text("| header |\n| 2026-11-14 | row |\n")
+    (docs / "dev-usage.md").write_text("| header |\n| 2026-11-14 | row |\n")
+    assert not git_sha(repo).endswith("-dirty")
+
+
+@pytest.mark.phase(0)
+def test_untracked_counts_even_if_status_hides_them(repo: Path) -> None:
+    _git(repo, "config", "status.showUntrackedFiles", "no")
+    (repo / "new_module.py").write_text("x = 1\n")
+    with pytest.raises(DirtyTreeError):
+        git_sha(repo)

@@ -17,6 +17,7 @@ from typing import Any
 
 from forge.core.hashing import canonical_json, sha256_hex
 from forge.data.manifest import data_manifest_hash
+from forge.ops.paths import APPEND_ONLY_LOGS
 
 
 class DirtyTreeError(RuntimeError):
@@ -31,8 +32,11 @@ def _git(args: list[str], repo: Path | None) -> str:
 
 def git_sha(repo: Path | None = None, *, allow_dirty: bool = False) -> str:
     sha = _git(["rev-parse", "HEAD"], repo)
-    # Untracked files count: a new module that isn't committed still changes results.
-    if _git(["status", "--porcelain"], repo):
+    # Untracked files count (whatever status.showUntrackedFiles says): a new module that
+    # isn't committed still changes results. The append-only logs don't.
+    excludes = [f":(exclude){log}" for log in APPEND_ONLY_LOGS]
+    status = _git(["status", "--porcelain", "--untracked-files=all", "--", ".", *excludes], repo)
+    if status:
         if not allow_dirty:
             raise DirtyTreeError(
                 "working tree has uncommitted changes; commit first or pass --allow-dirty"
