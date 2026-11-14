@@ -5,7 +5,7 @@ description = "Post-train a small open LLM with GRPO on verifiable text-to-SQL r
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Hooman Esteki" }]
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "huggingface-hub>=0.24",
     "kaggle>=1.6",
@@ -70,7 +70,7 @@ torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 extend-exclude = ["third_party"]
 
 [tool.ruff.lint]
@@ -81,7 +81,7 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 known-first-party = ["forge"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 files = ["src/forge"]
 exclude = ["third_party/"]
 check_untyped_defs = true
