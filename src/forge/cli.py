@@ -25,5 +25,16 @@ def version() -> None:
     typer.echo(f"forge {__version__}")
 
 
+@app.command()
+def doctor() -> None:
+    """Check Python, uv, Kaggle and Hugging Face auth, the run store and free disk."""
+    from forge.ops.doctor import Context, exit_code, render, run_doctor
+
+    ctx = Context()
+    checks = run_doctor(ctx)
+    typer.echo(render(checks, ctx.env))
+    raise typer.Exit(exit_code(checks))
+
+
 if __name__ == "__main__":
     app()
