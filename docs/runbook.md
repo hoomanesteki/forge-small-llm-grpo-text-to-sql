@@ -16,9 +16,11 @@ Everything is free. Set these up once, then run `uv run forge doctor` until ever
    - Put it in `.env` at the repo root as `HF_TOKEN=...`. `.env` is git-ignored.
    - Create the **private** model repo `hoomanesteki/forge-runs`. Override the name with
      `FORGE_RUN_STORE` if needed.
-3. **Kaggle Secrets.** Pushed kernels cannot attach secrets from the CLI, so GPU jobs are
-   built to run without them and results come back through `kaggle kernels output`. If a
-   job does need `HF_TOKEN`, attach it once in the Kaggle editor under Add-ons, Secrets.
+3. **Kaggle Secrets.** In any Kaggle notebook, open Add-ons, Secrets and add `HF_TOKEN`,
+   plus `WANDB_API_KEY` if you use W&B. Kernels read them through
+   `kaggle_secrets.UserSecretsClient`. The CLI cannot attach a secret to a kernel, so attach
+   each one once in the web editor. FG-301 checks whether pushed runs can read them; if not,
+   jobs return their results through `kaggle kernels output` instead.
 4. **Weights & Biases (optional).** A free account; set `WANDB_API_KEY` in `.env` or Kaggle
    Secrets for live charts. Without it, metrics go to JSONL in the run store.
 
