@@ -24,7 +24,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-105 | Schema serializer and prompt builder | 5 | done |  |  | One `CREATE TABLE` line per table from `sqlite_master`, p2 sample rows, `fit_prompt` overflow policy, `forge data prompt-stats` |
 | FG-106 | Safe SQL executor | 5 | done |  |  | Read-only immutable URI, default-deny authorizer, deadline every 1,000 VM steps, row cap, statements counted before execution, spawn pool, `forge sql run`; every train and val gold query runs except the 3 known failures |
 | FG-107 | SQL extraction and result comparator | 3 | done |  |  | Last sql block, else last SELECT/WITH line, think blocks dropped; multiset or list rows, 6-decimal floats, column orders up to 6 columns; top-level ORDER BY by sqlglot with a regex fallback |
-| FG-108 | Official evaluator integration and agreement check | 5 | todo |  |  |  |
+| FG-108 | Official evaluator integration and agreement check | 5 | done |  |  | `official_exec_match` calls `eval_exec_match` in a worker thread, refusing empty, comment-only and denied SQL; sqlglot mutations; gold 100% on val with both checkers; agreement 99.15% on 2,000 val mutations (`docs/audit/agreement-2026-11-14.md`), all 17 misses from DISTINCT removal; ADR-0008, `scripts/smoke/phase_1.sh` |
 
 ## Phase 2: Evaluation harness (v0.2.0)
 
@@ -199,3 +199,27 @@ Work discovered along the way that is not a plan story.
 - `extract_sql` takes one line when there is no sql block, as section 3.7 says, so an unfenced query
   split over several lines loses its tail. An unclosed `<think>` (a reply cut off while thinking) is
   not dropped either. FG-204 can count both if they show up.
+- The official evaluator removes every `DISTINCT`, inside `COUNT(DISTINCT x)` too, where it becomes
+  `count(x)`. All 17 disagreements in the 2,000-item val check come from that: 14 `COUNT(DISTINCT ...)`
+  golds the evaluator matches to another column's distinct count, and 3 `SELECT DISTINCT` golds whose
+  prediction has the same distinct rows over other duplicates. The fast comparator stays as it is
+  (ADR-0008). The mutations never add or drop a `DISTINCT`, so FG-307 should watch that case on real
+  outputs, and FG-601 should look for reward gains the official metric doesn't show.
+- No disagreement in the 2,000 items came from `ORDER BY` detection. The mutations never reorder the
+  rows of a correct answer on their own, though, so the 34 golds with an `ORDER BY` only in a subquery
+  (FG-107 note above) are still the known gap there: on those, the same rows in another order match
+  for the fast comparator and not for the evaluator. FG-307's check on real outputs will show it if
+  models do that.
+- Official EX opens databases through the vendored evaluator's own read-only connections, after
+  `forge.sql.executor` has vetted the prediction for 100 ms (empty, comment-only and denied SQL is false
+  without running). The one-module rule test still covers `src/forge` only.
+- `eval_exec_match` compares on every file whose name contains `.sqlite` in the database's folder, so
+  unpacking the test-suite databases beside Spider's turns classical EX into test-suite EX (FG-508).
+- The evaluator's per-query timeout stays upstream's 60 s: it is a default argument bound when the module
+  loads, so changing it means editing vendored code. `official_exec_match` adds an overall deadline
+  (1 h by default) and stops its worker after the item it is on.
+- sqlglot reads Spider's double-quoted strings (`"France"`) as names, so `change_literal` only changes
+  numbers and single-quoted strings.
+- Timings on the laptop: `forge eval gold --split val` about 10 s, `forge eval agreement --mutations 2000`
+  about 20 s, `scripts/smoke/phase_1.sh` about 20 s. `make smoke` stays FG-207's.
+- `forge eval gold --split dev` runs gold queries only, no model, so like `prompt-stats` it is not a dev use.
