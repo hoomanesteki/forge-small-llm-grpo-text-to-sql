@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [dev, main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # gitleaks lists a PR's commits through the API on pull_request events.
+  pull-requests: read
+
+jobs:
+  lint-type:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --extra cpu
+      - run: make lint
+      - run: make type
+
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --extra cpu
+      - run: make test-unit
+
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --extra cpu
+      - run: make test-int
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+      - name: pip-audit on the locked dependencies
+        run: |
+          # torch comes from the PyTorch CPU index as X+cpu, which PyPI advisories cannot match.
+          uv export --locked --extra cpu --no-emit-project --no-dev --no-hashes --no-emit-package torch \
+            -o "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit -r "$RUNNER_TEMP/requirements.txt" --no-deps --disable-pip --progress-spinner off

@@ -167,7 +167,7 @@ venv.bak/
 .ropeproject
 
 # mkdocs/Zensical documentation
-/site
+# /site (template line removed: Forge keeps its Quarto site in site/)
 
 # mypy
 .mypy_cache/
@@ -218,3 +218,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Forge: local data, runs and build outputs. Anchored so src/forge/data/ stays tracked,
+# and without a trailing slash so they also match symlinks to storage outside the repo.
+/data
+/runs
+/cache
+*.gguf
+.env
+.env.*
+!.env.example
+kaggle.json
+.smoke-ok-*
+site/_site/
+site/.quarto/
+.DS_Store

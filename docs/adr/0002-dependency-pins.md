@@ -1,0 +1,33 @@
+# ADR-0002: Pin dependencies with uv and match the Kaggle image
+
+- Status: accepted
+- Date: 2026-11-14
+
+## Context
+
+The pipeline has to behave the same on a laptop, in CI and on a Kaggle GPU session.
+The ML stack moves fast; an unpinned install months from now would not reproduce
+today's numbers.
+
+## Decision
+
+- `uv.lock` pins every dependency. At the start of the project it resolved to the
+  latest stable releases, among them torch 2.15.0, transformers 5.23.0, trl 1.18.0,
+  peft 0.21.3, datasets 5.2.0, accelerate 1.15.0, pydantic 2.14.3, sqlglot 30.31.0
+  and huggingface-hub 2.4.0.
+- Local development uses Python 3.12 (`.python-version`). CI runs Python 3.11 and
+  3.12 so either Kaggle image version is covered.
+- On Linux, torch comes from the PyTorch CPU index so CI never downloads CUDA wheels.
+- GPU packages (unsloth, vllm, bitsandbytes) are not in the lock. They must match
+  the CUDA build of torch preinstalled on Kaggle, so FG-301 pins them in
+  `kaggle/requirements-gpu.txt`, tested on that image.
+- The llama.cpp commit used for GGUF export is pinned in FG-702 and added here.
+
+## Consequences
+
+- `uv sync --locked` fails if `pyproject.toml` and `uv.lock` drift apart, in CI too.
+- Upgrades are deliberate: bump, re-lock, run `make gate`, and note it here.
+
+## Revisit if
+
+The Kaggle image changes its Python or CUDA version.
