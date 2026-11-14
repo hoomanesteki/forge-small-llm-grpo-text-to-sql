@@ -137,5 +137,5 @@ Work discovered along the way that is not a plan story.
 - The three failing training golds are `FAILING_GOLD_IDS` in `forge.data.spider`, for FG-108.
 - The Drive source is checked against the HAL-9001 mirror's sha256 (same size and central
   directory). Nobody has downloaded the Drive file in full to confirm it.
-- Fixture ids are positions in the fixture files, not Spider's: `spider-train-00012` there is
+- Fixture ids are positions in the fixture files, not Spider's: `spider-train-00010` there is
   Spider's item 343. Its README lists the original indices.

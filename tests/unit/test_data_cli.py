@@ -53,9 +53,9 @@ def test_stats_cli_on_the_fixture(spider_mini: Path) -> None:
     assert result.exit_code == 0, result.output
     rows = _cells(result.stdout)
     assert rows[0] == ["data:", str(spider_mini)]
-    assert ["train", "60", "5", "16", "16", "14", "14"] in rows
-    assert ["department_management", "train", "12", "4", "4", "2", "2"] in rows
-    assert ["geo", "train", "12", "3", "3", "3", "3"] in rows
+    assert ["train", "60", "5", "17", "17", "13", "13"] in rows
+    assert ["flight_1", "train", "20", "5", "5", "5", "5"] in rows
+    assert ["geo", "train", "10", "3", "3", "2", "2"] in rows
     assert rows[-1][:3] == ["data", "manifest", "hash:"]
     assert len(rows[-1][3]) == 64
 
