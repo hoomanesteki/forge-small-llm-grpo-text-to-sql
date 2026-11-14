@@ -1,4 +1,4 @@
-"""``forge data stats``, ``forge data splits`` and the CLI's view of the fetch sources."""
+"""``forge data stats``, ``splits`` and ``prompt-stats``, and the CLI's spelled-out choices."""
 
 from __future__ import annotations
 
@@ -10,10 +10,14 @@ from typer.testing import CliRunner
 
 from forge import cli
 from forge.core.types import Example
+from forge.data import prompts
 from forge.data.fetch import SOURCES, SourceName
-from forge.data.spider import resolve_data_dir
-from forge.data.splits import MANIFEST_DIR, MANIFEST_FILE, SPLITS
+from forge.data.prompts import build_prompt, chat_token_counter
+from forge.data.schema import PROMPT_VERSIONS
+from forge.data.spider import load_raw, resolve_data_dir
+from forge.data.splits import MANIFEST_DIR, MANIFEST_FILE, SPLITS, split_examples
 from forge.data.stats import render_stats
+from tests.fakes import WordTokenizer
 
 
 def _example(i: int, db_id: str, split: str, hardness: str) -> Example:
@@ -136,3 +140,71 @@ def test_splits_cli_rewrites_the_committed_manifests(
 def test_cli_offers_exactly_the_fetch_sources() -> None:
     hints = get_type_hints(cli.data_fetch, include_extras=False)
     assert get_args(hints["source"]) == get_args(SourceName) == tuple(SOURCES)
+
+
+@pytest.mark.phase(1)
+def test_cli_offers_exactly_the_splits_and_prompt_versions() -> None:
+    hints = get_type_hints(cli.data_prompt_stats, include_extras=False)
+    assert get_args(hints["split"]) == SPLITS
+    assert get_args(hints["prompt_version"]) == PROMPT_VERSIONS
+
+
+@pytest.mark.phase(1)
+def test_prompt_stats_cli_on_the_fixture(
+    spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loaded: list[str] = []
+
+    def fake_load(name: str) -> WordTokenizer:
+        loaded.append(name)
+        return WordTokenizer()
+
+    monkeypatch.setattr(prompts, "load_tokenizer", fake_load)
+    args = ["data", "prompt-stats", "--tokenizer", "org/model", "--split", "val"]
+    result = CliRunner().invoke(cli.app, [*args, "--prompt-version", "p2"])
+
+    assert result.exit_code == 0, result.output
+    assert loaded == ["org/model"]
+    count = chat_token_counter(WordTokenizer())
+    val = split_examples(load_raw())["val"]
+    lengths = sorted(count(build_prompt(example, "p2")) for example in val)
+    assert len(lengths) == 20
+    rows = _cells(result.stdout)
+    assert rows[:3] == [
+        ["data:", str(spider_mini)],
+        ["split", "val,", "prompt", "p2,", "tokenizer", "org/model"],
+        [],
+    ]
+    # Nearest rank over 20 prompts: the 10th and the 19th shortest.
+    assert rows[3:] == [
+        ["prompts", "20"],
+        ["tokens", "p50", str(lengths[9])],
+        ["tokens", "p95", str(lengths[18])],
+        ["tokens", "max", str(lengths[-1])],
+        ["over", "1536", "tokens", "0"],
+        ["sample", "rows", "dropped", "0"],
+        ["columns", "dropped", "0"],
+        ["excluded", "from", "training", "0"],
+    ]
+
+
+@pytest.mark.phase(1)
+def test_prompt_stats_cli_errors(spider_mini: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def offline(name: str) -> WordTokenizer:
+        raise OSError(f"We couldn't connect to 'https://huggingface.co' to load {name}")
+
+    monkeypatch.setattr(prompts, "load_tokenizer", offline)
+    result = CliRunner().invoke(cli.app, ["data", "prompt-stats", "--tokenizer", "org/model"])
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "error: We couldn't connect" in result.stderr
+
+    # The fixture has no dev questions; that is reported before any tokenizer loads.
+    args = ["data", "prompt-stats", "--tokenizer", "org/model", "--split", "dev"]
+    result = CliRunner().invoke(cli.app, args)
+    assert result.exit_code == 1
+    assert "the dev split has no questions" in result.stderr
+
+    missing = CliRunner().invoke(cli.app, ["data", "prompt-stats"])
+    assert missing.exit_code != 0
+    assert "--tokenizer" in missing.output
