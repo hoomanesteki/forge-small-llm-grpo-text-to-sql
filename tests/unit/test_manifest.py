@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -9,11 +10,17 @@ import pytest
 from pydantic import ValidationError
 
 from forge.core.types import RunManifest
+from forge.data.manifest import data_manifest_hash
 from forge.ops.manifest import DirtyTreeError, Platform, build_manifest, config_hash, git_sha
 
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+@pytest.fixture(autouse=True)
+def _fixture_data(spider_mini: Path) -> None:
+    """build_manifest hashes the data, so give it the small committed subset."""
 
 
 @pytest.fixture
@@ -56,14 +63,15 @@ def test_config_hash_stable() -> None:
 
 
 @pytest.mark.phase(0)
-def test_manifest_records_hashes(repo: Path) -> None:
+def test_manifest_records_hashes(repo: Path, spider_mini: Path) -> None:
     m = build_manifest(
         "sft", {"lr": 2e-4}, run_id="r1", model_ref="Qwen/Qwen3-1.7B", seed=42, repo=repo
     )
     assert isinstance(m, RunManifest)
     assert m.run_id == "r1"
     assert m.config_hash == config_hash({"lr": 2e-4})
-    assert m.data_manifest_hash == "unset"
+    assert m.data_manifest_hash == data_manifest_hash(spider_mini)
+    assert re.fullmatch(r"[0-9a-f]{64}", m.data_manifest_hash)
     assert m.status == "running"
 
 
