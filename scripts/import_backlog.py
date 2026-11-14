@@ -43,6 +43,9 @@ def story_labels(story: Story, plan: Plan) -> list[str]:
         f"pts:{story.points}",
         f"type:{story.kind}",
     ]
+    # A GPU spike (FG-301) is both; the gpu label is what budget reviews filter on.
+    if story.gpu and story.kind != "gpu":
+        labels.append("type:gpu")
     if theme:
         labels.insert(1, f"theme:{theme}")
     return labels
