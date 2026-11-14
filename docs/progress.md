@@ -18,7 +18,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
 | FG-101 | Spike: data sources, licenses and official evaluator | 2 | done |  |  | Pinned HF zip, CC BY-SA 4.0, evaluator vendored read-only with a timeout, 5-db fixture |
-| FG-102 | Core types and hashing | 2 | todo |  |  |  |
+| FG-102 | Core types and hashing | 2 | done |  |  | Contracts as in 3.5, UTC-dated run ids, `build_manifest` returns a `RunManifest` |
 | FG-103 | Spider loader, checksums and fixture subset | 3 | todo |  |  |  |
 | FG-104 | Splits by database and dev guard | 3 | todo |  |  |  |
 | FG-105 | Schema serializer and prompt builder | 5 | todo |  |  |  |
@@ -115,6 +115,13 @@ Work discovered along the way that is not a plan story.
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
+- `Prompt` is frozen but not hashable, and its message dicts can still be edited in place,
+  because the contract types `messages` as a tuple of dicts. Key prompt caches by
+  `(example_id, prompt_version)` and treat messages as read-only (FG-105).
+- `RunKind` (`core/ids.py`) and `Platform` (`ops/manifest.py`) repeat the `RunManifest`
+  literals so callers get type checking; unit tests fail if they drift apart.
+- `build_manifest` refuses a naive `now`, and run ids take their date from the UTC start
+  time, so a Kaggle run and a laptop run started together get the same date.
 - CI runs on every pushed branch as well as on PRs, so a branch is checked before its PR opens.
 - The six `train_others` databases and `music_2` have no rows: their gold results are empty or a
   single 0 or NULL. Keep them out of val (FG-104) and out of GRPO (FG-505); SFT can use them.
