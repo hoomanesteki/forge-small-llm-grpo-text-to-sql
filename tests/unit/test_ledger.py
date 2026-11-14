@@ -56,3 +56,62 @@ def test_append_creates_missing_ledger(tmp_path: Path) -> None:
 def test_negative_hours_rejected(ledger: Path) -> None:
     with pytest.raises(ValueError):
         append(LedgerRow(TODAY, "kaggle", "T4", -1.0, "run-x", "bad"), ledger)
+
+
+@pytest.mark.phase(0)
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("platform", "Kaggle"),
+        ("platform", "kagle"),
+        ("hours", float("nan")),
+        ("hours", float("inf")),
+        ("cost_usd", -0.5),
+        ("run_id", "run|x"),
+        ("run_id", "  "),
+        ("gpu", "T4\nA100"),
+    ],
+)
+def test_bad_rows_rejected(ledger: Path, field: str, value: object) -> None:
+    good = {
+        "date": TODAY,
+        "platform": "kaggle",
+        "gpu": "T4",
+        "hours": 1.0,
+        "run_id": "r",
+        "purpose": "p",
+    }
+    with pytest.raises(ValueError):
+        append(LedgerRow(**{**good, field: value}), ledger)  # type: ignore[arg-type]
+    assert read_rows(ledger) == []
+
+
+@pytest.mark.phase(0)
+def test_purpose_line_breaks_are_repaired(ledger: Path) -> None:
+    append(LedgerRow(TODAY, "kaggle", "T4", 1.0, "r", "line one\r\nline two | done"), ledger)
+    assert read_rows(ledger)[0].purpose == "line one / line two / done"
+
+
+@pytest.mark.phase(0)
+def test_concurrent_appends_keep_every_row(ledger: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def write(i: int) -> None:
+        append(LedgerRow(TODAY, "kaggle", "T4", 0.25, f"run-{i}", "parallel"), ledger)
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(write, range(200)))
+    assert len(read_rows(ledger)) == 200
+
+
+@pytest.mark.phase(0)
+def test_no_repo_root_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from forge.ops.paths import RepoRootNotFound, ledger_path
+
+    monkeypatch.delenv("FORGE_ROOT", raising=False)
+    monkeypatch.delenv("FORGE_LEDGER", raising=False)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RepoRootNotFound):
+        ledger_path()
+    monkeypatch.setenv("FORGE_LEDGER", str(tmp_path / "ledger.md"))
+    assert ledger_path() == tmp_path / "ledger.md"

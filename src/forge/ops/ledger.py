@@ -7,16 +7,22 @@ toward the project's GPU total, and Modal is where cash can be spent.
 
 from __future__ import annotations
 
+import math
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
+from forge.ops.logfile import locked_append
 from forge.ops.paths import ledger_path
 
 COLUMNS = ("date", "platform", "gpu", "hours", "run_id", "purpose", "cost_usd")
+PLATFORMS = frozenset({"local-cpu", "kaggle", "colab", "modal"})
 GPU_PLATFORMS = frozenset({"kaggle", "colab", "modal"})
 QUOTA_PLATFORMS = frozenset({"kaggle"})
+# Characters that would break a markdown table row.
+_TABLE_BREAKERS = re.compile(r"[|\r\n\u2028\u2029\x85]")
 HEADER = "| " + " | ".join(COLUMNS) + " |\n|" + "---|" * len(COLUMNS) + "\n"
 
 
@@ -30,14 +36,30 @@ class LedgerRow:
     purpose: str
     cost_usd: float = 0.0
 
+    def validate(self) -> None:
+        if self.platform not in PLATFORMS:
+            raise ValueError(
+                f"unknown platform {self.platform!r}; expected one of {sorted(PLATFORMS)}"
+            )
+        for name, number in (("hours", self.hours), ("cost_usd", self.cost_usd)):
+            if not math.isfinite(number) or number < 0:
+                raise ValueError(f"{name} must be a finite, non-negative number, got {number!r}")
+        if not self.run_id.strip():
+            raise ValueError("run_id must not be empty")
+        for name, text in (("run_id", self.run_id), ("gpu", self.gpu)):
+            if _TABLE_BREAKERS.search(text):
+                raise ValueError(f"{name} must not contain '|' or line breaks: {text!r}")
+
     def to_markdown(self) -> str:
+        self.validate()
         cells = [
             self.date.isoformat(),
             self.platform,
             self.gpu or "-",
             f"{self.hours:.2f}",
             self.run_id,
-            self.purpose.replace("|", "/").replace("\n", " "),
+            # Free text is the only field we repair rather than reject.
+            re.sub(r"\s*[|\r\n\u2028\u2029\x85]+\s*", " / ", self.purpose).strip(),
             f"{self.cost_usd:.2f}",
         ]
         return "| " + " | ".join(cells) + " |"
@@ -74,16 +96,9 @@ def read_rows(path: Path | None = None) -> list[LedgerRow]:
 
 
 def append(row: LedgerRow, path: Path | None = None) -> None:
-    path = path or ledger_path()
-    if row.hours < 0 or row.cost_usd < 0:
-        raise ValueError("hours and cost must be non-negative")
-    if not path.is_file():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# Compute ledger\n\n" + HEADER, encoding="utf-8")
-    text = path.read_text(encoding="utf-8")
-    if not text.endswith("\n"):
-        text += "\n"
-    path.write_text(text + row.to_markdown() + "\n", encoding="utf-8")
+    locked_append(
+        path or ledger_path(), row.to_markdown(), preamble="# Compute ledger\n\n" + HEADER
+    )
 
 
 def has_run(run_id: str, path: Path | None = None) -> bool:
