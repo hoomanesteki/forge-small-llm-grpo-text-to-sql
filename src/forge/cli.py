@@ -34,7 +34,7 @@ def doctor() -> None:
 
     ctx = Context()
     checks = run_doctor(ctx)
-    typer.echo(render(checks, ctx.env))
+    typer.echo(render(checks, ctx.env, sorted(ctx.secrets)))
     raise typer.Exit(exit_code(checks))
 
 

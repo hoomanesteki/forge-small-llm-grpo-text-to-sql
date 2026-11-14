@@ -8,7 +8,6 @@ toward the project's GPU total, and Modal is where cash can be spent.
 from __future__ import annotations
 
 import math
-import os
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -133,7 +132,9 @@ def summary(window_days: int = 7, path: Path | None = None, today: date | None =
     today = today or date.today()
     start = today - timedelta(days=window_days - 1)
     rows = read_rows(path)
-    weekly_quota = float(os.environ.get("FORGE_WEEKLY_GPU_HOURS", "30"))
+    from forge.ops.dotenv import forge_env
+
+    weekly_quota = float(forge_env().get("FORGE_WEEKLY_GPU_HOURS", "30"))
     return Summary(
         window_days=window_days,
         quota_hours_window=sum(

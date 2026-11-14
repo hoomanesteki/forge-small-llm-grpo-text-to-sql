@@ -2,12 +2,12 @@
 
 Every check is a small function with its side effects injected, so tests can run the
 whole doctor without network access. Output goes through :func:`redact`, which masks
-the value of any environment variable that looks like a secret.
+the value of any environment variable that looks like a secret, plus any token the
+checks read from a file.
 """
 
 from __future__ import annotations
 
-import os
 import platform
 import re
 import shutil
@@ -21,7 +21,8 @@ from typing import Any
 DEFAULT_RUN_STORE = "hoomanesteki/forge-runs"
 SECRET_NAME = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD)", re.IGNORECASE)
 
-Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+# A runner gets the command and the environment to run it with.
+Runner = Callable[[Sequence[str], Mapping[str, str]], subprocess.CompletedProcess[str]]
 
 
 @dataclass(frozen=True)
@@ -34,9 +35,9 @@ class Check:
 
 
 def _default_env() -> dict[str, str]:
-    from forge.ops.dotenv import merged_env
+    from forge.ops.dotenv import forge_env
 
-    return merged_env(os.environ, Path.cwd() / ".env")
+    return forge_env()
 
 
 @dataclass
@@ -50,10 +51,20 @@ class Context:
     hf_whoami: Callable[[str | None], dict[str, Any]] | None = None
     hf_repo_info: Callable[[str, str | None], Any] | None = None
     disk_free_gb: Callable[[Path], float] | None = None
+    # Secret values found along the way that are not in env (e.g. read from a token file).
+    secrets: set[str] = field(default_factory=set)
 
 
-def _run(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(list(args), capture_output=True, text=True, timeout=60, check=False)
+def _run(args: Sequence[str], env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(args), capture_output=True, text=True, timeout=60, check=False, env=dict(env)
+    )
+
+
+def _kaggle_bin() -> str:
+    """The kaggle script next to this interpreter, so an unactivated venv still works."""
+    sibling = Path(sys.executable).parent / "kaggle"
+    return str(sibling) if sibling.is_file() else "kaggle"
 
 
 def _disk_free_gb(path: Path) -> float:
@@ -72,10 +83,11 @@ def _hf_repo_info(repo_id: str, token: str | None) -> Any:
     return HfApi(token=token).model_info(repo_id)
 
 
-def redact(text: str, env: Mapping[str, str]) -> str:
-    for name, value in env.items():
-        if SECRET_NAME.search(name) and value and len(value) >= 6:
-            text = text.replace(value, "***")
+def redact(text: str, env: Mapping[str, str], extra: Sequence[str] = ()) -> str:
+    values = [v for name, v in env.items() if SECRET_NAME.search(name)] + list(extra)
+    # Longest first, so a secret that contains another is masked whole.
+    for value in sorted({v for v in values if v and len(v) >= 6}, key=len, reverse=True):
+        text = text.replace(value, "***")
     return text
 
 
@@ -90,9 +102,11 @@ def check_python() -> Check:
 def check_uv(ctx: Context) -> Check:
     run = ctx.run or _run
     try:
-        out = run(["uv", "--version"])
+        out = run(["uv", "--version"], ctx.env)
     except FileNotFoundError:
         return Check("uv", False, "not installed", "install uv: https://docs.astral.sh/uv/")
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return Check("uv", False, f"could not run: {type(exc).__name__}", "check the uv install")
     ok = out.returncode == 0
     return Check("uv", ok, out.stdout.strip() or out.stderr.strip(), "" if ok else "reinstall uv")
 
@@ -127,12 +141,17 @@ def check_kaggle(ctx: Context) -> Check:
         return Check("kaggle auth", False, "no credentials found", KAGGLE_HINT)
     run = ctx.run or _run
     try:
-        # The cheapest authenticated call: list one of your own kernels.
-        out = run(["kaggle", "kernels", "list", "--mine", "--page-size", "1"])
+        # The cheapest authenticated call: list one of your own kernels. The merged env
+        # matters: credentials that live only in .env must reach the CLI too.
+        out = run([_kaggle_bin(), "kernels", "list", "--mine", "--page-size", "1"], ctx.env)
     except FileNotFoundError:
         return Check(
             "kaggle auth", False, f"credentials in {source}, CLI missing", "run make setup"
         )
+    except subprocess.TimeoutExpired:
+        return Check("kaggle auth", False, f"{source}: kaggle CLI timed out", "check the network")
+    except OSError as exc:
+        return Check("kaggle auth", False, f"{source}: {type(exc).__name__}", "run make setup")
     if out.returncode != 0:
         reason = (out.stderr or out.stdout).strip().splitlines()[-1:] or ["unknown error"]
         return Check("kaggle auth", False, f"{source}: {reason[0][:120]}", KAGGLE_HINT)
@@ -143,7 +162,11 @@ def _hf_token(ctx: Context) -> str | None:
     if ctx.env.get("HF_TOKEN"):
         return ctx.env["HF_TOKEN"]
     token_file = ctx.home / ".cache" / "huggingface" / "token"
-    return token_file.read_text().strip() if token_file.is_file() else None
+    if not token_file.is_file():
+        return None
+    token = token_file.read_text().strip()
+    ctx.secrets.add(token)
+    return token or None
 
 
 HF_HINT = "create a write token at huggingface.co/settings/tokens and put HF_TOKEN in .env"
@@ -202,7 +225,7 @@ def run_doctor(ctx: Context | None = None) -> list[Check]:
     ]
 
 
-def render(checks: list[Check], env: Mapping[str, str]) -> str:
+def render(checks: list[Check], env: Mapping[str, str], secrets: Sequence[str] = ()) -> str:
     width = max(len(c.name) for c in checks)
     lines = []
     for c in checks:
@@ -213,7 +236,7 @@ def render(checks: list[Check], env: Mapping[str, str]) -> str:
     failed = sum(not c.ok and c.required for c in checks)
     lines.append("")
     lines.append("all checks passed" if not failed else f"{failed} required check(s) failed")
-    return redact("\n".join(lines), env)
+    return redact("\n".join(lines), env, secrets)
 
 
 def exit_code(checks: list[Check]) -> int:
