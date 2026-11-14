@@ -36,6 +36,7 @@ Added in FG-305.
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError: forge` on macOS.** macOS can flag the editable-install `.pth`
-  file as hidden, and Python 3.12 skips hidden `.pth` files. `make setup` clears the flag;
-  to fix it by hand run `chflags nohidden .venv/lib/python*/site-packages/*.pth`.
+- **`ModuleNotFoundError: forge` on macOS.** The venv can come out with the hidden file
+  flag set, and Python 3.12 skips hidden `.pth` files, so the editable install vanishes
+  after uv re-syncs. Every make target clears the flag first, and pytest puts `src` on the
+  path itself. Before a bare `uv run forge ...`, run `make unhide` once after a sync.
