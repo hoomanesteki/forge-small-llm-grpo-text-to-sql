@@ -1,0 +1,1662 @@
+[
+    {
+        "db_id": "geo",
+        "query": "SELECT city_name FROM city WHERE population  =  ( SELECT MAX ( population ) FROM city WHERE state_name  =  \"wyoming\" ) AND state_name  =  \"wyoming\";",
+        "query_toks": [
+            "SELECT",
+            "city_name",
+            "FROM",
+            "city",
+            "WHERE",
+            "population",
+            "=",
+            "(",
+            "SELECT",
+            "MAX",
+            "(",
+            "population",
+            ")",
+            "FROM",
+            "city",
+            "WHERE",
+            "state_name",
+            "=",
+            "``",
+            "wyoming",
+            "''",
+            ")",
+            "AND",
+            "state_name",
+            "=",
+            "``",
+            "wyoming",
+            "''",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "city_name",
+            "from",
+            "city",
+            "where",
+            "population",
+            "=",
+            "(",
+            "select",
+            "max",
+            "(",
+            "population",
+            ")",
+            "from",
+            "city",
+            "where",
+            "state_name",
+            "=",
+            "value",
+            ")",
+            "and",
+            "state_name",
+            "=",
+            "value"
+        ],
+        "question": "what is the biggest city in wyoming",
+        "question_toks": [
+            "what",
+            "is",
+            "the",
+            "biggest",
+            "city",
+            "in",
+            "wyoming"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                7,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            8,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    1
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    1,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            8,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [
+                            [
+                                false,
+                                2,
+                                [
+                                    0,
+                                    [
+                                        0,
+                                        10,
+                                        false
+                                    ],
+                                    null
+                                ],
+                                "\"wyoming\"",
+                                null
+                            ]
+                        ],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ],
+                "and",
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            10,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"wyoming\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT city_name FROM city WHERE population  =  ( SELECT MAX ( population ) FROM city WHERE state_name  =  \"wyoming\" ) AND state_name  =  \"wyoming\";",
+        "query_toks": [
+            "SELECT",
+            "city_name",
+            "FROM",
+            "city",
+            "WHERE",
+            "population",
+            "=",
+            "(",
+            "SELECT",
+            "MAX",
+            "(",
+            "population",
+            ")",
+            "FROM",
+            "city",
+            "WHERE",
+            "state_name",
+            "=",
+            "``",
+            "wyoming",
+            "''",
+            ")",
+            "AND",
+            "state_name",
+            "=",
+            "``",
+            "wyoming",
+            "''",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "city_name",
+            "from",
+            "city",
+            "where",
+            "population",
+            "=",
+            "(",
+            "select",
+            "max",
+            "(",
+            "population",
+            ")",
+            "from",
+            "city",
+            "where",
+            "state_name",
+            "=",
+            "value",
+            ")",
+            "and",
+            "state_name",
+            "=",
+            "value"
+        ],
+        "question": "what wyoming city has the largest population",
+        "question_toks": [
+            "what",
+            "wyoming",
+            "city",
+            "has",
+            "the",
+            "largest",
+            "population"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                7,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            8,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    1
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    1,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            8,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [
+                            [
+                                false,
+                                2,
+                                [
+                                    0,
+                                    [
+                                        0,
+                                        10,
+                                        false
+                                    ],
+                                    null
+                                ],
+                                "\"wyoming\"",
+                                null
+                            ]
+                        ],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ],
+                "and",
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            10,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"wyoming\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT city_name FROM city WHERE population  =  ( SELECT MAX ( population ) FROM city WHERE state_name  =  \"wyoming\" ) AND state_name  =  \"wyoming\";",
+        "query_toks": [
+            "SELECT",
+            "city_name",
+            "FROM",
+            "city",
+            "WHERE",
+            "population",
+            "=",
+            "(",
+            "SELECT",
+            "MAX",
+            "(",
+            "population",
+            ")",
+            "FROM",
+            "city",
+            "WHERE",
+            "state_name",
+            "=",
+            "``",
+            "wyoming",
+            "''",
+            ")",
+            "AND",
+            "state_name",
+            "=",
+            "``",
+            "wyoming",
+            "''",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "city_name",
+            "from",
+            "city",
+            "where",
+            "population",
+            "=",
+            "(",
+            "select",
+            "max",
+            "(",
+            "population",
+            ")",
+            "from",
+            "city",
+            "where",
+            "state_name",
+            "=",
+            "value",
+            ")",
+            "and",
+            "state_name",
+            "=",
+            "value"
+        ],
+        "question": "what is the largest city in wyoming",
+        "question_toks": [
+            "what",
+            "is",
+            "the",
+            "largest",
+            "city",
+            "in",
+            "wyoming"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                7,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            8,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    1
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    1,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            8,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [
+                            [
+                                false,
+                                2,
+                                [
+                                    0,
+                                    [
+                                        0,
+                                        10,
+                                        false
+                                    ],
+                                    null
+                                ],
+                                "\"wyoming\"",
+                                null
+                            ]
+                        ],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ],
+                "and",
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            10,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"wyoming\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT river_name FROM river WHERE traverse IN ( SELECT state_name FROM city WHERE population  =  ( SELECT MAX ( population ) FROM city ) );",
+        "query_toks": [
+            "SELECT",
+            "river_name",
+            "FROM",
+            "river",
+            "WHERE",
+            "traverse",
+            "IN",
+            "(",
+            "SELECT",
+            "state_name",
+            "FROM",
+            "city",
+            "WHERE",
+            "population",
+            "=",
+            "(",
+            "SELECT",
+            "MAX",
+            "(",
+            "population",
+            ")",
+            "FROM",
+            "city",
+            ")",
+            ")",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "river_name",
+            "from",
+            "river",
+            "where",
+            "traverse",
+            "in",
+            "(",
+            "select",
+            "state_name",
+            "from",
+            "city",
+            "where",
+            "population",
+            "=",
+            "(",
+            "select",
+            "max",
+            "(",
+            "population",
+            ")",
+            "from",
+            "city",
+            ")",
+            ")"
+        ],
+        "question": "which rivers run through the state with the largest city in the us",
+        "question_toks": [
+            "which",
+            "rivers",
+            "run",
+            "through",
+            "the",
+            "state",
+            "with",
+            "the",
+            "largest",
+            "city",
+            "in",
+            "the",
+            "us"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        6
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                26,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    8,
+                    [
+                        0,
+                        [
+                            0,
+                            29,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    1
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    0,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            10,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [
+                            [
+                                false,
+                                2,
+                                [
+                                    0,
+                                    [
+                                        0,
+                                        8,
+                                        false
+                                    ],
+                                    null
+                                ],
+                                {
+                                    "from": {
+                                        "table_units": [
+                                            [
+                                                "table_unit",
+                                                1
+                                            ]
+                                        ],
+                                        "conds": []
+                                    },
+                                    "select": [
+                                        false,
+                                        [
+                                            [
+                                                1,
+                                                [
+                                                    0,
+                                                    [
+                                                        0,
+                                                        8,
+                                                        false
+                                                    ],
+                                                    null
+                                                ]
+                                            ]
+                                        ]
+                                    ],
+                                    "where": [],
+                                    "groupBy": [],
+                                    "having": [],
+                                    "orderBy": [],
+                                    "limit": null,
+                                    "intersect": null,
+                                    "union": null,
+                                    "except": null
+                                },
+                                null
+                            ]
+                        ],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT area FROM state WHERE state_name  =  \"new mexico\";",
+        "query_toks": [
+            "SELECT",
+            "area",
+            "FROM",
+            "state",
+            "WHERE",
+            "state_name",
+            "=",
+            "``",
+            "new",
+            "mexico",
+            "''",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "area",
+            "from",
+            "state",
+            "where",
+            "state_name",
+            "=",
+            "value"
+        ],
+        "question": "how big is new mexico",
+        "question_toks": [
+            "how",
+            "big",
+            "is",
+            "new",
+            "mexico"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                3,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            1,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"new mexico\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT area FROM state WHERE state_name  =  \"new mexico\";",
+        "query_toks": [
+            "SELECT",
+            "area",
+            "FROM",
+            "state",
+            "WHERE",
+            "state_name",
+            "=",
+            "``",
+            "new",
+            "mexico",
+            "''",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "area",
+            "from",
+            "state",
+            "where",
+            "state_name",
+            "=",
+            "value"
+        ],
+        "question": "what is the area of new mexico",
+        "question_toks": [
+            "what",
+            "is",
+            "the",
+            "area",
+            "of",
+            "new",
+            "mexico"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                3,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            1,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"new mexico\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT area FROM state WHERE state_name  =  \"new mexico\";",
+        "query_toks": [
+            "SELECT",
+            "area",
+            "FROM",
+            "state",
+            "WHERE",
+            "state_name",
+            "=",
+            "``",
+            "new",
+            "mexico",
+            "''",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "area",
+            "from",
+            "state",
+            "where",
+            "state_name",
+            "=",
+            "value"
+        ],
+        "question": "how large is new mexico",
+        "question_toks": [
+            "how",
+            "large",
+            "is",
+            "new",
+            "mexico"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                3,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            1,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"new mexico\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT state_name FROM state WHERE population  =  ( SELECT MIN ( population ) FROM state );",
+        "query_toks": [
+            "SELECT",
+            "state_name",
+            "FROM",
+            "state",
+            "WHERE",
+            "population",
+            "=",
+            "(",
+            "SELECT",
+            "MIN",
+            "(",
+            "population",
+            ")",
+            "FROM",
+            "state",
+            ")",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "state_name",
+            "from",
+            "state",
+            "where",
+            "population",
+            "=",
+            "(",
+            "select",
+            "min",
+            "(",
+            "population",
+            ")",
+            "from",
+            "state",
+            ")"
+        ],
+        "question": "what state has the smallest population",
+        "question_toks": [
+            "what",
+            "state",
+            "has",
+            "the",
+            "smallest",
+            "population"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                1,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            2,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    0
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    2,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            2,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT state_name FROM state WHERE population  =  ( SELECT MIN ( population ) FROM state );",
+        "query_toks": [
+            "SELECT",
+            "state_name",
+            "FROM",
+            "state",
+            "WHERE",
+            "population",
+            "=",
+            "(",
+            "SELECT",
+            "MIN",
+            "(",
+            "population",
+            ")",
+            "FROM",
+            "state",
+            ")",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "state_name",
+            "from",
+            "state",
+            "where",
+            "population",
+            "=",
+            "(",
+            "select",
+            "min",
+            "(",
+            "population",
+            ")",
+            "from",
+            "state",
+            ")"
+        ],
+        "question": "what is the least populous state",
+        "question_toks": [
+            "what",
+            "is",
+            "the",
+            "least",
+            "populous",
+            "state"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                1,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            2,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    0
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    2,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            2,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT lake_name FROM lake WHERE area  >  750 AND state_name  =  \"michigan\";",
+        "query_toks": [
+            "SELECT",
+            "lake_name",
+            "FROM",
+            "lake",
+            "WHERE",
+            "area",
+            ">",
+            "750",
+            "AND",
+            "state_name",
+            "=",
+            "``",
+            "michigan",
+            "''",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "lake_name",
+            "from",
+            "lake",
+            "where",
+            "area",
+            ">",
+            "value",
+            "and",
+            "state_name",
+            "=",
+            "value"
+        ],
+        "question": "name the major lakes in michigan",
+        "question_toks": [
+            "name",
+            "the",
+            "major",
+            "lakes",
+            "in",
+            "michigan"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        4
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                18,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            19,
+                            false
+                        ],
+                        null
+                    ],
+                    750.0,
+                    null
+                ],
+                "and",
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            21,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"michigan\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT highest_point  ,  state_name FROM highlow WHERE lowest_elevation  =  0;",
+        "query_toks": [
+            "SELECT",
+            "highest_point",
+            ",",
+            "state_name",
+            "FROM",
+            "highlow",
+            "WHERE",
+            "lowest_elevation",
+            "=",
+            "0",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "highest_point",
+            ",",
+            "state_name",
+            "from",
+            "highlow",
+            "where",
+            "lowest_elevation",
+            "=",
+            "value"
+        ],
+        "question": "what is the highest point in each state whose lowest point is sea level",
+        "question_toks": [
+            "what",
+            "is",
+            "the",
+            "highest",
+            "point",
+            "in",
+            "each",
+            "state",
+            "whose",
+            "lowest",
+            "point",
+            "is",
+            "sea",
+            "level"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        3
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                16,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                13,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            17,
+                            false
+                        ],
+                        null
+                    ],
+                    0.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "geo",
+        "query": "SELECT population FROM city WHERE city_name  =  \"seattle\" AND state_name  =  \"washington\";",
+        "query_toks": [
+            "SELECT",
+            "population",
+            "FROM",
+            "city",
+            "WHERE",
+            "city_name",
+            "=",
+            "``",
+            "seattle",
+            "''",
+            "AND",
+            "state_name",
+            "=",
+            "``",
+            "washington",
+            "''",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "population",
+            "from",
+            "city",
+            "where",
+            "city_name",
+            "=",
+            "value",
+            "and",
+            "state_name",
+            "=",
+            "value"
+        ],
+        "question": "what is the population of seattle washington",
+        "question_toks": [
+            "what",
+            "is",
+            "the",
+            "population",
+            "of",
+            "seattle",
+            "washington"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                8,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            7,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"seattle\"",
+                    null
+                ],
+                "and",
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            10,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"washington\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    }
+]
