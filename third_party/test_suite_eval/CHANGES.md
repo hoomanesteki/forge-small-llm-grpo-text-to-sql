@@ -30,8 +30,10 @@ and the notices, the code is upstream's, unused imports and globals included.
 
 - `evaluate()` and `print_scores()` in `evaluation.py` still print: they are the
   command-line report. Run it as `python -m test_suite_eval.evaluation --gold ...`
-  (the relative imports mean `python evaluation.py` no longer works). Forge calls
-  `eval_exec_match` and `Evaluator.eval_hardness` directly, and those print nothing.
+  (the relative imports mean `python evaluation.py` no longer works). It parses every
+  gold query with `get_sql`, so it needs nltk and its `punkt_tab` data, which Forge does
+  not install. Forge calls `eval_exec_match` and `Evaluator.eval_hardness` directly, and
+  those print nothing.
 - `evaluate()` replaces every `value` in the prediction with `1` before running it,
   which breaks columns named `value` (upstream issue #21). Calling `eval_exec_match`
   directly avoids it.

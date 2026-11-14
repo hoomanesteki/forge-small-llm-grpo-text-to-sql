@@ -34,3 +34,20 @@ def test_progress_lists_every_plan_story() -> None:
     assert story_ids, "no stories found in the plan"
     missing = sorted(s for s in story_ids if f"| {s} |" not in progress)
     assert not missing, f"stories missing from progress.md: {missing}"
+
+
+@pytest.mark.phase(1)
+def test_data_spike_and_dataset_adr_present() -> None:
+    spike = (ROOT / "docs/spikes/data.md").read_text()
+    for heading in (
+        "## 1. Download source",
+        "## 2. License and attribution",
+        "## 3. The official test-suite evaluator",
+        "## 4. Should `train_others` be in training?",
+    ):
+        assert heading in spike, f"data spike lacks {heading!r}"
+    # The pinned source must be recorded with its checksum.
+    assert "5ddff97bb1d421282c593e8d30ce0ce107270f4dd4a21d60eba4bf287d5956b1" in spike
+    adr = (ROOT / "docs/adr/0003-dataset.md").read_text()
+    assert adr.startswith("# ADR-0003:")
+    assert "- Status: accepted" in adr
