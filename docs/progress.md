@@ -107,6 +107,12 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 
 Work discovered along the way that is not a plan story.
 
+| ID | Title | Status | Notes |
+|---|---|---|---|
+| FG-091 | Gate 0 fixes: run log hardening | done | Locked appends, strict ledger fields, strict repo root, hashing refuses non-JSON |
+| FG-092 | Gate 0 fixes: doctor and .env | done | `six` for the Kaggle CLI, .env reaches the CLI, file tokens masked |
+| FG-093 | Gate 0 fixes: backlog labels and test checks | done | GPU spike labeled GPU (11), phase and skip marks checked, gitignore |
+
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
 - CI runs on every pushed branch as well as on PRs, so a branch is checked before its PR opens.
