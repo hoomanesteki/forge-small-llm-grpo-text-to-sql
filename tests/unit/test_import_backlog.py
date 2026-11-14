@@ -49,3 +49,14 @@ def test_dry_run_makes_no_calls() -> None:
 
     actions = import_backlog(load_plan(), run=refuse, dry_run=True)
     assert sum(a.startswith("issue ") for a in actions) == 56
+
+
+@pytest.mark.phase(0)
+def test_every_gpu_story_gets_the_gpu_label() -> None:
+    from import_backlog import story_labels
+
+    plan = load_plan()
+    gpu_labeled = [s.id for s in plan.stories if "type:gpu" in story_labels(s, plan)]
+    assert len(gpu_labeled) == 11
+    assert "FG-301" in gpu_labeled
+    assert "type:spike" in story_labels(next(s for s in plan.stories if s.id == "FG-301"), plan)
