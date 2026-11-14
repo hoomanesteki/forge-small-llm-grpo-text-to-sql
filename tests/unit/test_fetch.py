@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from forge import cli
 from forge.data import fetch as fetch_mod
 from forge.data import spider
 from forge.data.fetch import FetchError, extract, fetch
@@ -305,3 +307,38 @@ def test_download_with_the_wrong_sha256_is_deleted(
         fetch(tmp_path / "spider", source="gdrive", download_dir=download_dir)
     assert list(download_dir.iterdir()) == []
     assert not (tmp_path / "spider").exists()
+
+
+@pytest.mark.phase(1)
+def test_fetch_cli_extracts_once_and_names_bad_files(
+    tmp_path: Path,
+    pin: Callable[[str, bytes], None],
+    no_network: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _spider_zip("spider")
+    pin("hf", data)
+    zip_path = tmp_path / "spider.zip"
+    zip_path.write_bytes(data)
+    data_dir = tmp_path / "spider"
+    monkeypatch.setenv("FORGE_DATA_DIR", str(data_dir))
+    runner = CliRunner()
+
+    first = runner.invoke(cli.app, ["data", "fetch", "--from-zip", str(zip_path)])
+    assert first.exit_code == 0, first.output
+    assert f"extracted 6 files from {zip_path} into {data_dir}" in first.stdout
+    assert _files_under(data_dir) == WANTED
+
+    again = runner.invoke(cli.app, ["data", "fetch"])
+    assert again.exit_code == 0, again.output
+    assert "all 6 files match spider.sha256, nothing to do" in again.stdout
+
+    # A pinned zip whose dev.json differs from spider.sha256: the CLI names the file.
+    bad = _spider_zip("spider", {**WANTED, "dev.json": b"[]"})
+    pin("hf", bad)
+    zip_path.write_bytes(bad)
+    failed = runner.invoke(cli.app, ["data", "fetch", "--from-zip", str(zip_path), "--force"])
+    assert failed.exit_code == 1
+    assert failed.stdout == ""
+    assert "error: 1 file(s) in" in failed.stderr
+    assert "dev.json: sha256" in failed.stderr

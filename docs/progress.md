@@ -19,7 +19,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 |---|---|---|---|---|---|---|
 | FG-101 | Spike: data sources, licenses and official evaluator | 2 | done |  |  | Pinned HF zip, CC BY-SA 4.0, evaluator vendored read-only with a timeout, 5-db fixture |
 | FG-102 | Core types and hashing | 2 | done |  |  | Contracts as in 3.5, UTC-dated run ids, `build_manifest` returns a `RunManifest` |
-| FG-103 | Spider loader, checksums and fixture subset | 3 | todo |  |  |  |
+| FG-103 | Spider loader, checksums and fixture subset | 3 | done |  |  | Fetch from a pinned zip, 170 files checked against `spider.sha256`, 9,693 examples, 60-question fixture, real data hash |
 | FG-104 | Splits by database and dev guard | 3 | todo |  |  |  |
 | FG-105 | Schema serializer and prompt builder | 5 | todo |  |  |  |
 | FG-106 | Safe SQL executor | 5 | todo |  |  |  |
@@ -131,3 +131,11 @@ Work discovered along the way that is not a plan story.
   calls it from a script or a worker thread.
 - Headline test-suite EX needs `testsuitedatabases.zip` (about 1.2 GB, Google Drive) in FG-508.
 - Only `wta_1` (dev) has text that is not valid UTF-8, so FG-106 builds its own test database.
+- `data_manifest_hash()` now loads and hashes the data, so `build_manifest` needs
+  `FORGE_DATA_DIR` or `data/spider`; tests use the `spider_mini` fixture in `tests/conftest.py`.
+  The full and fixture hashes are pinned in tests, and FG-104 updates both when it adds val.
+- The three failing training golds are `FAILING_GOLD_IDS` in `forge.data.spider`, for FG-108.
+- The Drive source is checked against the HAL-9001 mirror's sha256 (same size and central
+  directory). Nobody has downloaded the Drive file in full to confirm it.
+- Fixture ids are positions in the fixture files, not Spider's: `spider-train-00012` there is
+  Spider's item 343. Its README lists the original indices.
