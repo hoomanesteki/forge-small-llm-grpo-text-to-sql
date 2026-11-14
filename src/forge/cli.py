@@ -15,7 +15,9 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-data_app = typer.Typer(help="Spider data: fetch, verify and summarize.", no_args_is_help=True)
+data_app = typer.Typer(
+    help="Spider data: fetch, verify, split and summarize.", no_args_is_help=True
+)
 app.add_typer(data_app, name="data")
 ledger_app = typer.Typer(help="The GPU compute ledger.", no_args_is_help=True)
 app.add_typer(ledger_app, name="ledger")
@@ -87,19 +89,96 @@ def data_stats() -> None:
     """Questions by split, database and hardness, and the data manifest hash."""
     from forge.data.manifest import data_manifest_hash
     from forge.data.spider import DataNotFound, load_raw, resolve_data_dir
+    from forge.data.splits import split_examples
     from forge.data.stats import render_stats
     from forge.ops.paths import RepoRootNotFound
 
     try:
         data_dir = resolve_data_dir()
-        examples = load_raw(data_dir)
+        splits = split_examples(load_raw(data_dir))
         digest = data_manifest_hash(data_dir)
     except (DataNotFound, RepoRootNotFound, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"data: {data_dir}\n")
-    typer.echo(render_stats(examples))
+    typer.echo(render_stats([example for split in splits.values() for example in split]))
     typer.echo(f"\ndata manifest hash: {digest}")
+
+
+@data_app.command("splits")
+def data_splits(
+    write: Annotated[
+        bool,
+        typer.Option(
+            "--write", help="Rewrite src/forge/data/splits/ from the full, verified download."
+        ),
+    ] = False,
+) -> None:
+    """Questions and databases per split, checked against the committed split manifests."""
+    from forge.data.spider import (
+        ChecksumMismatch,
+        DataNotFound,
+        load_checksums,
+        load_raw,
+        resolve_data_dir,
+        verify_files,
+    )
+    from forge.data.splits import (
+        MANIFEST_DIR,
+        SPLITS,
+        VAL_SEED,
+        render_manifests,
+        split_examples,
+        write_manifests,
+    )
+    from forge.ops.paths import RepoRootNotFound, repo_root
+
+    try:
+        data_dir = resolve_data_dir()
+        splits = split_examples(load_raw(data_dir))
+        if write:
+            # The committed split is the full download's: a subset must never replace it.
+            verify_files(data_dir, load_checksums())
+            out_dir = repo_root() / "src" / "forge" / "data" / "splits"
+            written = write_manifests(splits, out_dir)
+    except ChecksumMismatch as exc:
+        typer.echo(
+            f"error: --write needs the full Spider download, but {len(exc.files)} file(s) "
+            "are missing or differ from spider.sha256; run `forge data fetch` or point "
+            "FORGE_DATA_DIR at it",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    except (DataNotFound, RepoRootNotFound, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"data: {data_dir}\n")
+    typer.echo(f"{'split':<5}  {'questions':>9}  {'databases':>9}")
+    for name in SPLITS:
+        databases = {example.db_id for example in splits[name]}
+        typer.echo(f"{name:<5}  {len(splits[name]):>9}  {len(databases):>9}")
+    val_dbs = sorted({example.db_id for example in splits["val"]})
+    typer.echo(f"\nval databases (seed {VAL_SEED}): {', '.join(val_dbs)}")
+
+    if write:
+        typer.echo(f"\nwrote {', '.join(path.name for path in written)} to {out_dir}")
+        return
+    stale = [
+        name
+        for name, text in render_manifests(splits).items()
+        if not (MANIFEST_DIR / name).is_file()
+        or (MANIFEST_DIR / name).read_bytes() != text.encode()
+    ]
+    if stale:
+        typer.echo(
+            f"error: {', '.join(stale)} differ from this split; the committed manifests hold "
+            "the full download's split, so point FORGE_DATA_DIR at it, or rewrite them with "
+            "--write if the split rule changed",
+            err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo("\nmatches the committed split manifests")
 
 
 @ledger_app.command("add")
