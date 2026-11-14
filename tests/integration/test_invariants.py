@@ -3,6 +3,7 @@
 I1: no ``db_id`` is in more than one split, and training code raises on val or dev.
 I2: running any SQL leaves every database file byte-identical, and non-SELECT statements
 are denied.
+I5: the fast comparator agrees with the official evaluator on at least 98% of predictions.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ from forge.data.splits import (
     split_examples,
     val_databases,
 )
+from forge.eval.agreement import AGREEMENT_TARGET, agreement_mutations, agreement_rate, score
+from forge.eval.mutations import CHANGES
 from forge.sql.executor import SqliteExecutor
 
 
@@ -204,3 +207,25 @@ def test_i2_db_files_unchanged(
 
     assert _file_hashes(spider_mini / "database") == before
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.phase(1)
+def test_i5_fast_vs_official_agreement(spider_mini: Path) -> None:
+    # On mutations of every fixture gold query for now; FG-307 adds stored model outputs.
+    scores = score(agreement_mutations(load_raw(), 300, seed=0))
+
+    disagreements = [(s.mutation.example_id, s.mutation.pred_sql) for s in scores if not s.agree]
+    assert agreement_rate(scores) >= AGREEMENT_TARGET, disagreements
+    assert {s.mutation.kind for s in scores} == {"unchanged", *CHANGES}
+    # Both verdicts are common, so a checker that always says no couldn't pass.
+    assert 0.25 < sum(s.official for s in scores) / len(scores) < 0.75
+    assert all(s.fast and s.official for s in scores if s.mutation.kind == "unchanged")
+
+
+@pytest.mark.phase(1)
+@pytest.mark.requires_full_data
+def test_i5_agreement_on_full_val() -> None:
+    # The measurement behind docs/audit/agreement-*.md and ADR-0008.
+    scores = score(agreement_mutations(load_val(), 2000, seed=0))
+
+    assert agreement_rate(scores) >= AGREEMENT_TARGET
