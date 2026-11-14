@@ -10,12 +10,16 @@ file, and its authorizer is default-deny: only ``SQLITE_SELECT``, ``SQLITE_READ`
 from a progress handler, a row cap, and one statement per call. Each failure comes back
 as an ``ExecResult`` with an ``ErrorKind``:
 
-- ``denied``: the authorizer refused the statement, there was more than one statement
-  (``sqlite3`` refuses a second one before running the first), or the statement returns
-  no columns, so it isn't a query. A write that names a missing table fails with
-  ``no_such_table`` before the authorizer is asked.
+- ``denied``: the authorizer refused the statement, there was more than one statement,
+  or the statement returns no columns, so it isn't a query. Statements are counted here
+  before SQLite sees them. ``SELECT 1;`` and trailing comments are one statement; a stray
+  ``;`` after the first statement makes two, as it does for ``sqlite3``. A ``CREATE
+  TRIGGER`` body counts as several, which changes nothing because a trigger is a write.
+  A write that names a missing table fails with ``no_such_table`` before the authorizer
+  is asked.
 - ``timeout``: the deadline passed while the query ran or its rows were fetched.
 - ``syntax``, ``no_such_table``, ``no_such_column``: from SQLite's error message.
+- ``empty_sql``: nothing but whitespace, comments and semicolons.
 - ``other``: any other error, such as an unknown function or a ``?`` placeholder.
 """
 
@@ -41,12 +45,30 @@ ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
 )
 
+MULTIPLE_STATEMENTS = "more than one statement; only a single statement may run"
 NOT_A_QUERY = "not a query; only statements that return rows may run"
+EMPTY_SQL = "no SQL"
+
+# How sqlite3 sees a string of SQL: whitespace and comments (``gap``), statement ends,
+# and everything else, with quoted strings and names kept whole so a ``;`` inside them
+# doesn't end anything. SQLite runs an unclosed block comment to the end of the input,
+# and an unclosed quote is an error SQLite reports itself, so both run to the end here.
+# Whitespace is the five characters sqlite3 skips between statements.
+_LEXEME = re.compile(
+    r"""
+    (?P<gap>[ \t\n\f\r]+|--[^\n]*|/\*.*?(?:\*/|\Z))
+    |(?P<end>;)
+    |(?P<text>'(?:[^']|'')*'?|"(?:[^"]|"")*"?|`(?:[^`]|``)*`?|\[[^\]]*\]?
+        |[^ \t\n\f\r;'"`\[/-]+|[/-])
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 
 # Whole-message patterns, so a name quoted inside a message can't change its kind.
 _ERROR_KINDS: tuple[tuple[re.Pattern[str], ErrorKind], ...] = (
     (re.compile(r"not authorized|authorization denied"), "denied"),
-    # sqlite3 refuses a second statement before it runs the first.
+    # sqlite3's own refusal of a second statement, should one ever get past
+    # statement_count.
     (re.compile(r"You can only execute one statement at a time\."), "denied"),
     (re.compile(r"no such table: .*", re.DOTALL), "no_such_table"),
     (re.compile(r"no such column: .*", re.DOTALL), "no_such_column"),
@@ -88,6 +110,30 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def statement_count(sql: str) -> int:
+    """How many statements ``sqlite3`` would find in ``sql``: 0 when there is nothing to run.
+
+    Semicolons before the first statement are skipped, as SQLite skips them. After the
+    first statement only whitespace and comments may follow, so a stray ``;`` there
+    counts as a statement of its own.
+    """
+    count = 0
+    in_statement = False
+    for match in _LEXEME.finditer(sql):
+        kind = match.lastgroup
+        if kind == "gap":
+            continue
+        if kind == "end":
+            if in_statement:
+                in_statement = False
+            elif count:
+                count += 1
+        elif not in_statement:
+            count += 1
+            in_statement = True
+    return count
+
+
 def classify_error(message: str) -> ErrorKind:
     """The ``ErrorKind`` of a SQLite error message, ``other`` when no pattern fits."""
     for pattern, kind in _ERROR_KINDS:
@@ -120,6 +166,14 @@ class SqliteExecutor:
         _check_limits(timeout_ms, max_rows)
         conn = self._connection(db_id)
         start = time.perf_counter()
+        statements = statement_count(sql)
+        if statements == 0:
+            return ExecResult(ok=False, error=EMPTY_SQL, error_kind="empty_sql", ms=_ms(start))
+        if statements > 1:
+            return ExecResult(
+                ok=False, error=MULTIPLE_STATEMENTS, error_kind="denied", ms=_ms(start)
+            )
+
         deadline = start + timeout_ms / 1000
         timed_out = False
 
