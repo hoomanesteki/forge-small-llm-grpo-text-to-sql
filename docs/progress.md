@@ -11,7 +11,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-003 | Docs skeleton and contributor rules | 2 | done |  |  |  |
 | FG-004 | Backlog import and traceability scripts | 5 | done |  |  |  |
 | FG-005 | Accounts runbook and `forge doctor` | 3 | done |  |  |  |
-| FG-006 | Compute ledger, dev-usage log and manifest builder | 2 | todo |  |  |  |
+| FG-006 | Compute ledger, dev-usage log and manifest builder | 2 | done |  |  |  |
 
 ## Phase 1: Data and SQL environment (v0.1.0)
 
@@ -108,4 +108,5 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 Work discovered along the way that is not a plan story.
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
+- `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
 - CI runs on every pushed branch as well as on PRs, so a branch is checked before its PR opens.
