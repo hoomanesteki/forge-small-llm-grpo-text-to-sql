@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from forge.ops.logfile import locked_append
 from forge.ops.paths import dev_usage_path
 
 MAX_DEV_USES = 6
@@ -19,16 +20,18 @@ class DevBudgetExceeded(RuntimeError):
     pass
 
 
-def read_uses(path: Path | None = None) -> list[tuple[str, str, str]]:
-    path = path or dev_usage_path()
-    if not path.is_file():
-        return []
+def _parse(text: str) -> list[tuple[str, str, str]]:
     uses = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if line.startswith("| 2"):
             d, run_id, reason = (c.strip() for c in line.strip().strip("|").split("|", 2))
             uses.append((d, run_id, reason))
     return uses
+
+
+def read_uses(path: Path | None = None) -> list[tuple[str, str, str]]:
+    path = path or dev_usage_path()
+    return _parse(path.read_text(encoding="utf-8")) if path.is_file() else []
 
 
 def count_dev_uses(path: Path | None = None) -> int:
@@ -43,17 +46,21 @@ def log_dev_use(
         raise ValueError("a dev evaluation needs a non-empty reason")
     if not run_id.strip():
         raise ValueError("a dev evaluation needs a run id")
-    path = path or dev_usage_path()
-    used = count_dev_uses(path)
-    if used >= MAX_DEV_USES:
-        raise DevBudgetExceeded(f"dev split already used {used} of {MAX_DEV_USES} times")
-    if not path.is_file():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# Dev split usage\n\n" + HEADER, encoding="utf-8")
-    text = path.read_text(encoding="utf-8")
-    if not text.endswith("\n"):
-        text += "\n"
+    clean_id = " ".join(run_id.split())
+    if "|" in clean_id:
+        raise ValueError(f"run_id must not contain '|': {run_id!r}")
+    clean_reason = " ".join(reason.replace("|", "/").split())
     day = (today or date.today()).isoformat()
-    clean = reason.strip().replace("|", "/").replace("\n", " ")
-    path.write_text(text + f"| {day} | {run_id} | {clean} |\n", encoding="utf-8")
-    return used + 1
+
+    def within_budget(before: str) -> None:
+        used = len(_parse(before))
+        if used >= MAX_DEV_USES:
+            raise DevBudgetExceeded(f"dev split already used {used} of {MAX_DEV_USES} times")
+
+    before = locked_append(
+        path or dev_usage_path(),
+        f"| {day} | {clean_id} | {clean_reason} |",
+        preamble="# Dev split usage\n\n" + HEADER,
+        check=within_budget,
+    )
+    return len(_parse(before)) + 1
