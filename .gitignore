@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Forge: local data, runs and build outputs (anchored so src/forge/data/ stays tracked)
+/data/
+/runs/
+/cache/
+*.gguf
+.env
+kaggle.json
+.smoke-ok-*
+site/_site/
+site/.quarto/
+.DS_Store
