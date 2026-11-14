@@ -1,4 +1,4 @@
-"""Rules for SQLite access that need no Spider database."""
+"""Executor logic that needs no Spider database: error kinds and limits."""
 
 from __future__ import annotations
 
@@ -7,7 +7,43 @@ from pathlib import Path
 
 import pytest
 
+from forge.sql.executor import SqliteExecutor, classify_error
+
 SRC = Path(__file__).resolve().parents[2] / "src" / "forge"
+
+
+@pytest.mark.phase(1)
+def test_classify_error() -> None:
+    cases = {
+        "not authorized": "denied",
+        "authorization denied": "denied",
+        "You can only execute one statement at a time.": "denied",
+        "no such table: main.flight": "no_such_table",
+        "no such column: t.name": "no_such_column",
+        'near "SELEC": syntax error': "syntax",
+        'unrecognized token: "\'abc"': "syntax",
+        "incomplete input": "syntax",
+        # A name inside the message can't change its kind.
+        "no such column: not authorized": "no_such_column",
+        'near "no such table: x": syntax error': "syntax",
+        "no such table: no such column: x": "no_such_table",
+        # Timeouts come from the executor's own deadline, never from a message.
+        "interrupted": "other",
+        "no such function: median": "other",
+        "ambiguous column name: id": "other",
+        "": "other",
+    }
+    for message, kind in cases.items():
+        assert classify_error(message) == kind, message
+
+
+@pytest.mark.phase(1)
+def test_limits_must_be_positive(tmp_path: Path) -> None:
+    executor = SqliteExecutor(tmp_path)
+    with pytest.raises(ValueError, match="timeout_ms must be positive"):
+        executor.run("any", "SELECT 1", timeout_ms=0)
+    with pytest.raises(ValueError, match="max_rows must be zero or more"):
+        executor.run("any", "SELECT 1", max_rows=-1)
 
 
 @pytest.mark.phase(1)
