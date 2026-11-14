@@ -21,6 +21,11 @@ data_app = typer.Typer(
 app.add_typer(data_app, name="data")
 ledger_app = typer.Typer(help="The GPU compute ledger.", no_args_is_help=True)
 app.add_typer(ledger_app, name="ledger")
+sql_app = typer.Typer(
+    help="Run SQL the way evaluation and rewards do: read-only, one statement, with limits.",
+    no_args_is_help=True,
+)
+app.add_typer(sql_app, name="sql")
 
 
 @app.callback()
@@ -229,6 +234,47 @@ def data_prompt_stats(
     typer.echo(f"data: {data_dir}")
     typer.echo(f"split {split}, prompt {prompt_version}, tokenizer {tokenizer}\n")
     typer.echo(render_prompt_stats(prompt_stats(fitted, max_tokens=MAX_PROMPT_TOKENS)))
+
+
+@sql_app.command("run")
+def sql_run(
+    sql: Annotated[str, typer.Argument(help="One SQL statement.")],
+    db: Annotated[str, typer.Option("--db", help="Spider database id, such as concert_singer.")],
+    timeout_ms: Annotated[int, typer.Option(min=1, help="Stop the query after this long.")] = 2000,
+    max_rows: Annotated[int, typer.Option(min=0, help="Return at most this many rows.")] = 10_000,
+) -> None:
+    """Run SQL on a database in FORGE_DATA_DIR and print the result; exit 1 if it fails."""
+    from forge.data.spider import DataNotFound
+    from forge.ops.paths import RepoRootNotFound
+    from forge.sql.executor import SqliteExecutor
+
+    try:
+        with SqliteExecutor() as executor:
+            result = executor.run(db, sql, timeout_ms=timeout_ms, max_rows=max_rows)
+    except (DataNotFound, RepoRootNotFound) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    timing = f"({result.ms:.1f} ms)"
+    if not result.ok:
+        typer.echo(f"{result.error_kind}: {result.error} {timing}")
+        raise typer.Exit(1)
+    rows = result.rows or []
+    if result.columns:
+        typer.echo(" | ".join(result.columns))
+    for row in rows:
+        typer.echo(" | ".join(map(_sql_value, row)))
+    summary = f"{len(rows)} row{'' if len(rows) == 1 else 's'}"
+    if result.truncated:
+        summary += f", truncated at --max-rows {max_rows}"
+    typer.echo(f"{summary} {timing}")
+
+
+def _sql_value(value: object) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bytes):
+        return f"X'{value.hex()}'"
+    return str(value)
 
 
 @ledger_app.command("add")

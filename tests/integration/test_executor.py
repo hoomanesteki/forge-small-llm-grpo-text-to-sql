@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from forge import cli
 from forge.data.spider import FAILING_GOLD_IDS, DataNotFound, load_raw
 from forge.sql import executor as executor_module
 from forge.sql.executor import DEFAULT_MAX_ROWS, SqlExecutor, SqliteExecutor, connect_readonly
@@ -295,6 +297,18 @@ def test_errors_classified(executor: SqliteExecutor) -> None:
         result = executor.run(DB, sql)
         assert (result.ok, result.error_kind) == (False, kind), (sql, result)
         assert result.error
+
+
+@pytest.mark.phase(1)
+@pytest.mark.requires_full_data
+def test_demo_delete_is_denied_on_full_data() -> None:
+    # The Phase 1 demo command, on the full download.
+    result = CliRunner().invoke(
+        cli.app, ["sql", "run", "--db", "concert_singer", "DELETE FROM singer"]
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout.startswith("denied: ")
 
 
 @pytest.mark.phase(1)

@@ -22,7 +22,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-103 | Spider loader, checksums and fixture subset | 3 | done |  |  | Fetch from a pinned zip, 170 files checked against `spider.sha256`, 9,693 examples, 60-question fixture, real data hash |
 | FG-104 | Splits by database and dev guard | 3 | done |  |  | val is 15 of 146 train dbs (872 questions) by hashed `db_id`, committed id manifests, `assert_train_only`, `load_dev` logs each use, ADR-0004 |
 | FG-105 | Schema serializer and prompt builder | 5 | done |  |  | One `CREATE TABLE` line per table from `sqlite_master`, p2 sample rows, `fit_prompt` overflow policy, `forge data prompt-stats` |
-| FG-106 | Safe SQL executor | 5 | todo |  |  |  |
+| FG-106 | Safe SQL executor | 5 | done |  |  | Read-only immutable URI, default-deny authorizer, deadline every 1,000 VM steps, row cap, statements counted before execution, spawn pool, `forge sql run`; every train and val gold query runs except the 3 known failures |
 | FG-107 | SQL extraction and result comparator | 3 | todo |  |  |  |
 | FG-108 | Official evaluator integration and agreement check | 5 | todo |  |  |  |
 
@@ -165,3 +165,25 @@ Work discovered along the way that is not a plan story.
 - An excluded example keeps its shortest prompt in `FittedPrompt.prompt` and stays in the eval
   denominator. FG-202 decides whether eval sends that prompt or the full one.
 - `prompt-stats` reads dev questions and schemas without logging a dev use: it runs no model.
+- SQLite runs `DROP TABLE|INDEX|VIEW|TRIGGER IF EXISTS` on a missing object as a no-op without
+  asking the authorizer, so it would come back ok with no rows and match an empty gold result.
+  The executor reports any statement without result columns as `denied`.
+- A write that names a missing table fails with `no_such_table` before the authorizer is asked,
+  so `denied` is not the only error a non-SELECT statement can get. FG-501's `non_select` guard
+  should look at the SQL (sqlglot), not only at `error_kind`.
+- Eight gold queries return more than the 10,000-row cap: baseball_1 train 03661-03664 (18,228
+  and 16,049 rows), flight_4 val 06877-06878 (10,507) and wta_1 dev 00455-00456 (20,662). Their
+  results come back truncated, so FG-107 has to decide how a truncated result compares, or
+  FG-202/FG-503 run gold with a higher cap. Found by running gold SQL only, so not a dev use.
+- The slowest gold query (baseball_1, `spider-train-03657`) takes 1.2 s on the laptop against the
+  2 s default timeout. On a slower Kaggle CPU with busy workers it could time out, so the FG-503
+  gold cache should run gold with a longer timeout.
+- `run_many` starts a spawn pool per call (about a second of start-up), and a script that calls it
+  needs `if __name__ == "__main__":`. FG-503 may want one long-lived pool; FG-303's Kaggle entry
+  needs the guard.
+- `SQLITE_FUNCTION` allows `randomblob` and `zeroblob`, which can allocate up to SQLite's 1 GB
+  length limit in one VM step, before the deadline is checked. If reward workers run short of
+  memory, lower `SQLITE_LIMIT_LENGTH` in `connect_readonly` (FG-503).
+- The vendored evaluator still opens its own connections (read-only in `exec_eval`, read-write in
+  `get_schema` and `isValidSQL`). The one-module rule test covers `src/forge` only; FG-108 decides
+  how official EX opens databases.

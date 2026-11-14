@@ -11,7 +11,7 @@ Forge post-trains a small LLM with GRPO on text-to-SQL, on free GPUs. The plan i
 | `make check` | Lint, types, unit and integration tests |
 | `make smoke` | Full pipeline on CPU with a tiny model (must pass before any GPU job) |
 | `make gate PHASE=N` | What a phase gate runs |
-| `uv run forge --help` | CLI: data, eval, train, kaggle, runs, ledger, report, export |
+| `uv run forge --help` | CLI: data, sql, eval, train, kaggle, runs, ledger, report, export |
 
 ## Rules
 
