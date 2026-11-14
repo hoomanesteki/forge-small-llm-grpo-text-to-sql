@@ -24,7 +24,7 @@ LEVELS = ("easy", "medium", "hard", "extra")
 
 # data_manifest_hash of the full download. It changes only if the files, the ids or
 # the hash recipe change, and any of those means runs before and after aren't comparable.
-FULL_DATA_MANIFEST_HASH = "72538a25ac5b5889b79d49fdaea65249b3ae1c13cff88b49ee979e8a6b81534e"
+FULL_DATA_MANIFEST_HASH = "e10958d3b7a9490c15623285275d2840fbce551c32432fc62c0ad440cb06651e"
 
 
 @pytest.mark.phase(1)

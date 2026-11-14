@@ -26,7 +26,7 @@ DATA_DIR_ENV = "FORGE_DATA_DIR"
 
 # Question files in load order, with the split and id prefix of their examples. Ids
 # number each file's items from 0 in file order, so they never change between runs.
-# FG-104 carves val out of train by database.
+# Val is carved out of train by database later, in forge.data.splits.
 QUESTION_FILES: tuple[tuple[str, Split, str], ...] = (
     ("train_spider.json", "train", "spider-train"),
     ("train_others.json", "train", "spider-others"),
@@ -39,6 +39,11 @@ TABLES_FILE = "tables.json"
 # before INTERSECT. The official evaluator asserts that the gold runs, so FG-108 skips
 # them.
 FAILING_GOLD_IDS = frozenset({"spider-train-03153", "spider-train-04513", "spider-train-04514"})
+
+# Training databases whose tables hold no rows (FG-101 spike): the six train_others
+# databases and music_2. Every gold result on them is empty or a single 0 or NULL, so
+# execution accuracy there says nothing, and val never takes them (ADR-0004).
+ROWLESS_DBS = frozenset({"academic", "geo", "imdb", "music_2", "restaurants", "scholar", "yelp"})
 
 # The full download's files and their sha256, in ``sha256sum`` format, so
 # ``shasum -a 256 -c`` run inside the data directory checks them too.
