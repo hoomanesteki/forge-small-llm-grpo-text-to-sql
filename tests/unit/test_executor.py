@@ -102,6 +102,8 @@ def test_limits_must_be_positive(tmp_path: Path) -> None:
         executor.run("any", "SELECT 1", timeout_ms=0)
     with pytest.raises(ValueError, match="max_rows must be zero or more"):
         executor.run("any", "SELECT 1", max_rows=-1)
+    with pytest.raises(ValueError, match="workers must be at least 1"):
+        executor.run_many([("any", "SELECT 1")], workers=0)
 
 
 @pytest.mark.phase(1)

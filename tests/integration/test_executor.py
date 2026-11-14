@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -11,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from forge.data.spider import DataNotFound
+from forge.data.spider import FAILING_GOLD_IDS, DataNotFound, load_raw
 from forge.sql import executor as executor_module
 from forge.sql.executor import DEFAULT_MAX_ROWS, SqlExecutor, SqliteExecutor, connect_readonly
 
@@ -155,6 +156,31 @@ def test_connect_readonly_guards_on_two_layers(spider_mini: Path, tmp_path: Path
 
 
 @pytest.mark.phase(1)
+def test_run_many_keeps_order_across_workers(executor: SqliteExecutor) -> None:
+    items = [
+        (DB, "SELECT count(*) FROM department"),
+        ("flight_1", "SELECT count(*) FROM aircraft"),
+        (DB, "DELETE FROM head"),
+        (DB, RUNAWAY),
+        ("dorm_1", "SELECT 1; SELECT 2"),
+        (DB, _counting(30)),
+    ] * 4
+    inline = executor.run_many(items, workers=1, timeout_ms=100, max_rows=20)
+    pooled = executor.run_many(items, workers=2, timeout_ms=100, max_rows=20)
+
+    def outcome(result: Any) -> tuple[Any, ...]:
+        return (result.ok, result.error_kind, result.columns, result.rows, result.truncated)
+
+    assert [outcome(r) for r in pooled] == [outcome(r) for r in inline]
+    assert [r.error_kind for r in inline[:6]] == [None, None, "denied", "timeout", "denied", None]
+    assert inline[5].truncated
+
+    # A worker's error reaches the caller rather than becoming a result.
+    with pytest.raises(DataNotFound, match="no_such_db"):
+        executor.run_many([(DB, "SELECT 1"), ("no_such_db", "SELECT 1")], workers=2)
+
+
+@pytest.mark.phase(1)
 def test_timeout(executor: SqliteExecutor) -> None:
     started = time.perf_counter()
     result = executor.run(DB, RUNAWAY, timeout_ms=300)
@@ -269,3 +295,18 @@ def test_errors_classified(executor: SqliteExecutor) -> None:
         result = executor.run(DB, sql)
         assert (result.ok, result.error_kind) == (False, kind), (sql, result)
         assert result.error
+
+
+@pytest.mark.phase(1)
+@pytest.mark.requires_full_data
+def test_every_training_gold_query_runs() -> None:
+    # The allowlist and the statement count must refuse nothing Spider's authors wrote.
+    # Train and val only: dev stays out of tests.
+    examples = [example for example in load_raw() if example.split == "train"]
+    items = [(example.db_id, example.gold_sql) for example in examples]
+    with SqliteExecutor() as executor:
+        # A generous timeout: this checks what runs, not how fast (the slowest takes ~1 s).
+        results = executor.run_many(items, workers=min(4, os.cpu_count() or 1), timeout_ms=20_000)
+
+    failed = {e.id: r.error for e, r in zip(examples, results, strict=True) if not r.ok}
+    assert set(failed) == FAILING_GOLD_IDS, failed
