@@ -12,6 +12,8 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+ledger_app = typer.Typer(help="The GPU compute ledger.", no_args_is_help=True)
+app.add_typer(ledger_app, name="ledger")
 
 
 @app.callback()
@@ -34,6 +36,34 @@ def doctor() -> None:
     checks = run_doctor(ctx)
     typer.echo(render(checks, ctx.env))
     raise typer.Exit(exit_code(checks))
+
+
+@ledger_app.command("add")
+def ledger_add(
+    platform: str = typer.Option(..., help="kaggle, colab or modal"),
+    hours: float = typer.Option(..., help="wall-clock GPU hours"),
+    run_id: str = typer.Option(..., "--run-id"),
+    purpose: str = typer.Option(...),
+    gpu: str = typer.Option("T4"),
+    cost: float = typer.Option(0.0, help="cash spent in USD"),
+    on: str = typer.Option("", help="session date, YYYY-MM-DD (default today)"),
+) -> None:
+    """Add a row by hand, for sessions the CLI didn't launch (for example Colab)."""
+    from datetime import date
+
+    from forge.ops.ledger import LedgerRow, append
+
+    day = date.fromisoformat(on) if on else date.today()
+    append(LedgerRow(day, platform, gpu, hours, run_id, purpose, cost))
+    typer.echo(f"added {hours:.2f} h on {platform} for {run_id}")
+
+
+@ledger_app.command("summary")
+def ledger_summary(days: int = typer.Option(7, help="quota window in days")) -> None:
+    """Hours this week against the Kaggle quota, total GPU hours and cash spent."""
+    from forge.ops.ledger import summary
+
+    typer.echo(summary(window_days=days).render())
 
 
 if __name__ == "__main__":
