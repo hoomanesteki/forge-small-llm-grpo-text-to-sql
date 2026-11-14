@@ -1,0 +1,1379 @@
+[
+   {
+      "column_names": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "student id"
+         ],
+         [
+            0,
+            "last name"
+         ],
+         [
+            0,
+            "first name"
+         ],
+         [
+            0,
+            "age"
+         ],
+         [
+            0,
+            "sex"
+         ],
+         [
+            0,
+            "major"
+         ],
+         [
+            0,
+            "advisor"
+         ],
+         [
+            0,
+            "city code"
+         ],
+         [
+            1,
+            "dorm id"
+         ],
+         [
+            1,
+            "dorm name"
+         ],
+         [
+            1,
+            "student capacity"
+         ],
+         [
+            1,
+            "gender"
+         ],
+         [
+            2,
+            "amenity id"
+         ],
+         [
+            2,
+            "amenity name"
+         ],
+         [
+            3,
+            "dorm id"
+         ],
+         [
+            3,
+            "amenity id"
+         ],
+         [
+            4,
+            "student id"
+         ],
+         [
+            4,
+            "dorm id"
+         ],
+         [
+            4,
+            "room number"
+         ]
+      ],
+      "column_names_original": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "StuID"
+         ],
+         [
+            0,
+            "LName"
+         ],
+         [
+            0,
+            "Fname"
+         ],
+         [
+            0,
+            "Age"
+         ],
+         [
+            0,
+            "Sex"
+         ],
+         [
+            0,
+            "Major"
+         ],
+         [
+            0,
+            "Advisor"
+         ],
+         [
+            0,
+            "city_code"
+         ],
+         [
+            1,
+            "dormid"
+         ],
+         [
+            1,
+            "dorm_name"
+         ],
+         [
+            1,
+            "student_capacity"
+         ],
+         [
+            1,
+            "gender"
+         ],
+         [
+            2,
+            "amenid"
+         ],
+         [
+            2,
+            "amenity_name"
+         ],
+         [
+            3,
+            "dormid"
+         ],
+         [
+            3,
+            "amenid"
+         ],
+         [
+            4,
+            "stuid"
+         ],
+         [
+            4,
+            "dormid"
+         ],
+         [
+            4,
+            "room_number"
+         ]
+      ],
+      "column_types": [
+         "text",
+         "number",
+         "text",
+         "text",
+         "number",
+         "text",
+         "number",
+         "number",
+         "text",
+         "number",
+         "text",
+         "number",
+         "text",
+         "number",
+         "text",
+         "number",
+         "number",
+         "number",
+         "number",
+         "number"
+      ],
+      "db_id": "dorm_1",
+      "foreign_keys": [
+         [
+            16,
+            13
+         ],
+         [
+            15,
+            9
+         ],
+         [
+            18,
+            9
+         ],
+         [
+            17,
+            1
+         ]
+      ],
+      "primary_keys": [
+         1
+      ],
+      "table_names": [
+         "student",
+         "dorm",
+         "dorm amenity",
+         "has amenity",
+         "lives in"
+      ],
+      "table_names_original": [
+         "Student",
+         "Dorm",
+         "Dorm_amenity",
+         "Has_amenity",
+         "Lives_in"
+      ]
+   },
+   {
+      "column_names": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "flight number"
+         ],
+         [
+            0,
+            "origin"
+         ],
+         [
+            0,
+            "destination"
+         ],
+         [
+            0,
+            "distance"
+         ],
+         [
+            0,
+            "departure date"
+         ],
+         [
+            0,
+            "arrival date"
+         ],
+         [
+            0,
+            "price"
+         ],
+         [
+            0,
+            "airline id"
+         ],
+         [
+            1,
+            "airline id"
+         ],
+         [
+            1,
+            "name"
+         ],
+         [
+            1,
+            "distance"
+         ],
+         [
+            2,
+            "employee id"
+         ],
+         [
+            2,
+            "name"
+         ],
+         [
+            2,
+            "salary"
+         ],
+         [
+            3,
+            "employee id"
+         ],
+         [
+            3,
+            "airline id"
+         ]
+      ],
+      "column_names_original": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "flno"
+         ],
+         [
+            0,
+            "origin"
+         ],
+         [
+            0,
+            "destination"
+         ],
+         [
+            0,
+            "distance"
+         ],
+         [
+            0,
+            "departure_date"
+         ],
+         [
+            0,
+            "arrival_date"
+         ],
+         [
+            0,
+            "price"
+         ],
+         [
+            0,
+            "aid"
+         ],
+         [
+            1,
+            "aid"
+         ],
+         [
+            1,
+            "name"
+         ],
+         [
+            1,
+            "distance"
+         ],
+         [
+            2,
+            "eid"
+         ],
+         [
+            2,
+            "name"
+         ],
+         [
+            2,
+            "salary"
+         ],
+         [
+            3,
+            "eid"
+         ],
+         [
+            3,
+            "aid"
+         ]
+      ],
+      "column_types": [
+         "text",
+         "number",
+         "text",
+         "text",
+         "number",
+         "time",
+         "time",
+         "number",
+         "number",
+         "number",
+         "text",
+         "number",
+         "number",
+         "text",
+         "number",
+         "number",
+         "number"
+      ],
+      "db_id": "flight_1",
+      "foreign_keys": [
+         [
+            8,
+            9
+         ],
+         [
+            16,
+            9
+         ],
+         [
+            15,
+            12
+         ]
+      ],
+      "primary_keys": [
+         1,
+         9,
+         12,
+         15
+      ],
+      "table_names": [
+         "flight",
+         "aircraft",
+         "employee",
+         "certificate"
+      ],
+      "table_names_original": [
+         "flight",
+         "aircraft",
+         "employee",
+         "certificate"
+      ]
+   },
+   {
+      "column_names": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "class code"
+         ],
+         [
+            0,
+            "course code"
+         ],
+         [
+            0,
+            "class section"
+         ],
+         [
+            0,
+            "class time"
+         ],
+         [
+            0,
+            "class room"
+         ],
+         [
+            0,
+            "professor employee number"
+         ],
+         [
+            1,
+            "course code"
+         ],
+         [
+            1,
+            "department code"
+         ],
+         [
+            1,
+            "course description"
+         ],
+         [
+            1,
+            "course credit"
+         ],
+         [
+            2,
+            "department code"
+         ],
+         [
+            2,
+            "department name"
+         ],
+         [
+            2,
+            "school code"
+         ],
+         [
+            2,
+            "employee number"
+         ],
+         [
+            2,
+            "department address"
+         ],
+         [
+            2,
+            "department extension"
+         ],
+         [
+            3,
+            "employee number"
+         ],
+         [
+            3,
+            "employee last name"
+         ],
+         [
+            3,
+            "employee first name"
+         ],
+         [
+            3,
+            "employee initial"
+         ],
+         [
+            3,
+            "employee job code"
+         ],
+         [
+            3,
+            "employee hire date"
+         ],
+         [
+            3,
+            "employee date of birth"
+         ],
+         [
+            4,
+            "class code"
+         ],
+         [
+            4,
+            "student number"
+         ],
+         [
+            4,
+            "enroll grade"
+         ],
+         [
+            5,
+            "employee number"
+         ],
+         [
+            5,
+            "department code"
+         ],
+         [
+            5,
+            "professor office"
+         ],
+         [
+            5,
+            "professor extension"
+         ],
+         [
+            5,
+            "professor high degree"
+         ],
+         [
+            6,
+            "student num"
+         ],
+         [
+            6,
+            "student last name"
+         ],
+         [
+            6,
+            "student first name"
+         ],
+         [
+            6,
+            "student init"
+         ],
+         [
+            6,
+            "student date of birth"
+         ],
+         [
+            6,
+            "student class hours took"
+         ],
+         [
+            6,
+            "student class"
+         ],
+         [
+            6,
+            "student gpa"
+         ],
+         [
+            6,
+            "student transfer"
+         ],
+         [
+            6,
+            "department code"
+         ],
+         [
+            6,
+            "student phone"
+         ],
+         [
+            6,
+            "professor number"
+         ]
+      ],
+      "column_names_original": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "CLASS_CODE"
+         ],
+         [
+            0,
+            "CRS_CODE"
+         ],
+         [
+            0,
+            "CLASS_SECTION"
+         ],
+         [
+            0,
+            "CLASS_TIME"
+         ],
+         [
+            0,
+            "CLASS_ROOM"
+         ],
+         [
+            0,
+            "PROF_NUM"
+         ],
+         [
+            1,
+            "CRS_CODE"
+         ],
+         [
+            1,
+            "DEPT_CODE"
+         ],
+         [
+            1,
+            "CRS_DESCRIPTION"
+         ],
+         [
+            1,
+            "CRS_CREDIT"
+         ],
+         [
+            2,
+            "DEPT_CODE"
+         ],
+         [
+            2,
+            "DEPT_NAME"
+         ],
+         [
+            2,
+            "SCHOOL_CODE"
+         ],
+         [
+            2,
+            "EMP_NUM"
+         ],
+         [
+            2,
+            "DEPT_ADDRESS"
+         ],
+         [
+            2,
+            "DEPT_EXTENSION"
+         ],
+         [
+            3,
+            "EMP_NUM"
+         ],
+         [
+            3,
+            "EMP_LNAME"
+         ],
+         [
+            3,
+            "EMP_FNAME"
+         ],
+         [
+            3,
+            "EMP_INITIAL"
+         ],
+         [
+            3,
+            "EMP_JOBCODE"
+         ],
+         [
+            3,
+            "EMP_HIREDATE"
+         ],
+         [
+            3,
+            "EMP_DOB"
+         ],
+         [
+            4,
+            "CLASS_CODE"
+         ],
+         [
+            4,
+            "STU_NUM"
+         ],
+         [
+            4,
+            "ENROLL_GRADE"
+         ],
+         [
+            5,
+            "EMP_NUM"
+         ],
+         [
+            5,
+            "DEPT_CODE"
+         ],
+         [
+            5,
+            "PROF_OFFICE"
+         ],
+         [
+            5,
+            "PROF_EXTENSION"
+         ],
+         [
+            5,
+            "PROF_HIGH_DEGREE"
+         ],
+         [
+            6,
+            "STU_NUM"
+         ],
+         [
+            6,
+            "STU_LNAME"
+         ],
+         [
+            6,
+            "STU_FNAME"
+         ],
+         [
+            6,
+            "STU_INIT"
+         ],
+         [
+            6,
+            "STU_DOB"
+         ],
+         [
+            6,
+            "STU_HRS"
+         ],
+         [
+            6,
+            "STU_CLASS"
+         ],
+         [
+            6,
+            "STU_GPA"
+         ],
+         [
+            6,
+            "STU_TRANSFER"
+         ],
+         [
+            6,
+            "DEPT_CODE"
+         ],
+         [
+            6,
+            "STU_PHONE"
+         ],
+         [
+            6,
+            "PROF_NUM"
+         ]
+      ],
+      "column_types": [
+         "text",
+         "text",
+         "text",
+         "text",
+         "text",
+         "text",
+         "number",
+         "text",
+         "text",
+         "text",
+         "number",
+         "text",
+         "text",
+         "text",
+         "number",
+         "text",
+         "text",
+         "number",
+         "text",
+         "text",
+         "text",
+         "text",
+         "time",
+         "time",
+         "text",
+         "number",
+         "text",
+         "number",
+         "text",
+         "text",
+         "text",
+         "text",
+         "number",
+         "text",
+         "text",
+         "text",
+         "time",
+         "number",
+         "text",
+         "number",
+         "number",
+         "text",
+         "text",
+         "number"
+      ],
+      "db_id": "college_1",
+      "foreign_keys": [
+         [
+            6,
+            17
+         ],
+         [
+            2,
+            7
+         ],
+         [
+            8,
+            11
+         ],
+         [
+            14,
+            17
+         ],
+         [
+            25,
+            32
+         ],
+         [
+            24,
+            1
+         ],
+         [
+            28,
+            11
+         ],
+         [
+            27,
+            17
+         ],
+         [
+            41,
+            11
+         ]
+      ],
+      "primary_keys": [
+         1,
+         7,
+         11,
+         17,
+         32
+      ],
+      "table_names": [
+         "class",
+         "course",
+         "department",
+         "employee",
+         "enroll",
+         "professor",
+         "student"
+      ],
+      "table_names_original": [
+         "CLASS",
+         "COURSE",
+         "DEPARTMENT",
+         "EMPLOYEE",
+         "ENROLL",
+         "PROFESSOR",
+         "STUDENT"
+      ]
+   },
+   {
+      "column_names": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "state name"
+         ],
+         [
+            0,
+            "population"
+         ],
+         [
+            0,
+            "area"
+         ],
+         [
+            0,
+            "country name"
+         ],
+         [
+            0,
+            "capital"
+         ],
+         [
+            0,
+            "density"
+         ],
+         [
+            1,
+            "city name"
+         ],
+         [
+            1,
+            "population"
+         ],
+         [
+            1,
+            "country name"
+         ],
+         [
+            1,
+            "state name"
+         ],
+         [
+            2,
+            "state name"
+         ],
+         [
+            2,
+            "border"
+         ],
+         [
+            3,
+            "state name"
+         ],
+         [
+            3,
+            "highest elevation"
+         ],
+         [
+            3,
+            "lowest point"
+         ],
+         [
+            3,
+            "highest point"
+         ],
+         [
+            3,
+            "lowest elevation"
+         ],
+         [
+            4,
+            "lake name"
+         ],
+         [
+            4,
+            "area"
+         ],
+         [
+            4,
+            "country name"
+         ],
+         [
+            4,
+            "state name"
+         ],
+         [
+            5,
+            "mountain name"
+         ],
+         [
+            5,
+            "mountain altitude"
+         ],
+         [
+            5,
+            "country name"
+         ],
+         [
+            5,
+            "state name"
+         ],
+         [
+            6,
+            "river name"
+         ],
+         [
+            6,
+            "length"
+         ],
+         [
+            6,
+            "country name"
+         ],
+         [
+            6,
+            "traverse"
+         ]
+      ],
+      "column_names_original": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "state_name"
+         ],
+         [
+            0,
+            "population"
+         ],
+         [
+            0,
+            "area"
+         ],
+         [
+            0,
+            "country_name"
+         ],
+         [
+            0,
+            "capital"
+         ],
+         [
+            0,
+            "density"
+         ],
+         [
+            1,
+            "city_name"
+         ],
+         [
+            1,
+            "population"
+         ],
+         [
+            1,
+            "country_name"
+         ],
+         [
+            1,
+            "state_name"
+         ],
+         [
+            2,
+            "state_name"
+         ],
+         [
+            2,
+            "border"
+         ],
+         [
+            3,
+            "state_name"
+         ],
+         [
+            3,
+            "highest_elevation"
+         ],
+         [
+            3,
+            "lowest_point"
+         ],
+         [
+            3,
+            "highest_point"
+         ],
+         [
+            3,
+            "lowest_elevation"
+         ],
+         [
+            4,
+            "lake_name"
+         ],
+         [
+            4,
+            "area"
+         ],
+         [
+            4,
+            "country_name"
+         ],
+         [
+            4,
+            "state_name"
+         ],
+         [
+            5,
+            "mountain_name"
+         ],
+         [
+            5,
+            "mountain_altitude"
+         ],
+         [
+            5,
+            "country_name"
+         ],
+         [
+            5,
+            "state_name"
+         ],
+         [
+            6,
+            "river_name"
+         ],
+         [
+            6,
+            "length"
+         ],
+         [
+            6,
+            "country_name"
+         ],
+         [
+            6,
+            "traverse"
+         ]
+      ],
+      "column_types": [
+         "text",
+         "text",
+         "number",
+         "number",
+         "text",
+         "text",
+         "number",
+         "text",
+         "number",
+         "text",
+         "text",
+         "text",
+         "text",
+         "text",
+         "text",
+         "text",
+         "text",
+         "text",
+         "text",
+         "number",
+         "text",
+         "text",
+         "text",
+         "number",
+         "text",
+         "text",
+         "text",
+         "number",
+         "text",
+         "text"
+      ],
+      "db_id": "geo",
+      "foreign_keys": [
+         [
+            10,
+            1
+         ],
+         [
+            12,
+            1
+         ],
+         [
+            11,
+            1
+         ],
+         [
+            13,
+            1
+         ],
+         [
+            25,
+            1
+         ],
+         [
+            29,
+            1
+         ]
+      ],
+      "primary_keys": [
+         1,
+         7,
+         12,
+         13,
+         22,
+         26
+      ],
+      "table_names": [
+         "state",
+         "city",
+         "border info",
+         "highlow",
+         "lake",
+         "mountain",
+         "river"
+      ],
+      "table_names_original": [
+         "state",
+         "city",
+         "border_info",
+         "highlow",
+         "lake",
+         "mountain",
+         "river"
+      ]
+   },
+   {
+      "column_names": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "department id"
+         ],
+         [
+            0,
+            "name"
+         ],
+         [
+            0,
+            "creation"
+         ],
+         [
+            0,
+            "ranking"
+         ],
+         [
+            0,
+            "budget in billions"
+         ],
+         [
+            0,
+            "num employees"
+         ],
+         [
+            1,
+            "head id"
+         ],
+         [
+            1,
+            "name"
+         ],
+         [
+            1,
+            "born state"
+         ],
+         [
+            1,
+            "age"
+         ],
+         [
+            2,
+            "department id"
+         ],
+         [
+            2,
+            "head id"
+         ],
+         [
+            2,
+            "temporary acting"
+         ]
+      ],
+      "column_names_original": [
+         [
+            -1,
+            "*"
+         ],
+         [
+            0,
+            "Department_ID"
+         ],
+         [
+            0,
+            "Name"
+         ],
+         [
+            0,
+            "Creation"
+         ],
+         [
+            0,
+            "Ranking"
+         ],
+         [
+            0,
+            "Budget_in_Billions"
+         ],
+         [
+            0,
+            "Num_Employees"
+         ],
+         [
+            1,
+            "head_ID"
+         ],
+         [
+            1,
+            "name"
+         ],
+         [
+            1,
+            "born_state"
+         ],
+         [
+            1,
+            "age"
+         ],
+         [
+            2,
+            "department_ID"
+         ],
+         [
+            2,
+            "head_ID"
+         ],
+         [
+            2,
+            "temporary_acting"
+         ]
+      ],
+      "column_types": [
+         "text",
+         "number",
+         "text",
+         "text",
+         "number",
+         "number",
+         "number",
+         "number",
+         "text",
+         "text",
+         "number",
+         "number",
+         "number",
+         "text"
+      ],
+      "db_id": "department_management",
+      "foreign_keys": [
+         [
+            12,
+            7
+         ],
+         [
+            11,
+            1
+         ]
+      ],
+      "primary_keys": [
+         1,
+         7,
+         11
+      ],
+      "table_names": [
+         "department",
+         "head",
+         "management"
+      ],
+      "table_names_original": [
+         "department",
+         "head",
+         "management"
+      ]
+   }
+]
