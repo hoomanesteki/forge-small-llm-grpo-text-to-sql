@@ -21,7 +21,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-102 | Core types and hashing | 2 | done |  |  | Contracts as in 3.5, UTC-dated run ids, `build_manifest` returns a `RunManifest` |
 | FG-103 | Spider loader, checksums and fixture subset | 3 | done |  |  | Fetch from a pinned zip, 170 files checked against `spider.sha256`, 9,693 examples, 60-question fixture, real data hash |
 | FG-104 | Splits by database and dev guard | 3 | done |  |  | val is 15 of 146 train dbs (872 questions) by hashed `db_id`, committed id manifests, `assert_train_only`, `load_dev` logs each use, ADR-0004 |
-| FG-105 | Schema serializer and prompt builder | 5 | todo |  |  |  |
+| FG-105 | Schema serializer and prompt builder | 5 | done |  |  | One `CREATE TABLE` line per table from `sqlite_master`, p2 sample rows, `fit_prompt` overflow policy, `forge data prompt-stats` |
 | FG-106 | Safe SQL executor | 5 | todo |  |  |  |
 | FG-107 | SQL extraction and result comparator | 3 | todo |  |  |  |
 | FG-108 | Official evaluator integration and agreement check | 5 | todo |  |  |  |
@@ -151,3 +151,17 @@ Work discovered along the way that is not a plan story.
   (full data) before training will load.
 - Training code should call `assert_train_only()` on the dataset it builds (FG-401,
   FG-505). The static check also bans `load_raw` and `split_examples` under `forge/train/`.
+- Seven Spider tables (in bike_1, college_2, flight_4, icfp_1 and sakila_1) have `--` comments
+  in their DDL. Schema text drops comments, since on one line they would swallow the rest of the
+  statement; flight_4's column notes go with them. All 873 normalized statements rebuild their
+  tables with the same columns, keys and foreign keys (`tests/integration/test_schema.py`).
+- `forge.data.schema` opens databases read-only through its own small helper. FG-106 moves it into
+  `forge.sql.executor`.
+- `forge data prompt-stats` with the Qwen2.5 tokenizer (from `trl-internal-testing/tiny-Qwen2ForCausalLM-2.5`):
+  at p1 only baseball_1's 82 train questions pass 1,536 tokens, and dropping columns brings them
+  to 530 or fewer. At p2, 1,215 train, 246 val and 160 dev prompts pass 1,536 and lose their
+  sample rows, so for those p2 is p1. FG-307 should keep that in mind when comparing the two.
+  Nothing is excluded from training at either version.
+- An excluded example keeps its shortest prompt in `FittedPrompt.prompt` and stays in the eval
+  denominator. FG-202 decides whether eval sends that prompt or the full one.
+- `prompt-stats` reads dev questions and schemas without logging a dev use: it runs no model.

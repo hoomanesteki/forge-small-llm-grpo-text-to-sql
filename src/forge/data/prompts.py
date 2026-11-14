@@ -58,6 +58,19 @@ class FittedPrompt:
     exclude_from_training: bool = False  # still over the limit; evaluation keeps it
 
 
+@dataclass(frozen=True)
+class PromptStats:
+    prompts: int
+    p50: int
+    p95: int
+    max: int
+    max_tokens: int
+    over_limit: int  # prompts longer than max_tokens before the policy
+    dropped_samples: int
+    dropped_columns: int
+    excluded: int  # left out of training
+
+
 def build_prompt(example: Example, version: str, *, data_dir: Path | None = None) -> Prompt:
     """The full prompt for this example: its database's whole schema, then the question."""
     return _prompt(example, version, schema_text(example.db_id, version, data_dir=data_dir))
@@ -155,6 +168,53 @@ def chat_token_counter(tokenizer: ChatTokenizer) -> TokenCounter:
     return count
 
 
+def load_tokenizer(name: str) -> ChatTokenizer:
+    """A model's tokenizer, from the Hub or a local directory."""
+    try:
+        from transformers import AutoTokenizer
+    except ImportError as exc:
+        raise ImportError(
+            "counting tokens needs transformers, from the cpu extra: run `make setup`"
+        ) from exc
+    tokenizer: ChatTokenizer = AutoTokenizer.from_pretrained(name)
+    return tokenizer
+
+
+def prompt_stats(
+    fitted: Sequence[FittedPrompt], *, max_tokens: int = MAX_PROMPT_TOKENS
+) -> PromptStats:
+    """Full prompt lengths at p50, p95 and max, and what the overflow policy did."""
+    if not fitted:
+        raise ValueError("no prompts to summarize")
+    lengths = sorted(item.full_tokens for item in fitted)
+    return PromptStats(
+        prompts=len(lengths),
+        p50=_percentile(lengths, 50),
+        p95=_percentile(lengths, 95),
+        max=lengths[-1],
+        max_tokens=max_tokens,
+        over_limit=sum(length > max_tokens for length in lengths),
+        dropped_samples=sum(item.dropped_samples for item in fitted),
+        dropped_columns=sum(bool(item.dropped_columns) for item in fitted),
+        excluded=sum(item.exclude_from_training for item in fitted),
+    )
+
+
+def render_prompt_stats(stats: PromptStats) -> str:
+    rows = [
+        ("prompts", stats.prompts),
+        ("tokens p50", stats.p50),
+        ("tokens p95", stats.p95),
+        ("tokens max", stats.max),
+        (f"over {stats.max_tokens} tokens", stats.over_limit),
+        ("  sample rows dropped", stats.dropped_samples),
+        ("  columns dropped", stats.dropped_columns),
+        ("  excluded from training", stats.excluded),
+    ]
+    width = max(len(label) for label, _ in rows)
+    return "\n".join(f"{label:<{width}}  {value:>6}" for label, value in rows)
+
+
 def _prompt(example: Example, version: str, schema: str) -> Prompt:
     # One line, like the schema's statements: a few Spider questions have double spaces.
     question = " ".join(example.question.split())
@@ -170,3 +230,9 @@ def _prompt(example: Example, version: str, schema: str) -> Prompt:
 
 def _unnamed_tables(question: str, tables: Sequence[Table]) -> tuple[str, ...]:
     return tuple(table.name for table in tables if not names_table(question, table.name))
+
+
+def _percentile(ordered: Sequence[int], q: int) -> int:
+    """Nearest rank: the smallest value with at least q% of the values at or below it."""
+    # Integer ceiling of q% of the count, so no float rounding picks the wrong rank.
+    return ordered[(q * len(ordered) + 99) // 100 - 1]

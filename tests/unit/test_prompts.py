@@ -8,13 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from forge.core.types import Example
+from forge.core.types import Example, Prompt
 from forge.data.prompts import (
     FittedPrompt,
+    PromptStats,
     build_prompt,
     chat_token_counter,
     fit_prompt,
     names_table,
+    prompt_stats,
+    render_prompt_stats,
 )
 from forge.data.schema import schema_tables, schema_text
 from forge.data.spider import load_raw
@@ -207,3 +210,50 @@ def test_names_table_is_a_case_insensitive_substring_match() -> None:
     assert names_table("count the border_info rows", "Border_Info")
     assert not names_table("what is the longest river", "lake")
     assert not names_table("departments managed by a secretary", "management")
+
+
+@pytest.mark.phase(1)
+def test_prompt_stats_counts_lengths_and_overflow() -> None:
+    prompt = Prompt(example_id="x", messages=(), prompt_version="p2")
+    # Lengths 100 to 2000; the five from 1600 up are over the limit. Of those, every one
+    # lost its sample rows, three lost columns too, and one is still too long.
+    fitted = [
+        FittedPrompt(
+            prompt=prompt,
+            tokens=min(length, 1500),
+            full_tokens=length,
+            dropped_samples=length > 1536,
+            dropped_columns=("t",) if length >= 1800 else (),
+            exclude_from_training=length == 2000,
+        )
+        for length in range(2000, 0, -100)
+    ]
+
+    stats = prompt_stats(fitted, max_tokens=1536)
+
+    assert stats == PromptStats(
+        prompts=20,
+        p50=1000,
+        p95=1900,
+        max=2000,
+        max_tokens=1536,
+        over_limit=5,
+        dropped_samples=5,
+        dropped_columns=3,
+        excluded=1,
+    )
+    assert [line.rsplit(maxsplit=1) for line in render_prompt_stats(stats).splitlines()] == [
+        ["prompts", "20"],
+        ["tokens p50", "1000"],
+        ["tokens p95", "1900"],
+        ["tokens max", "2000"],
+        ["over 1536 tokens", "5"],
+        ["  sample rows dropped", "5"],
+        ["  columns dropped", "3"],
+        ["  excluded from training", "1"],
+    ]
+    # Nearest rank picks a length that occurs, even for a single prompt.
+    one = prompt_stats(fitted[:1])
+    assert (one.p50, one.p95, one.max) == (2000, 2000, 2000)
+    with pytest.raises(ValueError, match="no prompts"):
+        prompt_stats([])

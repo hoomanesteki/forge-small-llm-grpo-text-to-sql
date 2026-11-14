@@ -45,9 +45,11 @@ def doctor() -> None:
     raise typer.Exit(exit_code(checks))
 
 
-# Spelled out rather than imported from forge.data.fetch, which would load the data
-# stack for every command; a unit test keeps the two in step.
+# Spelled out rather than imported from forge.data, which would load the data stack
+# for every command; a unit test keeps each one in step with its source.
 DataSource = Literal["hf", "mirror", "gdrive"]
+SplitName = Literal["train", "val", "dev"]
+PromptVersionName = Literal["p1", "p2"]
 
 
 @data_app.command("fetch")
@@ -179,6 +181,54 @@ def data_splits(
         )
         raise typer.Exit(1)
     typer.echo("\nmatches the committed split manifests")
+
+
+@data_app.command("prompt-stats")
+def data_prompt_stats(
+    tokenizer: Annotated[
+        str,
+        typer.Option(
+            help="Model on the Hub, or a local directory, whose tokenizer and chat template "
+            "count the tokens."
+        ),
+    ],
+    split: Annotated[SplitName, typer.Option(help="Whose prompts to measure.")] = "train",
+    prompt_version: Annotated[
+        PromptVersionName, typer.Option(help="p1, or p2 with sample rows.")
+    ] = "p1",
+) -> None:
+    """Prompt token lengths, and what the overflow policy does past 1,536 tokens.
+
+    It reads questions and schemas only, so it is not a dev evaluation.
+    """
+    from forge.data.prompts import (
+        MAX_PROMPT_TOKENS,
+        chat_token_counter,
+        fit_prompt,
+        load_tokenizer,
+        prompt_stats,
+        render_prompt_stats,
+    )
+    from forge.data.spider import load_raw, resolve_data_dir
+    from forge.data.splits import split_examples
+    from forge.ops.paths import RepoRootNotFound
+
+    try:
+        data_dir = resolve_data_dir()
+        examples = split_examples(load_raw(data_dir))[split]
+        if not examples:
+            raise ValueError(f"the {split} split has no questions in {data_dir}")
+        count = chat_token_counter(load_tokenizer(tokenizer))
+        fitted = [
+            fit_prompt(example, prompt_version, count, data_dir=data_dir) for example in examples
+        ]
+    # OSError covers missing data (DataNotFound) and a tokenizer that can't be loaded.
+    except (ImportError, OSError, RepoRootNotFound, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"data: {data_dir}")
+    typer.echo(f"split {split}, prompt {prompt_version}, tokenizer {tokenizer}\n")
+    typer.echo(render_prompt_stats(prompt_stats(fitted, max_tokens=MAX_PROMPT_TOKENS)))
 
 
 @ledger_app.command("add")
