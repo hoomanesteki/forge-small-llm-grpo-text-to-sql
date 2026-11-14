@@ -9,7 +9,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-001 | Repo scaffold and toolchain | 3 | done |  |  |  |
 | FG-002 | CI and branch protection | 3 | done |  |  |  |
 | FG-003 | Docs skeleton and contributor rules | 2 | done |  |  |  |
-| FG-004 | Backlog import and traceability scripts | 5 | todo |  |  |  |
+| FG-004 | Backlog import and traceability scripts | 5 | done |  |  |  |
 | FG-005 | Accounts runbook and `forge doctor` | 3 | todo |  |  |  |
 | FG-006 | Compute ledger, dev-usage log and manifest builder | 2 | todo |  |  |  |
 

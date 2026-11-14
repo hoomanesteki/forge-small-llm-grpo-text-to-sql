@@ -44,4 +44,5 @@ check: lint type test-unit test-int ## Everything a PR must pass locally
 
 gate: lint type ## What a phase gate runs: make gate PHASE=N
 	$(call allow_empty,$(PYTEST) --phase $(PHASE) tests/unit tests/integration)
+	$(UV) run python scripts/check_story_tests.py --phase $(PHASE)
 	$(MAKE) smoke
