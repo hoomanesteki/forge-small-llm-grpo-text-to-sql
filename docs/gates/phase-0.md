@@ -1,6 +1,6 @@
 # Phase 0 gate: Foundation
 
-Decision: PASS for code and CI; release steps pending GitHub CLI login
+Decision: PASS
 Date: 2026-11-14
 Commit: aaa87a9 (top of the Phase 0 stack, after fix stories FG-091 to FG-093)
 
@@ -65,11 +65,21 @@ run) raised 35 findings. After de-duplication, every confirmed one was fixed:
 | FG-092 | `six` added so the locked Kaggle CLI starts. `.env` is read from the repo root and passed to the Kaggle CLI. Tokens read from files are masked. Timeouts become failed checks. Inline comments in `.env` parse. Runbook Kaggle Secrets step restored. |
 | FG-093 | GPU spikes get the `type:gpu` label (11 in total). The traceability check rejects planned tests that are skipped, xfail or marked for a later phase. `.env.*` ignored; the template's `/site` line no longer hides the Quarto site. |
 
-## Open items (not code)
+## GitHub evidence
 
-- `gh` is not authenticated on the development machine, so these wait on a login: branch
-  protection (`scripts/protect_branches.sh`), the issue import, PRs into `dev`, the release
-  PR to `main` and the `v0.0.1` tag.
+- Stories landed as PRs #60 to #69 into `dev`, each squash-merged after 12 green checks
+  (push and pull_request runs of lint-type, unit and integration on 3.11 and 3.12, and security).
+- Backlog imported: issues #1 to #56 for the plan stories (11 labeled `type:gpu`) and #57 to #59
+  for the fix stories, with milestones Phase 0 to Phase 8. A second import created 0 issues.
+- Branch protection (`scripts/protect_branches.sh`): `dev` requires lint-type, unit (3.11, 3.12),
+  integration (3.11, 3.12) and security, with strict status checks, linear history and admins
+  included. `main` requires the same checks without strict mode.
+- FG-002 AC2: a throwaway branch with an unused import failed `lint-type` at `make lint`
+  (run 43641864023), and the branch was deleted.
+- FG-002 AC3: a direct push to `dev` was rejected with `GH006: Protected branch update failed`.
+
+## Open items
+
 - `forge doctor` needs the Kaggle and Hugging Face accounts before Phase 3.
 
 ## Budget table update (section 3.8), if estimates changed
