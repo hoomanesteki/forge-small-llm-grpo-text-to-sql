@@ -17,7 +17,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
-| FG-101 | Spike: data sources, licenses and official evaluator | 2 | todo |  |  |  |
+| FG-101 | Spike: data sources, licenses and official evaluator | 2 | done |  |  | Pinned HF zip, CC BY-SA 4.0, evaluator vendored read-only with a timeout, 5-db fixture |
 | FG-102 | Core types and hashing | 2 | todo |  |  |  |
 | FG-103 | Spider loader, checksums and fixture subset | 3 | todo |  |  |  |
 | FG-104 | Splits by database and dev guard | 3 | todo |  |  |  |
@@ -116,3 +116,11 @@ Work discovered along the way that is not a plan story.
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
 - CI runs on every pushed branch as well as on PRs, so a branch is checked before its PR opens.
+- The six `train_others` databases and `music_2` have no rows: their gold results are empty or a
+  single 0 or NULL. Keep them out of val (FG-104) and out of GRPO (FG-505); SFT can use them.
+- Training golds 3153, 4513 and 4514 fail on SQLite, and the official evaluator asserts on a
+  failing gold. FG-103 flags them; FG-108 skips them.
+- The evaluator's `asyncio.run` fails inside a running event loop (notebook cells), so FG-108
+  calls it from a script or a worker thread.
+- Headline test-suite EX needs `testsuitedatabases.zip` (about 1.2 GB, Google Drive) in FG-508.
+- Only `wta_1` (dev) has text that is not valid UTF-8, so FG-106 builds its own test database.
