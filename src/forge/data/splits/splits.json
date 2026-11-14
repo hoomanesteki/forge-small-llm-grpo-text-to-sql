@@ -1,0 +1,9 @@
+{
+  "seed": "forge-val-v1",
+  "val_percent": 10,
+  "files": {
+    "train.ids.txt": "3f6687d2590dd847a159de4d76da349332377d036982fda40b37fd27515f784d",
+    "val.ids.txt": "327c67df7b6c5fc8148451dd80093c80910b632f2245823b60c733d7fb62d967",
+    "dev.ids.txt": "113c6303f706e594300657b02eaecbfa0c9bcb015cf1af8d7afb68de0045442c"
+  }
+}
