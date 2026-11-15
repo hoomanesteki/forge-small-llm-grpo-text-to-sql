@@ -460,7 +460,10 @@ Work discovered along the way that is not a plan story.
   raises `GitError` outside one (FG-292). Each exclude is the log's real path
   (`ledger_path`, `dev_usage_path`) relative to the top, so a Forge root below the top of a
   bigger checkout still runs clean after a run appends to its logs, and a `docs/dev-usage.md`
-  at that top is no log (FG-295).
+  at that top is no log (FG-295). git spells that path itself, so a `FORGE_ROOT` typed in
+  other letter case on macOS keeps the excludes, and a Forge root whose `docs/PLAN.md` the
+  checkout around it doesn't track (copied into another repository, untracked or ignored
+  there) raises `GitError` instead of recording that repository's commit (FG-295).
 - `git_sha` raises `GitError`, a `RuntimeError`, outside a checkout or where git can't run,
   and no longer `subprocess.CalledProcessError` or `OSError`, so every caller must catch
   `GitError`. On the Phase 3 branches `forge kaggle publish-code`'s except tuple (FG-302) and

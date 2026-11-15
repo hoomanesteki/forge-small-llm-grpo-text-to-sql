@@ -272,6 +272,56 @@ def test_appended_logs_are_clean_with_the_forge_root_below_the_top(
 
 
 @pytest.mark.phase(2)
+@pytest.mark.parametrize("ignored", [False, True])
+def test_a_forge_root_its_checkout_does_not_track_is_a_git_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignored: bool
+) -> None:
+    # A Forge root copied into an unrelated repository. Untracked, its files would make
+    # the tree dirty; ignored, the other repository's commit would pass as clean.
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q")
+    _git(other, "config", "user.email", "test@example.com")
+    _git(other, "config", "user.name", "Test")
+    (other / ".gitignore").write_text("forge/\n" if ignored else "")
+    _git(other, "add", ".gitignore")
+    _git(other, "commit", "-q", "-m", "init")
+    forge = other / "forge"
+    (forge / "docs").mkdir(parents=True)
+    (forge / "docs" / "PLAN.md").write_text("plan\n")
+    _forge_root(forge, monkeypatch)
+    with pytest.raises(GitError, match="doesn't track it"):
+        git_sha(forge, allow_dirty=True)
+
+
+def _ignores_case(folder: Path) -> bool:
+    probe = folder / "Case-Probe"
+    probe.write_text("")
+    try:
+        return (folder / "case-probe").exists()
+    finally:
+        probe.unlink()
+
+
+@pytest.mark.phase(2)
+def test_a_forge_root_in_other_letter_case_keeps_its_logs_out(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not _ignores_case(repo):
+        pytest.skip(f"{repo} is on a file system that tells letter case apart")
+    head = _commit_layout(repo)
+    # FORGE_ROOT typed in another case than the folder on disk, which such a file system
+    # accepts; git's pathspecs still need the logs as git spells them.
+    _forge_root(repo.with_name(repo.name.swapcase()), monkeypatch)
+    with (repo / "docs" / "dev-usage.md").open("a") as log:
+        log.write("| 2026-11-15 | row |\n")
+    assert git_sha(repo) == head
+    (repo / "src" / "x.py").write_text("two\n")
+    with pytest.raises(DirtyTreeError):
+        git_sha(repo)
+
+
+@pytest.mark.phase(2)
 def test_outside_a_checkout_is_a_git_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
