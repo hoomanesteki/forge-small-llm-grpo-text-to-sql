@@ -49,7 +49,7 @@ import sqlite3
 import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import Any, Protocol, Self
@@ -111,27 +111,38 @@ STATEMENT_KEYWORDS = frozenset(
 # The statements a WITH clause can lead into.
 _WITH_BODIES = frozenset({"SELECT", "VALUES", "INSERT", "REPLACE", "UPDATE", "DELETE"})
 
-# How sqlite3 sees a string of SQL: whitespace, comments, statement ends, parentheses,
-# quoted strings and names (kept whole, so a ``;`` inside them doesn't end anything), and
-# other words. SQLite runs an unclosed block comment to the end of the input, and an
-# unclosed quote is an error SQLite reports itself, so both run to the end here. SQLite
-# reads whitespace as one of `` \t\n\f\r`` followed by any of those or ``\v``; a ``\v``
-# anywhere else is an unrecognized token.
+# What a name may hold after its first character: ASCII letters, digits, ``_`` and ``$``,
+# and any non-ASCII character.
+_NAME_CHAR = "0-9A-Za-z_$\u0080-\U0010ffff"
+# How SQLite's tokenizer splits a string of SQL, as far as counting statements and finding
+# their keyword needs: whitespace, comments, statement ends, parentheses, quoted strings
+# and names, parameters, names, and runs of anything else. Quoted strings and parameters
+# are kept whole, so a ``;`` or ``(`` inside them counts for nothing; a parameter such as
+# ``$a(...)`` takes its Tcl-style suffix up to whitespace or ``)``, quotes and all.
+# Whitespace is one of `` \t\n\f\r`` followed by any of those or ``\v``, or a single
+# U+FEFF, which SQLite skips wherever a token starts but keeps inside a name; a ``\v``
+# anywhere else is an unrecognized token. SQLite runs an unclosed block comment to the
+# end of the input, and an unclosed quote is an error SQLite reports itself, so both run
+# to the end here.
 _LEXEME = re.compile(
-    r"""
-    (?P<space>[ \t\n\f\r][ \t\n\v\f\r]*)
+    rf"""
+    (?P<space>[ \t\n\f\r][ \t\n\v\f\r]*|\ufeff)
     |(?P<comment>--[^\n]*|/\*.*?(?:\*/|\Z))
     |(?P<end>;)
     |(?P<open>\()
     |(?P<close>\))
     |(?P<quoted>'(?:[^']|'')*'?|"(?:[^"]|"")*"?|`(?:[^`]|``)*`?|\[[^\]]*\]?)
-    |(?P<word>[^ \t\n\f\r;'"`\[()/-]+|[/-])
+    |(?P<parameter>[$@:\#](?:::)*
+        (?:[{_NAME_CHAR}](?:[{_NAME_CHAR}]|::)*(?:\([^ \t\n\v\f\r)]*\)?)?)?)
+    |(?P<name>[A-Za-z_\u0080-\U0010ffff][{_NAME_CHAR}]*)
+    |(?P<other>[^ \t\n\f\r;'"`\[()$@:\#A-Za-z_\u0080-\U0010ffff/-]+|.)
     """,
     re.VERBOSE | re.DOTALL,
 )
 _GAPS = frozenset({"space", "comment"})
-# SQLite identifiers: ASCII letters, digits, ``_`` and ``$``, and any non-ASCII character.
-_IDENTIFIER = re.compile("[A-Za-z_\u0080-\U0010ffff][A-Za-z0-9_$\u0080-\U0010ffff]*")
+# All the whitespace Python's sqlite3 skips after the first statement; anything else
+# there makes it refuse the call as more than one statement.
+_PYTHON_SPACE = " \t\n\f\r"
 
 # Whole-message patterns, so a name quoted inside a message can't change its kind.
 _ERROR_KINDS: tuple[tuple[re.Pattern[str], ErrorKind], ...] = (
@@ -186,8 +197,8 @@ def statement_count(sql: str) -> int:
 
     Semicolons before the first statement are skipped, as SQLite skips them. After the
     first statement only whitespace and comments may follow, so a stray ``;`` there
-    counts as a statement of its own, and so does a ``\v``, which Python's check there
-    never skips.
+    counts as a statement of its own, and so does a ``\v`` or a U+FEFF, which Python's
+    check there never skips.
     """
     count = 0
     in_statement = False
@@ -200,7 +211,9 @@ def statement_count(sql: str) -> int:
                 count += 1
             continue
         after_first = count > 0 and not in_statement
-        if kind == "comment" or (kind == "space" and not (after_first and "\v" in match.group())):
+        if kind == "comment" or (
+            kind == "space" and not (after_first and match.group().strip(_PYTHON_SPACE))
+        ):
             continue
         if not in_statement:
             count += 1
@@ -220,35 +233,75 @@ def strip_leading(sql: str) -> str:
 def statement_keyword(sql: str) -> str | None:
     """The upper-case keyword that says what the first statement in ``sql`` does.
 
-    That is the statement's first word or, after a ``WITH`` clause, the first ``SELECT``,
-    ``VALUES``, ``INSERT``, ``REPLACE``, ``UPDATE`` or ``DELETE`` outside the parentheses
-    of its common table expressions. ``None`` when the first word is no statement keyword,
-    which SQLite reports as a syntax error, or nothing follows the ``WITH`` clause.
+    That is the statement's first word or, after a ``WITH`` clause, the word that follows
+    its last common table expression: ``SELECT``, ``VALUES``, ``INSERT``, ``REPLACE``,
+    ``UPDATE`` or ``DELETE``. Keywords are matched as SQLite matches them, in ASCII
+    letters only: Python upper-cases a long s (U+017F) to S, but a word spelled with one
+    is a name to SQLite. ``None`` when the first word is no statement keyword, which
+    SQLite reports as a syntax error, or the ``WITH`` clause is not one SQLite would read.
     """
     lexemes = (m for m in _LEXEME.finditer(strip_leading(sql)) if m.lastgroup not in _GAPS)
-    first = next(lexemes, None)
-    if first is None or first.lastgroup != "word":
-        return None
-    word = _IDENTIFIER.match(first.group())
-    keyword = word.group().upper() if word is not None else None
+    keyword = _keyword(next(lexemes, None))
     if keyword not in STATEMENT_KEYWORDS:
         return None
-    if keyword != "WITH":
-        return keyword
-    depth = 0
-    for match in lexemes:
-        kind = match.lastgroup
-        if kind == "end":
-            break
-        if kind == "open":
-            depth += 1
-        elif kind == "close":
-            depth -= 1
-        elif kind == "word" and depth <= 0:
-            for name in _IDENTIFIER.finditer(match.group()):
-                if name.group().upper() in _WITH_BODIES:
-                    return name.group().upper()
+    return _with_body(lexemes) if keyword == "WITH" else keyword
+
+
+def _keyword(lexeme: re.Match[str] | None) -> str | None:
+    """A name in upper case when it is plain ASCII, as a keyword must be; else ``None``."""
+    if lexeme is None or lexeme.lastgroup != "name" or not lexeme.group().isascii():
+        return None
+    return lexeme.group().upper()
+
+
+def _with_body(lexemes: Iterator[re.Match[str]]) -> str | None:
+    """The keyword after a ``WITH`` clause, read from the lexemes that follow ``WITH``.
+
+    It follows SQLite's grammar, ``[RECURSIVE] name [(columns)] AS [[NOT] MATERIALIZED]
+    (query)`` once or more with commas between, so a table named like a keyword, such
+    as ``replace``, is read as the name it is.
+    """
+    lexeme = next(lexemes, None)
+    if _keyword(lexeme) == "RECURSIVE":
+        lexeme = next(lexemes, None)
+    while lexeme is not None and lexeme.lastgroup in ("name", "quoted"):
+        lexeme = next(lexemes, None)
+        if lexeme is not None and lexeme.lastgroup == "open":
+            if not _skip_group(lexemes):
+                return None
+            lexeme = next(lexemes, None)
+        if _keyword(lexeme) != "AS":
+            return None
+        lexeme = next(lexemes, None)
+        if _keyword(lexeme) == "NOT":
+            lexeme = next(lexemes, None)
+            if _keyword(lexeme) != "MATERIALIZED":
+                return None
+        if _keyword(lexeme) == "MATERIALIZED":
+            lexeme = next(lexemes, None)
+        if lexeme is None or lexeme.lastgroup != "open" or not _skip_group(lexemes):
+            return None
+        lexeme = next(lexemes, None)
+        if lexeme is None or lexeme.group() != ",":
+            keyword = _keyword(lexeme)
+            return keyword if keyword in _WITH_BODIES else None
+        lexeme = next(lexemes, None)
     return None
+
+
+def _skip_group(lexemes: Iterator[re.Match[str]]) -> bool:
+    """Read up to the ``)`` that closes the ``(`` just read; ``False`` if none does."""
+    depth = 1
+    for lexeme in lexemes:
+        if lexeme.lastgroup == "end":
+            return False
+        if lexeme.lastgroup == "open":
+            depth += 1
+        elif lexeme.lastgroup == "close":
+            depth -= 1
+            if depth == 0:
+                return True
+    return False
 
 
 def classify_error(message: str) -> ErrorKind:

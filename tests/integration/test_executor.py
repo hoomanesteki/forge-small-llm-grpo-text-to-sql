@@ -171,6 +171,14 @@ def test_writes_denied(
         # Statements that read but are not queries.
         "EXPLAIN SELECT * FROM head",
         "EXPLAIN QUERY PLAN SELECT * FROM head",
+        # Keywords only SQLite's own reading finds: behind a byte order mark, after a
+        # table named with a long s (U+017F), or after a parameter whose Tcl-style suffix
+        # holds parentheses or a quote.
+        "\ufeffDELETE FROM forge_missing",
+        "\ufeffEXPLAIN SELECT * FROM head",
+        "WITH \u017felect AS (SELECT 1) DELETE FROM forge_missing",
+        "WITH s AS (SELECT $a(() ) DELETE FROM forge_missing",
+        "WITH s AS (SELECT @a(') ) UPDATE head SET forge_missing = 1 -- '",
     ]
 
     for statement in statements:
@@ -180,6 +188,9 @@ def test_writes_denied(
         assert result.rows is None
 
     assert executor.run(DB, "SELECT count(*) FROM head").rows == [(10,)]
+    # A table named like a statement keyword is still a query.
+    named = "WITH replace AS (SELECT count(*) AS n FROM head) SELECT n FROM replace"
+    assert executor.run(DB, named).rows == [(10,)]
     assert _sha256(_db_file(spider_mini)) == before
     assert list(tmp_path.iterdir()) == []
 

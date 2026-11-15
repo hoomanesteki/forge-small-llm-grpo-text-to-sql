@@ -105,6 +105,7 @@ I2_SELECTS = (
     "SELECT {c}, count(*) FROM {t} GROUP BY {c} ORDER BY 2 DESC LIMIT 5",
     "SELECT DISTINCT {c} FROM {t} WHERE {c} IS NOT NULL;",
     "WITH s AS (SELECT {c} FROM {t}) SELECT count(*) FROM s",
+    "WITH replace AS (SELECT {c} FROM {t}) SELECT count(*) FROM replace",
     "SELECT a.{c} FROM {t} AS a JOIN {t} AS b ON a.rowid = b.rowid LIMIT 3",
 )
 I2_DENIED = (
@@ -119,6 +120,12 @@ I2_DENIED = (
     "DELETE FROM {t} WHERE {c} = 'unclosed",
     "WITH s AS (SELECT 1) DELETE FROM {t}",
     "WITH s AS (SELECT 1) DELETE FROM forge_missing",
+    # Keywords only SQLite's own reading finds (see statement_keyword).
+    "\ufeffDELETE FROM forge_missing",
+    "\ufeffEXPLAIN SELECT * FROM {t}",
+    "WITH \u017felect AS (SELECT 1) DELETE FROM forge_missing",
+    "WITH s AS (SELECT $a(() ) DELETE FROM forge_missing",
+    "WITH s AS (SELECT @a(') ) UPDATE {t} SET forge_missing = 1 -- '",
     "DROP TABLE {t}",
     "DROP TABLE IF EXISTS forge_missing",
     "DROP VIEW IF EXISTS forge_missing",
