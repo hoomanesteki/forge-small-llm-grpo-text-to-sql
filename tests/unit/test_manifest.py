@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 import subprocess
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 import pytest
 from pydantic import ValidationError
@@ -112,6 +112,42 @@ def test_run_id_generated_from_the_utc_start_date(repo: Path) -> None:
 def test_naive_start_time_rejected(repo: Path) -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         build_manifest("eval", {}, model_ref="m", seed=0, repo=repo, now=datetime(2026, 11, 3))
+
+
+class _NoOffset(tzinfo):
+    """A tzinfo that knows no offset, which makes its datetimes naive."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return None
+
+
+@pytest.mark.phase(1)
+def test_start_time_without_an_offset_rejected(repo: Path) -> None:
+    now = datetime(2026, 11, 3, 23, 30, tzinfo=_NoOffset())
+    assert now.tzinfo is not None
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_manifest("eval", {}, model_ref="m", seed=0, repo=repo, now=now)
+
+
+@pytest.mark.phase(1)
+def test_manifest_keeps_its_own_copy_of_the_config(repo: Path) -> None:
+    lora: dict[str, Any] = {"r": 16, "target_modules": ["q_proj"]}
+    config: dict[str, Any] = {"lora": lora, "data": Path("data/spider")}
+    m = build_manifest("sft", config, model_ref="m", seed=0, repo=repo)
+
+    lora["r"] = 32
+    lora["target_modules"].append("v_proj")
+
+    # What was hashed, as JSON: the caller's edits don't reach it.
+    assert m.config == {"lora": {"r": 16, "target_modules": ["q_proj"]}, "data": "data/spider"}
+    assert config_hash(m.config) == m.config_hash
+    assert m.config_hash != config_hash(config)
 
 
 @pytest.mark.phase(1)
