@@ -8,26 +8,33 @@ writes and the run's seed are keywords the plan's signatures have no place for, 
 ``load`` takes the seed too: LoRA draws its first weights there, before any trainer
 seeds.
 
-``TrlBackend`` is transformers, PEFT LoRA and TRL's trainers, generating with
-transformers rather than vLLM, at the precision ``precision_for`` picks for its device:
-float32 on the CPU; on MPS bf16 where torch says macOS supports it, else float32; on
-CUDA bf16 where the GPU has it, else float16 with ``fp16`` (a T4: TRL's default bf16
-crashes there, TRL issue 7889). 4-bit loading is bitsandbytes NF4, on CUDA only.
+- ``TrlBackend``: transformers, PEFT LoRA and TRL's trainers, generating with
+  transformers rather than vLLM, at the precision ``precision_for`` picks for its
+  device: float32 on the CPU; on MPS bf16 where torch says macOS supports it, else
+  float32; on CUDA bf16 where the GPU has it, else float16 with ``fp16`` (a T4: TRL's
+  default bf16 crashes there, TRL issue 7889). 4-bit loading is bitsandbytes NF4, on
+  CUDA only.
+- ``UnslothBackend``: Unsloth's loading (4-bit if asked) and LoRA, and for GRPO, when
+  given ``gpu_memory_utilization``, rollouts from its colocated vLLM. CUDA only.
+  Unsloth patches TRL and transformers as it is imported, so the backend imports it
+  when it is made: make it before anything imports either.
 
-Its trainers (``sft_trainer``, ``grpo_trainer``) get the callbacks they are given and no
-tracker of transformers' own (``report_to`` is none;
+Both build their trainers the same way (``sft_trainer``, ``grpo_trainer``), with the
+callbacks they are given and no tracker of transformers' own (``report_to`` is none;
 ``forge.train.callbacks.training_callbacks`` adds W&B when there is a key). The trainer
 saves only when a callback asks (``save_strategy`` is no): every ``checkpoint_every``
 steps and at the time guard. ``max_prompt_length`` is Forge's own filter, since TRL has
 no such setting any more: rows whose prompt is longer are dropped, and counted, before
 TRL sees them.
 
-``select_backend("auto")`` picks ``TrlBackend`` on the best device there is: the CPU in
-CI.
+``select_backend("auto")`` picks Unsloth when torch sees a CUDA GPU and Unsloth is
+installed, and otherwise ``TrlBackend`` on the best device there is: the CPU in CI.
 """
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -55,12 +62,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 ADAPTER_DIR = "adapter"  # in the output folder: where sft and grpo save the adapter
+# Unsloth's own default length, for a backend made without a config's.
+DEFAULT_MAX_SEQ_LENGTH = 2048
 # Plan section 3.5's reward, as TRL calls it: keywords carry the dataset's other columns.
 RewardFunc = Callable[..., list[float]]
 
 
 class BackendUnavailable(RuntimeError):
-    """The backend asked for can't run here: the GPU it needs is missing."""
+    """The backend asked for can't run here: the package or the GPU it needs is missing."""
 
 
 class TrainBackend(Protocol):
@@ -223,7 +232,7 @@ def grpo_settings(cfg: GrpoConfig) -> dict[str, Any]:
 
 
 class _TrlTrainers:
-    """The trainers a backend builds: TRL's, on a model ``load`` gave."""
+    """The trainers both backends build: TRL's, on a model ``load`` gave."""
 
     name: str
     precision: Precision
@@ -394,8 +403,107 @@ class TrlBackend(_TrlTrainers):
                 param.data = param.data.float()
 
 
-def select_backend(name: BackendName = "auto", *, device: TrainDevice = "auto") -> TrainBackend:
-    """The backend ``name`` asks for, on ``device``: ``auto`` is ``TrlBackend``."""
-    if name in ("auto", "trl"):
+class UnslothBackend(_TrlTrainers):
+    """Unsloth's loading and LoRA, and TRL's trainers as Unsloth patches them; CUDA only.
+
+    ``gpu_memory_utilization``, when given, has GRPO generate its rollouts with Unsloth's
+    colocated vLLM, which takes that share of the GPU's memory.
+    """
+
+    name = "unsloth"
+
+    def __init__(
+        self,
+        *,
+        max_seq_length: int = DEFAULT_MAX_SEQ_LENGTH,
+        gpu_memory_utilization: float | None = None,
+    ) -> None:
+        import torch
+
+        if not torch.cuda.is_available():
+            raise BackendUnavailable(
+                "the unsloth backend trains on a CUDA GPU, and torch sees none here; use "
+                "the trl backend"
+            )
+        try:
+            unsloth = importlib.import_module("unsloth")
+        except ImportError as exc:
+            raise BackendUnavailable(
+                "the unsloth backend needs the unsloth package, which Forge's lock file "
+                "leaves out (its pins clash with the TRL that CI tests); install it on the "
+                "GPU image, or use the trl backend"
+            ) from exc
+        self._fast = unsloth.FastLanguageModel
+        self.max_seq_length = max_seq_length
+        self.gpu_memory_utilization = gpu_memory_utilization
+        self.precision = precision_for("cuda")
+
+    def load(
+        self, model_ref: str, lora: LoraConfig, *, load_in_4bit: bool, seed: int
+    ) -> tuple[Any, Any]:
+        import torch
+
+        from forge.infer.hf_backend import split_ref
+
+        repo, revision = split_ref(model_ref)
+        options: dict[str, Any] = {}
+        if self.gpu_memory_utilization is not None:
+            options = {
+                "fast_inference": True,
+                "gpu_memory_utilization": self.gpu_memory_utilization,
+                "max_lora_rank": lora.r,
+            }
+        model, tokenizer = self._fast.from_pretrained(
+            model_name=repo,
+            revision=revision,
+            max_seq_length=self.max_seq_length,
+            load_in_4bit=load_in_4bit,
+            dtype=getattr(torch, self.precision.dtype),
+            **options,
+        )
+        model = self._fast.get_peft_model(
+            model,
+            r=lora.r,
+            lora_alpha=lora.alpha,
+            lora_dropout=lora.dropout,
+            target_modules=list(lora.target),
+            use_gradient_checkpointing="unsloth",
+            random_state=seed,
+        )
+        check_targets(model, lora, model_ref)
+        return model, tokenizer
+
+
+def select_backend(
+    name: BackendName = "auto",
+    *,
+    device: TrainDevice = "auto",
+    max_seq_length: int = DEFAULT_MAX_SEQ_LENGTH,
+    gpu_memory_utilization: float | None = None,
+) -> TrainBackend:
+    """The backend ``name`` asks for, on ``device``.
+
+    ``auto`` is Unsloth when the device may be CUDA, torch sees a GPU and Unsloth is
+    installed, and ``TrlBackend`` otherwise. ``max_seq_length`` and
+    ``gpu_memory_utilization`` are Unsloth's, for ``UnslothBackend``; the TRL backend
+    takes its lengths from the trainer's config and generates with transformers.
+    """
+    import torch
+
+    if name == "auto":
+        unsloth_here = (
+            device in ("auto", "cuda")
+            and torch.cuda.is_available()
+            and importlib.util.find_spec("unsloth") is not None
+        )
+        name = "unsloth" if unsloth_here else "trl"
+        log.info("backend auto: %s", name)
+    if name == "trl":
         return TrlBackend(device)
-    raise ValueError(f"a backend is auto or trl, not {name!r}")
+    if name == "unsloth":
+        if device not in ("auto", "cuda"):
+            raise ValueError(f"the unsloth backend trains on CUDA only, not on device {device}")
+        return UnslothBackend(
+            max_seq_length=max_seq_length, gpu_memory_utilization=gpu_memory_utilization
+        )
+    raise ValueError(f"a backend is auto, trl or unsloth, not {name!r}")
