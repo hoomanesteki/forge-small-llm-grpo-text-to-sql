@@ -36,7 +36,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-204 | Error taxonomy | 3 | done |  |  | `classify` in `forge.eval.taxonomy`: no_sql, syntax and schema_link from the error kind, then sqlglot shapes compare tables, joins, select lists, aggregates, WHERE, GROUP BY to LIMIT and last literals; names resolve to tables against each database's columns, a double-quoted name no table has is a string, and a nested filter query counts in its condition; `forge eval run` stores the class of each wrong prediction |
 | FG-205 | Report generator | 3 | done |  |  | `forge report run`, `compare` and `rebuild` (`forge.eval.report`) from a finished run's stored files (`read_run`) and its split's questions in data with the manifest's hash; official EX leads, with fast EX and the valid rate beside it, 95% intervals over gold clusters, a by-hardness table and PNG, the error classes of official EX failures, and 5 failures from each of the 3 most common classes; compare gives the paired change, McNemar's table and p, and changes by hardness and class; rebuild renders the run's reports again and diffs them, the `Generated:` line aside |
 | FG-206 | Execution-guided retry | 3 | done |  |  | `--retry 1` asks once more, with the executor's error, for each query that fails to run (never one that ran), in the same `SandboxPool`, and scores the second reply; `Score` gains `attempts` and `first_try_ex` (ADR-0015); first replies kept in `eval/<split>-first-tries.jsonl` and judged in the one official batch; each retry drawn with its own seed; reports show EX with and without retry and the paired change |
-| FG-207 | CPU smoke pipeline in CI | 3 | todo |  |  |  |
+| FG-207 | CPU smoke pipeline in CI | 3 | done |  |  | `make smoke` (`scripts/smoke/pipeline.sh`) runs `tests/smoke`, then `forge eval run` with the pinned tiny model on the fixture's 20 val questions and `forge report run`, in a scratch runs folder; a pass on a clean commit writes the git-ignored `.smoke-ok-<sha>`, and uncommitted work passes without one; CI `smoke` job on 3.12, Hugging Face cache keyed on the tiny revision, 10-minute bound, a required check; `forge eval run --workers`; I4 traces every number of a run report to its stored files (`tests/report_trace.py`); `scripts/smoke/phase_2.sh` |
 
 ## Phase 3: Free-GPU ops and baselines (v0.3.0)
 
@@ -517,3 +517,21 @@ Work discovered along the way that is not a plan story.
   seeds each reply by its example id and its index among the prompt's replies, so FG-306's vLLM
   backend has to seed requests the same way (`sample_seed`) for retries to stay independent of
   first replies and of each other (FG-206).
+- `make smoke` takes 40 to 50 s on the laptop, 25 to 33 s of it the smoke tests and 6 to 10 s the
+  tiny model's 20 replies. The first CI smoke job took 57 s, setup and the tiny model's download
+  included (7.5 MB once cached), and `make smoke` 38 s of it, the replies 1.9 s.
+  `scripts/smoke/phase_2.sh` takes about 32 s on the full data (FG-207).
+- The smoke run passes `--allow-dirty`, so it also runs on uncommitted work, but it writes the
+  marker only when the run's manifest names HEAD's commit without `-dirty`. Each attempt first
+  removes HEAD's marker and a pass removes the others, so a marker means the last smoke on that
+  commit passed. FG-303 checks for `.smoke-ok-<HEAD sha>` (FG-207).
+- The tiny model's 256-token replies hold no SQL, so on the smoke run every sample is `no_sql`,
+  and with `--retry 1` each is asked again and fails the same way. The smoke proves the wiring of
+  that path; I4's fake-backend run covers results of every other kind (FG-207).
+- Two prose lines of a run report hold numbers from the scores, not constants: the checkers'
+  disagreement, and the questions and clusters in the line on intervals. I4 traces both (FG-207).
+- I4 covers a run report. A compare report's numbers (McNemar's table and p-value, the changes
+  by hardness and class) aren't traced yet; FG-801's I4 for the results page can build on
+  `tests/report_trace.py` (FG-207).
+- `forge eval run --workers N` sizes the run's sandbox pool (by default one per CPU, up to 4).
+  The manifest leaves it out, since it changes no score; `make smoke` uses 2 (FG-207).
