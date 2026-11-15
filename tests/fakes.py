@@ -12,18 +12,28 @@ from forge.sql.executor import SqliteExecutor
 
 class WordTokenizer:
     """A Hugging Face tokenizer, as far as Forge uses one: one token per word of a chat
-    template that tags each message with its role."""
+    template that tags each message with its role.
 
-    def __init__(self) -> None:
+    ``chat_template`` is only what ``get_chat_template`` reports; the rendering is fixed.
+    """
+
+    def __init__(self, chat_template: str = "{{ role tag }} {{ content }}, per message") -> None:
+        self.chat_template = chat_template
         self.calls: list[tuple[list[dict[str, str]], dict[str, Any]]] = []
+
+    def get_chat_template(self) -> str:
+        return self.chat_template
 
     def apply_chat_template(
         self, conversation: list[dict[str, str]], **kwargs: Any
-    ) -> dict[str, list[int]]:
+    ) -> str | dict[str, list[int]]:
         self.calls.append((conversation, kwargs))
         text = " ".join(f"<|{m['role']}|> {m['content']}" for m in conversation)
         if kwargs.get("add_generation_prompt"):
             text += " <|assistant|>"
+        # transformers tokenizes unless told not to.
+        if not kwargs.get("tokenize", True):
+            return text
         return {"input_ids": list(range(len(text.split())))}
 
 
