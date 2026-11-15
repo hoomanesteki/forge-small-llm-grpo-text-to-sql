@@ -118,7 +118,8 @@ def test_pool_calls_run_in_a_worker(spider_mini: Path) -> None:
         with pytest.raises(SandboxError, match="Unpicklable: one and two"):
             pool.call(jobs.fail_unpicklably, timeout_s=5)
         # A job that can't reach a worker fails here, and the worker is still fine.
-        with pytest.raises(AttributeError, match="Can't get local object"):
+        # Python 3.11 says "Can't pickle local object", 3.12 "Can't get local object".
+        with pytest.raises(AttributeError, match=r"Can't (get|pickle) local object"):
             pool.call(lambda executor: None, timeout_s=5)
         assert pool.call(jobs.worker_pid, timeout_s=5) == pid
 
