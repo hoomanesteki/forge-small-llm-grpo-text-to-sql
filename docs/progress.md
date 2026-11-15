@@ -119,6 +119,7 @@ Work discovered along the way that is not a plan story.
 | FG-195 | Gate 1 fixes: review follow-ups | done | `forge data fetch` reports hf_xet's bare `RuntimeError` with the retry hint, `canonical_json` sorts keys as the strings JSON writes so a manifest's copy of an int-keyed config hashes like it, and a `/` after the `@` outside `refs/` makes a model ref a path; the FG-192 note on `extract_sql` no longer claims short sentences that parse as a SELECT are passed over |
 | FG-196 | Gate 1 fixes: sandbox polish | done | A watchdog test that fails if the watchdog is removed (a query the progress handler never checks); a worker that dies under an official EX item counts as no match instead of aborting the run, and both eval CLIs catch `SandboxError`; a job whose result can't be pickled reports the type instead of killing its worker; the executor, ADR-0014 and progress narrowed to say the in-process few-hundredths bound was measured for four functions only and the item timeout covers the whole item (FG-508) |
 | FG-197 | Gate 1 fixes: final polish | done | Official EX counts only a worker's death as a miss, so a pool that can't start raises again; a reply the parent can't unpickle keeps its worker; `statement_keyword` reads byte order marks, Tcl-style parameters, ASCII keywords and the `WITH` grammar as SQLite does; a forced Hub download that fails shows its cause, the bad zip and the hint; the timing tests assert the kill and use the worst rows the limits allow, gold is measured as the evaluator runs it, and ADR-0014 lists the known limits |
+| FG-291 | Local pilot baseline on Apple silicon | done | `local-mps` platform (ADR-0016), counted in neither the Kaggle quota nor GPU hours; `forge eval run --device` (`cpu` by default, `mps` refused on dev) and `--config` for `configs/eval/*.yaml`; Qwen2.5-Coder-0.5B-Instruct pinned as `pilot`; the full val run on the M4's GPU is in `docs/runs/` with its generated report, val only |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -535,3 +536,26 @@ Work discovered along the way that is not a plan story.
   `tests/report_trace.py` (FG-207).
 - `forge eval run --workers N` sizes the run's sandbox pool (by default one per CPU, up to 4).
   The manifest leaves it out, since it changes no score; `make smoke` uses 2 (FG-207).
+- Before FG-291 `forge eval run` built `HfBackend` with `device="auto"`, so on a Mac the
+  model ran on MPS while the manifest said `local-cpu`. `--device` now defaults to `cpu`, and
+  `mps` is asked for by name, recorded in the config and filed as `local-mps` (FG-291).
+- `forge eval run --config <yaml>` loads the file into click's default map: each value is
+  checked by its option's type, and options on the command line override it. A file may set
+  only the options that change a score; the run id, store and dev reason stay on the command
+  line (FG-291). FG-303's `forge kaggle run --job eval --config` can read the same files with
+  `read_config_file`.
+- Report headers name the run's platform, so a pilot can't pass for a T4 run; I4's trace
+  checks the row (FG-291).
+- A pilot's numbers are a 0.5B model's in float32 on MPS through transformers, so they say
+  roughly where a small model starts, not where the T4 baselines (float16, vLLM) will
+  (ADR-0016, FG-291).
+- The pilot ran on MPS with no fallback to the CPU, in well under the hour the story allowed;
+  its ledger row has the hours, taken from the manifest's start and end (FG-291).
+- In the pilot's report `schema_link` is the most common class of official EX failures, well
+  ahead of `wrong_tables`: the 0.5B model mostly names tables and columns its database
+  doesn't have. Worth watching in FG-307's baselines and in what SFT and GRPO change (FG-291).
+- `docs/runs/<run_id>/` holds a run whole (manifest, config, generations, scores, report and
+  chart), so `FORGE_RUNS_DIR=docs/runs forge report rebuild <run_id>` checks it, and
+  `tests/integration/test_artifacts.py` checks the pilot offline and, with the full data, its
+  rebuild and I4 trace. FG-307's `test_phase3_baseline_reports_present` can join that file
+  (FG-291).

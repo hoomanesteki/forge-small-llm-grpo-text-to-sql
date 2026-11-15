@@ -30,8 +30,9 @@ another device can pick another token where two are nearly tied.
 - A `local-mps` ledger row counts toward neither the Kaggle weekly quota nor the project's
   GPU hours. Both measure the free GPU budget, and the laptop spends neither.
 - A `local-mps` run is a pilot. Pilot numbers are reported on val only, never on dev, so
-  no pilot spends one of the six dev looks (ADR-0004). Their reports, manifests and scores
-  are committed under `docs/runs/`, whose README says what the label means.
+  no pilot spends one of the six dev looks (ADR-0004); `forge eval run` refuses
+  `--device mps` with `--split dev`. Their reports, manifests and scores are committed
+  under `docs/runs/`, whose README says what the label means.
 - The main results still come from Kaggle T4 runs, and FG-307 still chooses the model
   from them. A pilot number is never set beside a T4 number as the same measurement.
 
