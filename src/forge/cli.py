@@ -347,6 +347,13 @@ def eval_run(
         typer.Option("--run-id", help="Name the run, or resume the run of that name."),
     ] = None,
     store: Annotated[StoreName, typer.Option(help="Where the run's files go.")] = "local",
+    # Left out of the manifest: how many processes run the SQL changes no score.
+    workers: Annotated[
+        int | None,
+        typer.Option(
+            min=1, help="How many processes run the predicted SQL; by default one per CPU, up to 4."
+        ),
+    ] = None,
     allow_dirty: Annotated[
         bool,
         typer.Option(
@@ -361,7 +368,7 @@ def eval_run(
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
-    from forge.eval.runner import run_eval
+    from forge.eval.runner import WORKERS, run_eval
     from forge.ops.dev_usage import DevBudgetExceeded
     from forge.ops.manifest import DirtyTreeError
     from forge.ops.paths import RepoRootNotFound
@@ -386,7 +393,12 @@ def eval_run(
         typer.echo(f"scored {done} of {total}", err=True)
 
     try:
-        run = run_eval(config, allow_dirty=allow_dirty, progress=progress)
+        run = run_eval(
+            config,
+            allow_dirty=allow_dirty,
+            workers=WORKERS if workers is None else workers,
+            progress=progress,
+        )
     # OSError covers missing data (DataNotFound), a model that can't be found and the
     # official evaluator's overall timeout; ValueError a wrong option, a failing gold
     # query (GoldFailed) and RunCorrupt; ImportError the cpu extra not installed.
