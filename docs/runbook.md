@@ -153,7 +153,26 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 
 ## Resume after a session limit
 
-Added in FG-305.
+A Kaggle session ends at 12 hours, and whatever is still running then is lost, so a job
+stops itself first, at a deadline short of the limit (`forge.ops.timeguard`; plan section
+3.8 puts it at 11 h 15 min for a full session). The guard times the job's steps, and once
+the deadline is within the longest step so far, plus a margin when one is given, it stops
+before the next one.
+
+- Training: `TimeGuardCallback(deadline_minutes, store=..., run_id=...)` from
+  `forge.train.callbacks` goes in the trainer's callbacks, made when the job starts, since
+  the deadline counts from then. When it fires, the trainer saves `checkpoint-<step>` in its
+  output folder and stops after that step; the callback pushes the folder to the run's
+  `checkpoints/step-NNNNNN/` in the run store and marks the stored manifest
+  `stopped_time_guard`. A new session resumes from `latest_checkpoint`.
+- Eval: `run_eval(..., deadline=Deadline(minutes))` asks before each batch. A stopped run
+  keeps the batches it stored, leaves official EX to the attempt that finishes it, says
+  `stopped_time_guard` in its manifest and goes to its run store like a run that ended.
+  It resumes like a failed one: the same `--run-id`, or `forge kaggle run --resume`.
+  `forge eval run` and the kernel's entry script don't pass a deadline yet.
+- A manifest's `gpu_hours` is its wall-clock time from `started_at` to `ended_at` on a
+  platform with a GPU (`local-mps` too), and none on `local-cpu`. A resumed run keeps its
+  first `started_at`, so its hours include the time between its sessions.
 
 ## Troubleshooting
 
