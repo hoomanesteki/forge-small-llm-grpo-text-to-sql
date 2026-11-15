@@ -35,6 +35,10 @@ accounts the GPU plan needs were pending. Its report names the platform in its h
 |---|---|---|---|
 | [2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7](2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7/) | `Qwen/Qwen2.5-Coder-0.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/pilot-qwen25coder05b-val.yaml`: full val split, greedy, prompt p1, float32 on MPS | [val-report.md](2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7/eval/val-report.md) |
 
+Story branches land on `dev` as squash merges, so the commit a manifest names is not on
+`dev` itself. Each committed run has a tag `run/<run_id>` on that commit, which keeps it
+on GitHub: `git switch --detach run/<run_id>`.
+
 To make it again, from the commit in its manifest:
 
 ```bash
