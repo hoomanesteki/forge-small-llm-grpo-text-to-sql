@@ -79,6 +79,24 @@ def test_phase_1_smoke_runs_the_checkpoint_steps() -> None:
 
 
 @pytest.mark.phase(2)
+def test_phase_2_smoke_runs_the_checkpoint_steps() -> None:
+    text = _check_script("phase_2.sh")
+    # Integration checkpoint 2 in docs/PLAN.md, in order: gold scores 100%, the tiny model
+    # answers the same questions, the runs are compared, and the reports rebuild clean.
+    _in_order(
+        text,
+        [
+            "uv run forge eval run --backend fake --model gold --split val --limit 20",
+            '"# Run gold: official EX 100.0% [100.0%, 100.0%] on val"',
+            'uv run forge eval run --backend hf --model "$model" --split val --limit 20',
+            "uv run forge report compare gold tiny",
+            "uv run forge report rebuild tiny",
+            "uv run forge report rebuild gold",
+        ],
+    )
+
+
+@pytest.mark.phase(2)
 def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> None:
     _check_script("pipeline.sh")
     dry_run = subprocess.run(["make", "-n", "smoke"], cwd=ROOT, capture_output=True, text=True)
