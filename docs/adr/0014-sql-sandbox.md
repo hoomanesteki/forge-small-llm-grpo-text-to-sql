@@ -97,7 +97,8 @@ Which path for which SQL:
 - **Untrusted SQL**, anything a model wrote or a reward or evaluation scores, goes through
   a `SandboxPool` (`run`, `run_many`) or `SqliteExecutor.run_many`, which makes one for the
   call. `forge.eval.agreement.score` runs predictions and official items on one pool.
-  The eval runner (FG-202) and the reward functions (FG-501, FG-503) must do the same.
+  The eval runner (FG-202) runs predictions and official items on one pool per run, and
+  the reward functions (FG-501, FG-503) must do the same.
 - **Trusted SQL**, Spider's gold queries, schema reads and tests, may use
   `SqliteExecutor.run` in process; its deadline is soft, with no bound on the overrun.
   `forge sql run` is in process too: it runs what the person at the terminal typed.
@@ -156,7 +157,10 @@ lists them too. Timings are from the laptop (Apple M4, 16 GB, Python 3.12.13, SQ
 - **The official-EX vet.** `VET_TIMEOUT_MS` (100 ms) refuses only empty and denied SQL. A
   prediction that times out there still goes to the evaluator, so one adversarial
   prediction can hold an item for `item_timeout_s` (60 s by default) before it is killed
-  and scored as no match.
+  and scored as no match. `forge eval run` closes this for reported numbers (FG-202,
+  ADR-0008): a prediction whose sandboxed run timed out at 2,000 ms never reaches the
+  evaluator, and each item gets 10 s. Direct callers such as `forge eval agreement`
+  still have the 60 s default.
 - **The evaluator's timeout.** Its 60 s is a progress handler, as soft as layer 2; the item
   kill bounds it.
 - **Memory.** No limit bounds what a query allocates inside SQLite. Aggregating
