@@ -1,23 +1,31 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 import pytest
+from typer.testing import CliRunner
 
+from forge import cli
+from forge.core.types import RunManifest
+from forge.ops.hub import manifest_bytes
 from forge.ops.ledger import (
     GPU_PLATFORMS,
+    GPU_RUN_PLATFORMS,
     HEADER,
     PLATFORMS,
     QUOTA_PLATFORMS,
     LedgerRow,
     append,
+    append_once,
     has_run,
     read_rows,
+    record_run,
     summary,
 )
 from forge.ops.manifest import Platform
+from tests.fakes import FakeHub
 
 TODAY = date(2026, 11, 14)
 
@@ -152,3 +160,102 @@ def test_ledger_takes_every_manifest_platform() -> None:
     assert frozenset(get_args(Platform)) == PLATFORMS
     assert QUOTA_PLATFORMS <= GPU_PLATFORMS < PLATFORMS
     assert not {"local-cpu", "local-mps"} & GPU_PLATFORMS
+
+
+RUN = "2026-11-16-qwen3-4b-eval-abc1234"
+# 23:30 in California is 07:30 the next day in UTC, the date a row takes.
+STARTED = datetime(2026, 11, 15, 23, 30, tzinfo=timezone(timedelta(hours=-8)))
+
+
+def _manifest(**changes: Any) -> RunManifest:
+    fields: dict[str, Any] = {
+        "run_id": RUN,
+        "kind": "eval",
+        "git_sha": "b" * 40,
+        "config": {"split": "val", "prompt_version": "p1", "limit": 50, "adapter": None},
+        "config_hash": "2" * 64,
+        "data_manifest_hash": "3" * 64,
+        "model_ref": "Qwen/Qwen3-4B",
+        "platform": "kaggle",
+        "gpu": "Tesla T4",
+        "seed": 0,
+        "started_at": STARTED,
+        "ended_at": STARTED + timedelta(hours=1, minutes=30),
+        "status": "stopped_time_guard",
+        **changes,
+    }
+    return RunManifest(**fields)
+
+
+@pytest.fixture
+def hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeHub:
+    """A fake Hub run store, runs/ and the ledger under tmp_path, and no token."""
+    fake = FakeHub()
+    monkeypatch.setattr("huggingface_hub.HfApi", fake.client)
+    monkeypatch.setenv("FORGE_RUN_STORE", "owner/forge-runs")
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setenv("FORGE_LEDGER", str(tmp_path / "compute-ledger.md"))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    return fake
+
+
+def _pull(hub: FakeHub, manifest: RunManifest) -> str:
+    hub.files[f"runs/{manifest.run_id}/manifest.json"] = manifest_bytes(manifest)
+    result = CliRunner().invoke(cli.app, ["runs", "pull", manifest.run_id])
+    assert result.exit_code == 0, result.output
+    return str(result.stdout)
+
+
+@pytest.mark.phase(3)
+def test_pull_appends_once(hub: FakeHub, tmp_path: Path) -> None:
+    ledger = tmp_path / "compute-ledger.md"
+
+    first = _pull(hub, _manifest())
+    second = _pull(hub, _manifest())
+
+    assert first.endswith(f"ledger: added 1.50 h on kaggle for run {RUN}\n")
+    assert second.endswith(f"ledger: run {RUN} has its row already\n")
+    purpose = "eval Qwen/Qwen3-4B on val, prompt p1, limit 50, stopped_time_guard"
+    expected = LedgerRow(date(2026, 11, 16), "kaggle", "Tesla T4", 1.5, RUN, purpose)
+    assert read_rows(ledger) == [expected]
+    assert ledger.read_text().startswith("# Compute ledger\n\n" + HEADER)
+
+
+@pytest.mark.phase(3)
+def test_pull_adds_no_row_without_a_gpu_or_an_end(hub: FakeHub, tmp_path: Path) -> None:
+    running = _manifest(status="running", ended_at=None)
+    assert _pull(hub, running).endswith(
+        f"ledger: no row yet, run {RUN} is running; pull it once it ends\n"
+    )
+    laptop = _manifest(run_id="2026-11-16-m-eval-abc1234", platform="local-cpu", gpu=None)
+    assert _pull(hub, laptop).endswith("ledger: no row, a local-cpu run holds no GPU\n")
+    assert read_rows(tmp_path / "compute-ledger.md") == []
+
+    # A pilot on the laptop's GPU is written down (ADR-0016), with its chip and adapter.
+    pilot = _manifest(
+        platform="local-mps",
+        gpu="Apple M4",
+        adapter_ref="runs/sft/checkpoints/best",
+        config={"split": "val"},
+        status="finished",
+        cost_usd=0.0,
+    )
+    row, note = record_run(pilot, tmp_path / "compute-ledger.md")
+    assert row is not None and note == f"ledger: added 1.50 h on local-mps for run {RUN}"
+    assert (row.platform, row.gpu, row.hours) == ("local-mps", "Apple M4", 1.5)
+    assert row.purpose == "eval Qwen/Qwen3-4B with runs/sft/checkpoints/best on val, finished"
+    # Every platform but the laptop's CPU holds a GPU.
+    assert {p for p in PLATFORMS if p not in GPU_RUN_PLATFORMS} == {"local-cpu"}
+
+
+@pytest.mark.phase(3)
+def test_append_once_holds_under_concurrent_pulls(ledger: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    row = LedgerRow(TODAY, "kaggle", "T4", 0.5, "run-x", "pulled twice at once")
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        added = list(pool.map(lambda _: append_once(row, ledger), range(64)))
+    assert added.count(True) == 1
+    assert read_rows(ledger) == [row]
+    assert not append_once(LedgerRow(TODAY, "colab", "T4", 1.0, "run-x", "other"), ledger)
+    assert append_once(LedgerRow(TODAY, "colab", "T4", 1.0, "run-y", "another run"), ledger)

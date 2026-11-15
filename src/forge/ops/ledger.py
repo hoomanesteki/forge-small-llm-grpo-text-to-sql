@@ -9,16 +9,23 @@ and count toward neither.
 A run's hours are its wall-clock time, from its manifest's ``started_at`` to its
 ``ended_at`` (``run_hours``): a session holds its GPU for all of it, loading and
 uploading included.
+
+``forge runs pull`` writes a run's row from its manifest (``record_run``) once the run
+has ended, on any platform with a GPU, and only once a run id: the check and the append
+share one lock. ``audit`` is invariant I7: every run on a budget platform has a row, a
+row names its run's platform, and the cash spent stays within ``CASH_LIMIT_USD``.
 """
 
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from forge.core.types import RunManifest
 from forge.ops.logfile import locked_append
 from forge.ops.paths import ledger_path
 
@@ -32,6 +39,9 @@ GPU_RUN_PLATFORMS = GPU_PLATFORMS | {"local-mps"}
 # Characters that would break a markdown table row.
 _TABLE_BREAKERS = re.compile(r"[|\r\n\u2028\u2029\x85]")
 HEADER = "| " + " | ".join(COLUMNS) + " |\n|" + "---|" * len(COLUMNS) + "\n"
+PREAMBLE = "# Compute ledger\n\n" + HEADER
+# The project's cash budget (plan section 4, I7); the GPUs themselves are free.
+CASH_LIMIT_USD = 50.0
 
 
 @dataclass(frozen=True)
@@ -106,22 +116,119 @@ def read_rows(path: Path | None = None) -> list[LedgerRow]:
     path = path or ledger_path()
     if not path.is_file():
         return []
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        # Data rows start with an ISO date; the header and separator do not.
-        if line.startswith("| 2"):
-            rows.append(LedgerRow.from_markdown(line))
-    return rows
+    return _parse(path.read_text(encoding="utf-8"))
+
+
+def _parse(text: str) -> list[LedgerRow]:
+    # Data rows start with an ISO date; the header and separator do not.
+    return [LedgerRow.from_markdown(line) for line in text.splitlines() if line.startswith("| 2")]
 
 
 def append(row: LedgerRow, path: Path | None = None) -> None:
-    locked_append(
-        path or ledger_path(), row.to_markdown(), preamble="# Compute ledger\n\n" + HEADER
-    )
+    locked_append(path or ledger_path(), row.to_markdown(), preamble=PREAMBLE)
 
 
 def has_run(run_id: str, path: Path | None = None) -> bool:
     return any(r.run_id == run_id for r in read_rows(path))
+
+
+class _Logged(Exception):
+    """The ledger has a row for the run already."""
+
+
+def append_once(row: LedgerRow, path: Path | None = None) -> bool:
+    """Append ``row`` unless the ledger has a row for its run id; returns whether it did.
+
+    The check runs under the append's lock, so two pulls of one run at once add one row.
+    """
+
+    def unlogged(before: str) -> None:
+        if any(logged.run_id == row.run_id for logged in _parse(before)):
+            raise _Logged
+
+    try:
+        locked_append(path or ledger_path(), row.to_markdown(), preamble=PREAMBLE, check=unlogged)
+    except _Logged:
+        return False
+    return True
+
+
+def purpose(manifest: RunManifest) -> str:
+    """What a run was, for its row: its kind and model, its config's split, prompt version
+    and limit when it names them, and how it ended."""
+    words = f"{manifest.kind} {manifest.model_ref}"
+    if manifest.adapter_ref:
+        words += f" with {manifest.adapter_ref}"
+    config = manifest.config
+    if config.get("split"):
+        words += f" on {config['split']}"
+    for name, label in (("prompt_version", "prompt"), ("limit", "limit")):
+        if config.get(name) is not None:
+            words += f", {label} {config[name]}"
+    return f"{words}, {manifest.status}"
+
+
+def run_row(manifest: RunManifest) -> LedgerRow:
+    """The ledger row of a run that has ended: the UTC date it started, where it ran and on
+    which GPU, its wall-clock hours, what it was and its cost.
+
+    Raises ``ValueError`` for a run that hasn't ended, whose hours aren't known yet.
+    """
+    if manifest.ended_at is None:
+        raise ValueError(f"run {manifest.run_id} is {manifest.status}, so its hours aren't known")
+    return LedgerRow(
+        date=manifest.started_at.astimezone(UTC).date(),
+        platform=manifest.platform,
+        gpu=manifest.gpu or "",
+        hours=run_hours(manifest.started_at, manifest.ended_at),
+        run_id=manifest.run_id,
+        purpose=purpose(manifest),
+        cost_usd=manifest.cost_usd,
+    )
+
+
+def record_run(manifest: RunManifest, path: Path | None = None) -> tuple[LedgerRow | None, str]:
+    """Append the row of a run that held a GPU, once; returns the row it appended, if any,
+    and a line saying what it did.
+
+    A ``local-cpu`` run gets no row, and a run that hasn't ended gets none yet: pull it
+    again once it has.
+    """
+    run = manifest.run_id
+    if manifest.platform not in GPU_RUN_PLATFORMS:
+        return None, f"ledger: no row, a {manifest.platform} run holds no GPU"
+    if manifest.ended_at is None:
+        return None, f"ledger: no row yet, run {run} is {manifest.status}; pull it once it ends"
+    row = run_row(manifest)
+    if not append_once(row, path):
+        return None, f"ledger: run {run} has its row already"
+    return row, f"ledger: added {row.hours:.2f} h on {row.platform} for run {run}"
+
+
+def audit(manifests: Iterable[RunManifest], rows: Sequence[LedgerRow]) -> list[str]:
+    """How ``manifests`` and the ledger's ``rows`` break invariant I7, a line each.
+
+    A run on a budget platform (``GPU_PLATFORMS``) needs a row. Any run with a row, a
+    ``local-mps`` pilot among them, needs its row to name its platform. All the rows'
+    cash together must stay within ``CASH_LIMIT_USD``.
+    """
+    logged: dict[str, list[LedgerRow]] = {}
+    for row in rows:
+        logged.setdefault(row.run_id, []).append(row)
+    problems = []
+    for manifest in manifests:
+        run, platform = manifest.run_id, manifest.platform
+        if platform in GPU_PLATFORMS and run not in logged:
+            problems.append(f"run {run} ran on {platform}, and the ledger has no row for it")
+        problems += [
+            f"run {run} ran on {platform}, but its ledger row of {row.date} says {row.platform}"
+            for row in logged.get(run, [])
+            if row.platform != platform
+        ]
+    cash = sum(row.cost_usd for row in rows)
+    if cash > CASH_LIMIT_USD:
+        problems.append(f"the ledger spends ${cash:.2f}, over the ${CASH_LIMIT_USD:.0f} limit")
+    return problems
 
 
 @dataclass(frozen=True)
