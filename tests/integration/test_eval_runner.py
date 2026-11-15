@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -11,8 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
+from typer.testing import CliRunner
 
+from forge import cli
 from forge.core.types import Example, Generation, GenParams, Prompt, RunManifest, Score
+from forge.data.manifest import data_manifest_hash
 from forge.data.splits import load_val
 from forge.eval import runner
 from forge.eval.config import OFFICIAL_ITEM_TIMEOUT_S, PRED_TIMEOUT_MS, EvalConfig
@@ -20,6 +26,7 @@ from forge.eval.run_files import RunConflict
 from forge.eval.runner import run_eval
 from forge.infer import hf_backend
 from forge.infer.base import FakeBackend
+from forge.ops.dev_usage import read_uses
 from tests.fakes import WordTokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -97,6 +104,84 @@ def _stored(run_dir: Path, split: str = "val") -> tuple[RunManifest, list[Genera
     return manifest, generations, scores
 
 
+def _summary(name: str, hits: int, total: int) -> str:
+    return f"{name:<11}  {hits:>5}/{total}  {hits / total:.2%}"
+
+
+def _file_hashes(folder: Path) -> dict[str, str]:
+    return {
+        path.relative_to(folder).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(folder.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.phase(2)
+def test_end_to_end_with_fake_backend(spider_mini: Path, runs: Path, tmp_path: Path) -> None:
+    before = _file_hashes(spider_mini / "database")
+    val = _val()
+    cli_runner = CliRunner()
+
+    gold = cli_runner.invoke(
+        cli.app, ["eval", "run", "--backend", "fake", "--model", "gold", "--allow-dirty"]
+    )
+    assert gold.exit_code == 0, gold.output
+    (run_dir,) = runs.iterdir()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}-gold-eval-[0-9a-f]{7}", run_dir.name)
+    manifest, generations, scores = _stored(run_dir)
+    assert (
+        [s.example_id for s in scores] == [e.id for e in val] == [g.example_id for g in generations]
+    )
+    assert [g.sql for g in generations] == [e.gold_sql for e in val]
+    assert [s.hardness for s in scores] == [e.hardness for e in val]
+    assert all(s.valid and s.ex_fast and s.ex_official for s in scores)
+    assert all(s.error_class is None for s in scores)
+    assert _summary("fast EX", 20, 20) in gold.stdout
+    assert _summary("official EX", 20, 20) in gold.stdout
+    assert "scored 20 of 20" in gold.stderr
+    assert "generated 20 samples in " in gold.stdout
+
+    # The manifest says what made the scores, and lists the files beside it.
+    assert manifest.run_id == run_dir.name
+    assert (manifest.kind, manifest.status, manifest.model_ref) == ("eval", "finished", "gold")
+    assert manifest.config["backend"] == "fake" and manifest.config["split"] == "val"
+    assert manifest.data_manifest_hash == data_manifest_hash(spider_mini)
+    assert manifest.ended_at is not None and manifest.ended_at >= manifest.started_at
+    assert manifest.outputs == {
+        "config": "config.yaml",
+        "generations": "eval/val-generations.jsonl",
+        "scores": "eval/val-scores.jsonl",
+    }
+    assert yaml.safe_load((run_dir / "config.yaml").read_text()) == manifest.config
+    (cache_file,) = (tmp_path / "cache" / "gold").iterdir()
+    assert cache_file.name == f"val-{manifest.data_manifest_hash[:12]}.jsonl"
+    built = cache_file.stat()
+
+    constant = cli_runner.invoke(
+        cli.app,
+        [
+            *("eval", "run", "--backend", "fake", "--model", "select-1"),
+            *("--run-id", "select-one", "--allow-dirty"),
+        ],
+    )
+    assert constant.exit_code == 0, constant.output
+    _, generations, scores = _stored(runs / "select-one")
+    assert [g.sql for g in generations] == ["SELECT 1"] * 20
+    assert all(s.valid and not s.ex_fast and s.ex_official is False for s in scores)
+    assert all(s.error_class == "unclassified" for s in scores)
+    assert _summary("fast EX", 0, 20) in constant.stdout
+    assert _summary("official EX", 0, 20) in constant.stdout
+
+    # The second run read the gold results the first one stored, without rebuilding them.
+    assert [path.name for path in (tmp_path / "cache" / "gold").iterdir()] == [cache_file.name]
+    assert (cache_file.stat().st_ino, cache_file.stat().st_mtime_ns) == (
+        built.st_ino,
+        built.st_mtime_ns,
+    )
+    # I2: nothing a run did changed a database.
+    assert _file_hashes(spider_mini / "database") == before
+
+
 @pytest.mark.phase(2)
 def test_resume_no_duplicates(spider_mini: Path, runs: Path, tmp_path: Path) -> None:
     val = _val()
@@ -158,6 +243,49 @@ def test_resume_no_duplicates(spider_mini: Path, runs: Path, tmp_path: Path) -> 
     assert all(s.ex_fast and s.ex_official for s in scores)
     assert run.resumed == 8 and list(run.scores) == scores
     assert manifest.status == "finished" and manifest.started_at == first.started_at
+
+
+@pytest.mark.phase(2)
+def test_dev_requires_reason(
+    with_dev: Path, runs: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_DATA_DIR", str(with_dev))
+    real_log = ROOT / "docs" / "dev-usage.md"
+    real = real_log.read_bytes()
+    cli_runner = CliRunner()
+    dev = ["eval", "run", "--backend", "fake", "--model", "gold", "--split", "dev", "--allow-dirty"]
+
+    refused = cli_runner.invoke(cli.app, dev)
+    assert refused.exit_code == 1
+    assert "error: --split dev needs --reason" in refused.stderr
+    blank = cli_runner.invoke(cli.app, [*dev, "--reason", "  "])
+    assert blank.exit_code == 1 and "needs --reason" in blank.stderr
+    # A backend that isn't built yet is refused before dev is read, so it spends no look.
+    later = cli_runner.invoke(
+        cli.app,
+        [*dev[:2], "--model", "some/model", "--backend", "vllm", "--split", "dev", "--reason", "x"],
+    )
+    assert later.exit_code == 1 and "comes with FG-306" in later.stderr
+    assert not dev_log.exists()
+    assert not runs.exists()
+
+    allowed = cli_runner.invoke(
+        cli.app, [*dev, "--reason", "FG-202 dev guard", "--run-id", "dev-1"]
+    )
+    assert allowed.exit_code == 0, allowed.output
+    assert [use[1:] for use in read_uses(dev_log)] == [("dev-1", "FG-202 dev guard")]
+    manifest, _, scores = _stored(runs / "dev-1", "dev")
+    assert manifest.status == "finished" and manifest.config["split"] == "dev"
+    assert [s.example_id for s in scores] == [f"spider-dev-{i:05d}" for i in range(10)]
+    assert all(s.ex_fast and s.ex_official for s in scores)
+
+    # A reason with another split is a mistake, not a dev use.
+    val_reason = cli_runner.invoke(
+        cli.app, ["eval", "run", "--backend", "fake", "--model", "gold", "--reason", "x"]
+    )
+    assert val_reason.exit_code == 1 and "--reason goes with --split dev" in val_reason.stderr
+    assert len(read_uses(dev_log)) == 1
+    assert real_log.read_bytes() == real
 
 
 @pytest.mark.phase(2)
@@ -235,6 +363,23 @@ def test_failed_run_is_recorded_then_resumed(spider_mini: Path, runs: Path) -> N
     # A finished run's results stand: the same id is refused, not run again.
     with pytest.raises(RunConflict, match="has finished"):
         run_eval(config, backend=FakeBackend(reply, model_ref="gold"), allow_dirty=True)
+
+
+@pytest.mark.phase(2)
+def test_later_options_are_refused_up_front(spider_mini: Path, runs: Path) -> None:
+    cli_runner = CliRunner()
+    for options, message in (
+        (["--backend", "vllm"], "the vllm backend is not available yet: it comes with FG-306"),
+        (["--backend", "llamacpp"], "comes with FG-702"),
+        (["--store", "hub"], "--store hub is available after FG-304"),
+        (["--retry", "1"], "--retry 1 is available after FG-206"),
+        (["--n", "2"], "needs a temperature above 0"),
+        (["--run-id", "../escape"], "names a folder"),
+    ):
+        result = cli_runner.invoke(cli.app, ["eval", "run", "--model", "some/model", *options])
+        assert result.exit_code == 1, (options, result.output)
+        assert result.stderr.startswith("error: ") and message in result.stderr, result.stderr
+    assert not runs.exists()
 
 
 @pytest.mark.phase(2)

@@ -31,7 +31,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
 | FG-201 | Inference backend protocol and CPU backend | 3 | done |  |  | `InferenceBackend`, `FakeBackend` and `render_chat` (thinking off where the template reads the flag); `HfBackend` decodes from `GenParams` alone in left-padded batches, seeds each sample by example and index, loads PEFT adapters; tiny model pinned in `configs/models.yaml` |
-| FG-202 | Eval runner | 5 | todo |  |  |  |
+| FG-202 | Eval runner | 5 | done |  |  | `forge eval run` with the fake (gold, select-1) and hf backends; prompts fitted as in training; predictions in one `SandboxPool` a run; gold cached per split as JSON lines; official EX in one batch at the end, 10 s an item, a 2 s timeout no match (ADR-0008); a batch's generations then scores appended and flushed; a killed run resumes without duplicates; manifest running, then finished or failed with `error.txt` |
 | FG-203 | Metrics with confidence intervals and paired tests | 5 | todo |  |  |  |
 | FG-204 | Error taxonomy | 3 | todo |  |  |  |
 | FG-205 | Report generator | 3 | todo |  |  |  |
@@ -177,7 +177,8 @@ Work discovered along the way that is not a plan story.
   with `FittedPrompt.dropped_columns`. The model can't see the columns it needs there, so FG-401
   and FG-505 should drop those examples or flag them.
 - An excluded example keeps its shortest prompt in `FittedPrompt.prompt` and stays in the eval
-  denominator. FG-202 decides whether eval sends that prompt or the full one.
+  denominator. FG-202 decides whether eval sends that prompt or the full one. It sends that
+  prompt: eval fits prompts with the backend's tokenizer, as training does.
 - `prompt-stats` reads dev questions and schemas without logging a dev use: it runs no model.
   ADR-0004 now says what counts as a dev use, and `prompt-stats` and `forge eval gold` print a
   note saying so with `--split dev` (FG-192).
@@ -197,6 +198,7 @@ Work discovered along the way that is not a plan story.
   and 16,049 rows), flight_4 val 06877-06878 (10,507) and wta_1 dev 00455-00456 (20,662). Their
   results come back truncated, so FG-107 has to decide how a truncated result compares, or
   FG-202/FG-503 run gold with a higher cap. Found by running gold SQL only, so not a dev use.
+  FG-202 runs gold, and predictions against it, with a 100,000-row cap, the evaluator's own.
 - The slowest gold query (baseball_1, `spider-train-03657`) takes 1.2 s on the laptop against the
   2 s default timeout. On a slower Kaggle CPU with busy workers it could time out, so the FG-503
   gold cache should run gold with a longer timeout.
@@ -400,7 +402,8 @@ Work discovered along the way that is not a plan story.
   `HfBackend` defaults to float32 (FG-201).
 - Every row of an `HfBackend` batch gets the batch's wall time as `latency_ms`, so a sum over
   generations counts each batch once per row; FG-202 and FG-301 should time each `generate` call
-  for total generation time (FG-201).
+  for total generation time (FG-201). `forge eval run` prints that total for each attempt
+  (`EvalRun.generate_s`, FG-202).
 - `check_params` refuses `n > 1` at temperature 0, which would give n copies of one greedy reply,
   so FG-202's `--n` needs a `--temperature` above 0 (FG-201).
 - The tiny model's logits are nearly flat (std about 0.01), so its greedy replies can change with
@@ -418,3 +421,27 @@ Work discovered along the way that is not a plan story.
 - transformers 5 types `generate`'s `self` with a protocol that mypy can't match to any model
   class, so `HfBackend` holds its model through a one-method `CausalLM` protocol; FG-402's train
   backends will meet the same (FG-201).
+- Eval prompts go through `fit_prompt` measured by the backend's tokenizer (words for the fake
+  backend), so a long schema is cut as in training, and a prompt still over 1,536 tokens is sent
+  as cut and stays in the denominator. At p1 no val or dev prompt passes the limit (FG-202).
+- The gold cache, `cache/gold/<split>-<data hash[:12]>.jsonl`, took 0.9 s to build for val, 1.3 s
+  for dev and 3.6 s for train on the laptop, and 0.1 s or less to read back; the files are 1.8, 1.8
+  and 6.0 MB. No Spider gold result holds a blob or an infinite float, which pydantic's JSON would
+  turn into text and `null`; the cache tags both anyway. FG-503 can reuse `forge.eval.gold_cache`
+  for rewards (FG-202).
+- On full val, `forge eval run --backend fake --model gold` scores 872 of 872 with both checkers in
+  about 6 s, and `--model select-1` scores 2 of 872 with both: spider-train-01784 and 01785
+  (small_bank_1) have the answer 1. FG-501's constant-query guard can't assume that `SELECT 1`
+  never scores (FG-202).
+- Resuming a dev run calls `load_dev` again, which logs a second row with the same run id, since
+  every call is a look (ADR-0004). FG-304 could let a resumed run keep its first look (FG-202).
+- Without `--run-id`, `make_run_id` gives two evals of one model on the same commit and day the same
+  id, whatever their splits, so the second is refused as a run with other options; pass `--run-id`.
+  A finished run is never resumed or overwritten (FG-202).
+- A run folder holds the `.lock` file that keeps a second process off it; FG-304's Hub mirror should
+  leave it out (FG-202).
+- The scores and generations files hold the contract types only, so the executor's error message
+  for a failed prediction is not stored. FG-204 classifies from the live result in the runner;
+  FG-205's failure examples can show the class, or a later story can store the message (FG-202).
+- `forge eval run` records `platform: local-cpu`, `build_manifest`'s default, whatever the device;
+  FG-303 should set `kaggle` for runs there (FG-202).

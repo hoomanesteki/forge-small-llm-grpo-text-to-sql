@@ -40,7 +40,9 @@ the FG-101 spike add that seven training databases (the six `train_others` ones 
 A dev use is any run that shows model output on dev questions: generating answers for
 them, or scoring or reading such answers. Each one needs `--reason`, loads dev through
 `load_dev()`, and adds a row to `docs/dev-usage.md`. What makes it count is the model:
-seeing how a model does on dev is what can steer later choices.
+seeing how a model does on dev is what can steer later choices. Resuming a dev run that
+was cut off (`forge eval run --run-id`) loads dev again, so it adds a second row with the
+same run id and counts as another look.
 
 Reading dev without a model is not a dev use, needs no reason and writes no row:
 
