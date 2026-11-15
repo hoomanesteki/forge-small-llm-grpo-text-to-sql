@@ -40,8 +40,9 @@ def test_pool_kills_queries_that_overrun_inside_one_row(
     monkeypatch.setattr(sandbox, "_run_job", jobs.run_with_fg191_limits)
     caplog.set_level(logging.DEBUG, logger="forge.sql.sandbox")
     with SandboxPool(2) as pool:
-        # Started first, so the deadline below doesn't count worker start-up.
-        assert pool.run(DB, "SELECT 1").rows == [(1,)]
+        # Warm both workers first: one job would start only one, and the second worker's
+        # start-up would then land inside the timed run below.
+        assert [r.rows for r in pool.run_many([(DB, "SELECT 1")] * 2)] == [[(1,)], [(1,)]]
         results, elapsed_ms = _timed(pool, [(DB, review_query(100)), (DB, review_query(200))], 300)
 
         for result in results:
@@ -63,7 +64,8 @@ def test_pool_kills_queries_that_overrun_inside_one_row(
 @pytest.mark.phase(1)
 def test_pool_stops_runaway_and_cartesian_queries(spider_mini: Path) -> None:
     with SandboxPool(2) as pool:
-        assert pool.run(DB, "SELECT 1").rows == [(1,)]
+        # Warm both workers, so the timed runs below don't pay for a worker start-up.
+        assert [r.rows for r in pool.run_many([(DB, "SELECT 1")] * 2)] == [[(1,)], [(1,)]]
         # With today's limits the review's queries stop before they do any work.
         reviewed = [(DB, review_query(100)), (DB, review_query(200))]
         results, elapsed_ms = _timed(pool, reviewed, 300)
