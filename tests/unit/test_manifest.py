@@ -11,7 +11,14 @@ from pydantic import ValidationError
 
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
-from forge.ops.manifest import DirtyTreeError, Platform, build_manifest, config_hash, git_sha
+from forge.ops.manifest import (
+    DirtyTreeError,
+    GitError,
+    Platform,
+    build_manifest,
+    config_hash,
+    git_sha,
+)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -186,3 +193,52 @@ def test_unknown_platform_rejected_at_runtime(repo: Path) -> None:
 @pytest.mark.phase(1)
 def test_platforms_match_the_manifest_contract() -> None:
     assert get_args(RunManifest.model_fields["platform"].annotation) == get_args(Platform)
+
+
+def _commit_layout(repo: Path) -> str:
+    """Give ``repo`` a src module and both append-only logs, committed; return HEAD."""
+    for rel in ("src/x.py", "docs/compute-ledger.md", "docs/dev-usage.md"):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("one\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "layout")
+    return git_sha(repo)
+
+
+@pytest.mark.phase(2)
+def test_dirty_src_is_seen_from_a_subdirectory(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _commit_layout(repo)
+    (repo / "src" / "x.py").write_text("two\n")
+    # The check covers the whole checkout, not the folder git happens to start in.
+    monkeypatch.chdir(repo / "docs")
+    with pytest.raises(DirtyTreeError):
+        git_sha()
+    with pytest.raises(DirtyTreeError):
+        git_sha(repo / "docs")
+
+
+@pytest.mark.phase(2)
+def test_appended_dev_log_is_clean_from_a_subdirectory(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _commit_layout(repo)
+    with (repo / "docs" / "dev-usage.md").open("a") as log:
+        log.write("| 2026-11-15 | row |\n")
+    for where in (repo / "docs", repo / "src"):
+        monkeypatch.chdir(where)
+        assert git_sha() == head
+        assert git_sha(where) == head
+
+
+@pytest.mark.phase(2)
+def test_outside_a_checkout_is_a_git_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    # Keeps git from finding a checkout that happens to hold the temp folder.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    with pytest.raises(GitError, match=f"{re.escape(str(plain))} is not in a git checkout") as err:
+        git_sha(plain, allow_dirty=True)
+    assert "FORGE_ROOT" in str(err.value)
+    # The checkout is required, so no build can name a commit it doesn't have.
+    with pytest.raises(GitError):
+        build_manifest("eval", {}, model_ref="m", seed=0, repo=plain, allow_dirty=True)

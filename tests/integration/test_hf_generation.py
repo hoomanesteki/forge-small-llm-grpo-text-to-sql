@@ -3,19 +3,27 @@ offline (``tests/tiny_hf.py``), so this runs in CI with no download."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    LogitsProcessor,
+    LogitsProcessorList,
+    PreTrainedModel,
+)
 
 from forge.core.types import ExecResult, Generation, GenParams, Prompt
 from forge.eval.retry import ask_again, retry_prompt
+from forge.infer import hf_backend
 from forge.infer.base import render_chat
 from forge.infer.hf_backend import HfBackend
 from forge.sql.extract import extract_sql
-from tests.tiny_hf import save_random_model
+from tests.tiny_hf import byte_tokenizer, save_random_model
 
 # Defaults a checkpoint can ship that would change a greedy reply if they reached generate.
 SHIPPED = {
@@ -104,6 +112,64 @@ def test_greedy_reply_is_the_argmax_at_every_step(model_dir: Path) -> None:
     # Left to the checkpoint's defaults, generate decodes otherwise, so the backend has to
     # drop them to be greedy.
     assert with_shipped_defaults != greedy
+
+
+class _EndRows(LogitsProcessor):
+    """Ends rows of a batch early: at step ``n`` (from 1), row ``r`` must pick ``token``."""
+
+    def __init__(self, ends: dict[int, tuple[int, int]]) -> None:
+        self.ends = ends  # {step: (row, token)}
+        self.step = 0
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.Tensor) -> torch.Tensor:
+        self.step += 1
+        if self.step not in self.ends:
+            return scores
+        row, token = self.ends[self.step]
+        forced = scores.clone()
+        forced[row] = float("-inf")
+        forced[row, token] = 0.0
+        return forced
+
+
+@pytest.mark.phase(2)
+def test_rows_that_end_early_are_cut_at_their_end_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tokenizer = byte_tokenizer()
+    end_of_text = tokenizer.convert_tokens_to_ids("<|endoftext|>")
+    end_of_turn = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    # The checkpoint lists only <|endoftext|>, so a chat turn's end stops a row only if
+    # the backend adds the tokenizer's own end token.
+    model_dir = save_random_model(tmp_path / "model", generation={"eos_token_id": end_of_text})
+    backend = HfBackend(str(model_dir), device="cpu", batch_size=3)
+    assert backend.eos_token_ids == [end_of_text, end_of_turn]
+    params = GenParams(max_new_tokens=24)
+    free = backend.generate(PROMPTS, params)
+    assert [g.tokens_out for g in free] == [24, 24, 24]
+
+    # In one batch: q-1 ends its turn at step 5, q-2 at step 9 with the checkpoint's
+    # token, and q-0 runs on, so generate pads the two after they end.
+    sampling = hf_backend._sampling
+
+    def ending(rows: Sequence[tuple[Prompt, str, int]], params: GenParams) -> LogitsProcessorList:
+        processors = sampling(rows, params)
+        processors.append(_EndRows({5: (1, end_of_turn), 9: (2, end_of_text)}))
+        return processors
+
+    monkeypatch.setattr(hf_backend, "_sampling", ending)
+    cut = backend.generate(PROMPTS, params)
+
+    assert [g.tokens_out for g in cut] == [24, 5, 9]
+    assert cut[0].text == free[0].text
+    model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32)
+    for generation, steps, end in ((cut[1], 4, end_of_turn), (cut[2], 8, end_of_text)):
+        prompt = PROMPTS[int(generation.example_id[-1])]
+        text = render_chat(tokenizer, prompt.messages)
+        prompt_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        # Greedy up to the end token, and nothing generate padded the row with after it.
+        before = _argmax_reply(model, prompt_ids, steps, end_of_turn)
+        assert generation.text == tokenizer.decode([*before, end], skip_special_tokens=True)
 
 
 @pytest.mark.phase(2)

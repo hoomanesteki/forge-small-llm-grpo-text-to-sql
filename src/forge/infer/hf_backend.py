@@ -74,11 +74,15 @@ class HfBackend:
     ) -> None:
         if batch_size < 1:
             raise ValueError(f"batch_size must be at least 1, got {batch_size}")
+        # Every argument is checked before the tokenizer and model load, which can take
+        # minutes, so a mistyped adapter or dtype fails at once.
+        self.device = resolve_device(device)
+        torch_dtype = resolve_dtype(dtype)
+        repo, revision = split_ref(model_ref)
+        adapter = None if adapter_ref is None else split_ref(adapter_ref)
         self.model_ref = model_ref
         self.adapter_ref = adapter_ref
         self.batch_size = batch_size
-        self.device = resolve_device(device)
-        repo, revision = split_ref(model_ref)
         self.tokenizer = AutoTokenizer.from_pretrained(repo, revision=revision)
         self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token is None:
@@ -86,7 +90,7 @@ class HfBackend:
         # from_pretrained returns the model in eval mode, as PEFT does an adapter it loads
         # for inference.
         model = AutoModelForCausalLM.from_pretrained(
-            repo, revision=revision, dtype=resolve_dtype(dtype), device_map=self.device
+            repo, revision=revision, dtype=torch_dtype, device_map=self.device
         )
         shipped = model.generation_config
         # A chat model ends its turn with the tokenizer's end token, which the checkpoint's
@@ -100,10 +104,10 @@ class HfBackend:
             pad_token_id=self.tokenizer.pad_token_id,
         )
         self.model: CausalLM = model
-        if adapter_ref is not None:
-            adapter, adapter_revision = split_ref(adapter_ref)
+        if adapter is not None:
+            adapter_repo, adapter_revision = adapter
             self.model = PeftModel.from_pretrained(
-                model, adapter, revision=adapter_revision, torch_device=str(self.device)
+                model, adapter_repo, revision=adapter_revision, torch_device=str(self.device)
             )
 
     def generate(self, prompts: Sequence[Prompt], params: GenParams) -> list[Generation]:

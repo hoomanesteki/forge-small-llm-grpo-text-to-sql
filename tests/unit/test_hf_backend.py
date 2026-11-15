@@ -4,10 +4,12 @@ model refs, where a reply ends, and the seeded sampler."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 import torch
 
+from forge.infer import hf_backend
 from forge.infer.hf_backend import (
     GumbelSampler,
     HfBackend,
@@ -115,3 +117,24 @@ def test_batch_size_must_be_positive() -> None:
     # Refused before anything loads.
     with pytest.raises(ValueError, match="batch_size must be at least 1, got 0"):
         HfBackend("org/model", batch_size=0)
+
+
+class _NoLoad:
+    @staticmethod
+    def from_pretrained(*args: object, **kwargs: object) -> NoReturn:
+        raise AssertionError("loaded before its arguments were checked")
+
+
+@pytest.mark.phase(2)
+def test_bad_adapter_ref_or_dtype_is_refused_before_anything_loads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for loader in ("AutoTokenizer", "AutoModelForCausalLM", "PeftModel"):
+        monkeypatch.setattr(hf_backend, loader, _NoLoad)
+    # A run folder's path, mistyped: not a directory, and too many segments for a Hub id.
+    with pytest.raises(FileNotFoundError, match="neither a directory nor a Hub repo id"):
+        HfBackend("org/model", adapter_ref="runs/2026-11-15-sft-a1b2c3d/adapter", device="cpu")
+    with pytest.raises(ValueError, match="has nothing after its '@'"):
+        HfBackend("org/model", adapter_ref="org/adapter@", device="cpu")
+    with pytest.raises(ValueError, match="dtype must be one of float32, float16, bfloat16"):
+        HfBackend("org/model", dtype="fp16", device="cpu")

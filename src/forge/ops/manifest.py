@@ -27,18 +27,50 @@ class DirtyTreeError(RuntimeError):
     pass
 
 
-def _git(args: list[str], repo: Path | None) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
-    ).stdout.strip()
+class GitError(RuntimeError):
+    """git can't name the commit: no checkout it can read holds the folder, or git is missing."""
+
+
+def _git(args: list[str], where: Path) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(where), *args], capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        raise GitError(f"can't run git in {where}: {exc}") from exc
+
+
+def _output(args: list[str], where: Path) -> str:
+    done = _git(args, where)
+    if done.returncode != 0:
+        raise GitError(f"git {' '.join(args)} failed in {where}: {_one_line(done.stderr)}")
+    return done.stdout.strip()
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
 
 
 def git_sha(repo: Path | None = None, *, allow_dirty: bool = False) -> str:
-    sha = _git(["rev-parse", "HEAD"], repo)
+    """HEAD's commit in the checkout that holds ``repo`` (by default the current directory).
+
+    The dirty check covers that whole checkout, from its top, whichever of its folders
+    ``repo`` is. Raises ``GitError`` when no checkout holds it.
+    """
+    where = Path.cwd() if repo is None else repo
+    found = _git(["rev-parse", "--show-toplevel"], where)
+    if found.returncode != 0:
+        raise GitError(
+            f"{where} is not in a git checkout ({_one_line(found.stderr)}); a run records its "
+            "commit, so run it inside a Forge checkout or set FORGE_ROOT to one"
+        )
+    top = Path(found.stdout.strip())
+    sha = _output(["rev-parse", "HEAD"], top)
     # Untracked files count (whatever status.showUntrackedFiles says): a new module that
-    # isn't committed still changes results. The append-only logs don't.
-    excludes = [f":(exclude){log}" for log in APPEND_ONLY_LOGS]
-    status = _git(["status", "--porcelain", "--untracked-files=all", "--", ".", *excludes], repo)
+    # isn't committed still changes results. The append-only logs don't. Pathspecs are
+    # anchored at the top, so where git starts can't narrow the check or move the logs.
+    excludes = [f":(top,exclude){log}" for log in APPEND_ONLY_LOGS]
+    status = _output(["status", "--porcelain", "--untracked-files=all", "--", ":/", *excludes], top)
     if status:
         if not allow_dirty:
             raise DirtyTreeError(

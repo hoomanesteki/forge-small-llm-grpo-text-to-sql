@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # make smoke: the whole eval pipeline on CPU with the tiny model, on the fixture data. It
 # runs the smoke tests, then `forge eval run` with the tiny model on the fixture's 20 val
-# questions and `forge report run` on that run, in a scratch runs folder removed at the end.
+# questions and `forge report run` on that run, and prints the report, all in a scratch
+# runs folder removed at the end.
 #
 # When every step passes on a clean tree it writes .smoke-ok-<commit sha> at the repo root,
 # which `forge kaggle run` requires before it pushes a GPU job (FG-303). The marker vouches
-# for a commit, so uncommitted changes pass without one. Each attempt first drops the marker
-# of the commit it runs on, so a marker always means the last smoke on that commit passed.
+# for a commit, so uncommitted changes pass without one, and so does a smoke that skipped
+# some phases' tests. Each attempt first drops the marker of the commit it runs on, so a
+# marker always means the last smoke on that commit passed.
 #
 # Usage: scripts/smoke/pipeline.sh, or make smoke. PHASE=N runs the smoke tests of phases
-# 0 to N only, as make gate PHASE=N does.
+# 0 to N only, as make gate PHASE=N does, and writes no marker unless N is the last phase.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+last_phase=8 # the plan's last, as in the Makefile
+phase="${PHASE:-$last_phase}"
 sha="$(git rev-parse HEAD)"
 run_id="smoke-${sha:0:7}"
 rm -f ".smoke-ok-$sha"
@@ -34,7 +38,7 @@ run_commit() {
 model="$(tiny_model)"
 
 step "pytest tests/smoke"
-uv run pytest --phase "${PHASE:-8}" tests/smoke
+uv run pytest --phase "$phase" tests/smoke
 
 step "forge eval run --backend hf --model $model --split val --limit 20"
 # Two SQL workers: 20 questions need no more, and a 2-core CI runner has no more to give.
@@ -43,6 +47,16 @@ uv run forge eval run --backend hf --model "$model" --split val --limit 20 \
 
 step "forge report run $run_id"
 uv run forge report run "$run_id"
+# Printed whole, as the gate's demo shows it, since the scratch folder goes at the end.
+report="$FORGE_RUNS_DIR/$run_id/eval/val-report.md"
+step "$report"
+cat "$report"
+
+if [[ "$phase" != "$last_phase" ]]; then
+    printf '\nsmoke passed with the smoke tests of phases 0 to %s only, so no marker: ' "$phase"
+    printf 'run it with every phase (PHASE unset or %s)\n' "$last_phase"
+    exit 0
+fi
 
 # The manifest names the commit the run was made at, with -dirty for uncommitted changes.
 made_at="$(run_commit "$FORGE_RUNS_DIR/$run_id/manifest.json")"

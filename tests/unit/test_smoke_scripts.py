@@ -17,7 +17,8 @@ SMOKE = ROOT / "scripts" / "smoke"
 
 # uv as the smoke pipeline calls it, without the work: `uv run python` is the tests' own
 # Python, and every other command only logs its arguments. `forge eval run` also stores
-# the manifest of a run made at FAKE_MADE_AT, and the tool FAKE_FAIL names fails.
+# the manifest of a run made at FAKE_MADE_AT, `forge report run` a one-line report, and
+# the tool FAKE_FAIL names fails.
 FAKE_UV = """#!/usr/bin/env bash
 set -euo pipefail
 shift
@@ -37,6 +38,10 @@ if [[ "$tool $1 $2" == "forge eval run" ]]; then
     done
     mkdir -p "$FORGE_RUNS_DIR/$2"
     printf '{"git_sha": "%s"}' "$FAKE_MADE_AT" > "$FORGE_RUNS_DIR/$2/manifest.json"
+fi
+if [[ "$tool $1 $2" == "forge report run" ]]; then
+    mkdir -p "$FORGE_RUNS_DIR/$3/eval"
+    printf '# Run %s: official EX 0.0%%\n' "$3" > "$FORGE_RUNS_DIR/$3/eval/val-report.md"
 fi
 """
 
@@ -119,17 +124,21 @@ def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> Non
     fake.chmod(0o755)
     log = tmp_path / "uv.log"
 
-    def smoke(made_at: str, fail: str = "") -> subprocess.CompletedProcess[str]:
+    def smoke(
+        made_at: str, fail: str = "", phase: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         log.unlink(missing_ok=True)
-        env = {
-            **os.environ,
-            "PATH": f"{fake.parent}{os.pathsep}{os.environ['PATH']}",
-            "FAKE_PYTHON": sys.executable,
-            "FAKE_LOG": str(log),
-            "FAKE_MADE_AT": made_at,
-            "FAKE_FAIL": fail,
-            "PHASE": "2",
-        }
+        # make gate PHASE=N exports PHASE to the tests, so only a case that sets it has it.
+        env = {key: value for key, value in os.environ.items() if key != "PHASE"}
+        env.update(
+            PATH=f"{fake.parent}{os.pathsep}{os.environ['PATH']}",
+            FAKE_PYTHON=sys.executable,
+            FAKE_LOG=str(log),
+            FAKE_MADE_AT=made_at,
+            FAKE_FAIL=fail,
+        )
+        if phase is not None:
+            env["PHASE"] = phase
         script = repo / "scripts" / "smoke" / "pipeline.sh"
         return subprocess.run([str(script)], env=env, capture_output=True, text=True)
 
@@ -140,18 +149,23 @@ def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> Non
     tiny = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))["tiny"]
     run_id = f"smoke-{sha[:7]}"
     assert log.read_text(encoding="utf-8").splitlines() == [
-        "pytest --phase 2 tests/smoke",
+        "pytest --phase 8 tests/smoke",
         f"forge eval run --backend hf --model {tiny['repo']}@{tiny['revision']} --split val "
         f"--limit 20 --run-id {run_id} --workers 2 --allow-dirty",
         f"forge report run {run_id}",
     ]
     data_dir, runs_dir = Path(f"{log}.env").read_text(encoding="utf-8").splitlines()
     assert Path(data_dir).resolve() == (repo / "tests" / "fixtures" / "spider_mini").resolve()
-    assert not Path(runs_dir).exists()  # the scratch runs folder goes at the end
+    # The report's path and the report itself are printed, then the scratch folder goes.
+    report = Path(runs_dir) / run_id / "eval" / "val-report.md"
+    assert f"\n== {report}\n# Run {run_id}: official EX 0.0%\n" in passed.stdout
+    assert not Path(runs_dir).exists()
     marker = repo / f".smoke-ok-{sha}"
     assert marker.read_text(encoding="utf-8") == f"make smoke passed on {sha} with run {run_id}\n"
     assert not earlier.exists()
     assert _git(repo, "status", "--porcelain", "--untracked-files=all") == ""
+    assert smoke(sha, phase="8").returncode == 0
+    assert marker.is_file()
 
     # Uncommitted changes pass, but vouch for no commit, so the marker goes.
     dirty = smoke(f"{sha}-dirty")
@@ -159,9 +173,18 @@ def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> Non
     assert f"smoke passed on {sha}-dirty, not on commit {sha}, so no marker" in dirty.stdout
     assert not marker.exists()
 
+    # So does a smoke that skipped some phases' tests, as make gate PHASE=2 runs it.
+    marker.write_text("an earlier pass\n", encoding="utf-8")
+    reduced = smoke(sha, phase="2")
+    assert reduced.returncode == 0, reduced.stderr
+    assert log.read_text(encoding="utf-8").splitlines()[0] == "pytest --phase 2 tests/smoke"
+    assert f"# Run {run_id}: official EX 0.0%" in reduced.stdout
+    assert "smoke tests of phases 0 to 2 only, so no marker" in reduced.stdout
+    assert not marker.exists()
+
     # A failed step stops the pipeline and takes the commit's earlier marker with it.
     marker.write_text("an earlier pass\n", encoding="utf-8")
     failed = smoke(sha, fail="pytest")
     assert failed.returncode != 0
-    assert log.read_text(encoding="utf-8").splitlines() == ["pytest --phase 2 tests/smoke"]
+    assert log.read_text(encoding="utf-8").splitlines() == ["pytest --phase 8 tests/smoke"]
     assert not marker.exists()

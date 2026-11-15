@@ -4,7 +4,9 @@ A run evaluates one model on one split:
 
 1. Load the split. Dev loads only through ``load_dev``, which needs a reason and spends
    one of the project's six looks (ADR-0004). The known failing golds are left out
-   (``FAILING_GOLD_IDS``), and ``limit`` keeps the first questions in id order.
+   (``FAILING_GOLD_IDS``), and ``limit`` keeps the first questions: in id order on val
+   and dev, in the loader's file order on train, so train_spider comes before the rowless
+   train_others databases.
 2. Build each prompt as training does, with ``fit_prompt`` measured by the backend's
    tokenizer (the fake backend counts words), so a long schema is cut the same way. A
    prompt still over the limit is sent as cut, and its question still counts.
@@ -62,7 +64,7 @@ from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
 from forge.ops.manifest import build_manifest
-from forge.ops.paths import cache_dir, runs_dir
+from forge.ops.paths import cache_dir, repo_root, runs_dir
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
 
@@ -158,6 +160,7 @@ def run_eval(
         platform=config.platform,
         adapter_ref=config.adapter,
         allow_dirty=allow_dirty,
+        repo=repo_root(),
         data_dir=root,
     )
     paths = RunPaths((runs_root or runs_dir()) / fresh.run_id, config.split)
@@ -201,7 +204,9 @@ def _evaluate(
         # Loaded before dev, so a model that fails to load spends no look at dev.
         backend, count_tokens = _hf_backend(config)
     loaded = _load_split(config, manifest.run_id, root)
-    examples = sorted((e for e in loaded if e.id not in FAILING_GOLD_IDS), key=lambda e: e.id)
+    kept = [e for e in loaded if e.id not in FAILING_GOLD_IDS]
+    # By id, train_others would come first, and its gold results are all empty, 0 or NULL.
+    examples = kept if config.split == "train" else sorted(kept, key=lambda e: e.id)
     if not examples:
         raise ValueError(f"the {config.split} split has no questions in {root}")
     gold = gold_results(

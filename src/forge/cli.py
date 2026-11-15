@@ -365,7 +365,12 @@ def eval_run(
         typer.Option(help="Why dev is evaluated: required for --split dev, and logged."),
     ] = None,
     limit: Annotated[
-        int | None, typer.Option(min=1, help="Answer only the first N questions by id.")
+        int | None,
+        typer.Option(
+            min=1,
+            help="Answer only the first N questions: by id on val and dev, in file order on "
+            "train (train_spider before the rowless train_others).",
+        ),
     ] = None,
     prompt_version: Annotated[
         PromptVersionName, typer.Option(help="p1, or p2 with sample rows.")
@@ -403,13 +408,15 @@ def eval_run(
 
     With --config, a file in configs/eval/ gives the options it sets. Files go to
     runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
-    eval/<split>-generations.jsonl and -scores.jsonl. Exits 1 if the run fails.
+    eval/<split>-generations.jsonl and -scores.jsonl. With --retry 1,
+    eval/<split>-first-tries.jsonl keeps the first reply of each retried sample, and the
+    generations file holds the reply each score is for. Exits 1 if the run fails.
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
     from forge.eval.runner import WORKERS, run_eval
     from forge.ops.dev_usage import DevBudgetExceeded
-    from forge.ops.manifest import DirtyTreeError
+    from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound
     from forge.sql.sandbox import SandboxError
 
@@ -445,6 +452,7 @@ def eval_run(
     except (
         DevBudgetExceeded,
         DirtyTreeError,
+        GitError,
         ImportError,
         NotAvailable,
         OSError,
@@ -709,14 +717,12 @@ def report_rebuild(
 
 def _report_git_sha() -> str:
     """The commit a report came from, marked dirty when the tree has changes."""
-    import subprocess
-
-    from forge.ops.manifest import git_sha
+    from forge.ops.manifest import GitError, git_sha
     from forge.ops.paths import RepoRootNotFound, repo_root
 
     try:
         return git_sha(repo_root(), allow_dirty=True)
-    except (OSError, RepoRootNotFound, subprocess.CalledProcessError):
+    except (GitError, RepoRootNotFound):
         # A wheel installed outside a checkout (a Kaggle kernel) has no history to name.
         return "unknown (not run from a git checkout)"
 
