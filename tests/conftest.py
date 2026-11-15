@@ -1,4 +1,4 @@
-"""Phase marker plugin and shared Spider data fixtures.
+"""Phase marker plugin, shared Spider data fixtures, and the tiny test model.
 
 Every test declares the plan phase that introduced it with ``@pytest.mark.phase(n)``.
 ``pytest --phase N`` runs phases 0..N and skips the rest, which is what a phase gate
@@ -17,6 +17,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 # Typer forces a rich terminal whenever GITHUB_ACTIONS is set, so CLI errors come back
 # boxed and full of ANSI codes in CI but plain everywhere else. Tests compare text, so
@@ -24,6 +25,14 @@ import pytest
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
 SPIDER_MINI = Path(__file__).resolve().parent / "fixtures" / "spider_mini"
+MODELS = Path(__file__).resolve().parents[1] / "configs" / "models.yaml"
+
+
+@pytest.fixture
+def tiny_model_ref() -> str:
+    """The tiny random-weight test model, ``<repo>@<revision>`` from configs/models.yaml."""
+    tiny = yaml.safe_load(MODELS.read_text(encoding="utf-8"))["tiny"]
+    return f"{tiny['repo']}@{tiny['revision']}"
 
 
 @pytest.fixture

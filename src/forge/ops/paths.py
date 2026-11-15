@@ -1,4 +1,4 @@
-"""Where the repo's append-only logs live."""
+"""Where the repo's append-only logs, local runs and caches live."""
 
 from __future__ import annotations
 
@@ -42,3 +42,17 @@ def dev_usage_path() -> Path:
     if os.environ.get("FORGE_DEV_USAGE"):
         return Path(os.environ["FORGE_DEV_USAGE"])
     return repo_root() / APPEND_ONLY_LOGS[1]
+
+
+def runs_dir() -> Path:
+    """Local run folders, ``runs/<run_id>/``: ``FORGE_RUNS_DIR`` if set, else ``runs``."""
+    if os.environ.get("FORGE_RUNS_DIR"):
+        return Path(os.environ["FORGE_RUNS_DIR"])
+    return repo_root() / "runs"
+
+
+def cache_dir() -> Path:
+    """Results worth keeping between runs: ``FORGE_CACHE_DIR`` if set, else ``cache``."""
+    if os.environ.get("FORGE_CACHE_DIR"):
+        return Path(os.environ["FORGE_CACHE_DIR"])
+    return repo_root() / "cache"

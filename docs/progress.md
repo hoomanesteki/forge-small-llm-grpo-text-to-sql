@@ -30,13 +30,14 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
-| FG-201 | Inference backend protocol and CPU backend | 3 | todo |  |  |  |
-| FG-202 | Eval runner | 5 | todo |  |  |  |
-| FG-203 | Metrics with confidence intervals and paired tests | 5 | todo |  |  |  |
-| FG-204 | Error taxonomy | 3 | todo |  |  |  |
-| FG-205 | Report generator | 3 | todo |  |  |  |
-| FG-206 | Execution-guided retry | 3 | todo |  |  |  |
-| FG-207 | CPU smoke pipeline in CI | 3 | todo |  |  |  |
+| FG-201 | Inference backend protocol and CPU backend | 3 | done |  |  | `InferenceBackend`, `FakeBackend` and `render_chat` (thinking off where the template reads the flag); `HfBackend` decodes from `GenParams` alone in left-padded batches, seeds each sample by example and index, loads PEFT adapters; tiny model pinned in `configs/models.yaml` |
+| FG-202 | Eval runner | 5 | done |  |  | `forge eval run` with the fake (gold, select-1) and hf backends; prompts fitted as in training; predictions in one `SandboxPool` a run; gold cached per split as JSON lines; official EX in one batch at the end, 10 s an item, a 2 s timeout no match (ADR-0008); a batch's generations then scores appended and flushed; a killed run resumes without duplicates; manifest running, then finished or failed with `error.txt` |
+| FG-203 | Metrics with confidence intervals and paired tests | 5 | done |  |  | `summarize`, `compare` and `pass_at_k` in `forge.eval.metrics`; 95% percentile bootstrap, 1,000 resamples, `default_rng(0)` for each interval, drawing whole questions or `gold_clusters`; exact McNemar from statsmodels, with no p-value for several samples a question; official EX when every score has a verdict, else fast |
+| FG-204 | Error taxonomy | 3 | done |  |  | `classify` in `forge.eval.taxonomy`: no_sql, syntax and schema_link from the error kind, then sqlglot shapes compare tables, joins, select lists, aggregates, WHERE, GROUP BY to LIMIT and last literals; names resolve to tables against each database's columns, a double-quoted name no table has is a string, and a nested filter query counts in its condition; `forge eval run` stores the class of each wrong prediction |
+| FG-205 | Report generator | 3 | done |  |  | `forge report run`, `compare` and `rebuild` (`forge.eval.report`) from a finished run's stored files (`read_run`) and its split's questions in data with the manifest's hash; official EX leads, with fast EX and the valid rate beside it, 95% intervals over gold clusters, a by-hardness table and PNG, the error classes of official EX failures, and 5 failures from each of the 3 most common classes; compare gives the paired change, McNemar's table and p, and changes by hardness and class; rebuild renders the run's reports again and diffs them, the `Generated:` line aside |
+| FG-206 | Execution-guided retry | 3 | done |  |  | `--retry 1` asks once more, with the executor's error, for each query that fails to run (never one that ran), in the same `SandboxPool`, and scores the second reply; `Score` gains `attempts` and `first_try_ex` (ADR-0015); first replies kept in `eval/<split>-first-tries.jsonl` and judged in the one official batch; each retry drawn with its own seed; reports show EX with and without retry and the paired change |
+| FG-207 | CPU smoke pipeline in CI | 3 | done |  |  | `make smoke` (`scripts/smoke/pipeline.sh`) runs `tests/smoke`, then `forge eval run` with the pinned tiny model on the fixture's 20 val questions and `forge report run`, in a scratch runs folder; a pass on a clean commit writes the git-ignored `.smoke-ok-<sha>`, and uncommitted work passes without one; CI `smoke` job on 3.12, Hugging Face cache keyed on the tiny revision, 10-minute bound, a required check; `forge eval run --workers`; I4 traces every number of a run report to its stored files (`tests/report_trace.py`); `scripts/smoke/phase_2.sh` |
+| FG-291 | Local pilot baseline on Apple silicon | 3 | done |  | 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7 | `local-mps` platform (ADR-0016), counted in neither the Kaggle quota nor GPU hours; `forge eval run --device` (`cpu` by default, `mps` refused on dev) and `--config` for `configs/eval/*.yaml`; Qwen2.5-Coder-0.5B-Instruct pinned as `pilot`; the full val run on the M4's GPU is in `docs/runs/` with its generated report, val only; a plan story since FG-294 |
 
 ## Phase 3: Free-GPU ops and baselines (v0.3.0)
 
@@ -119,6 +120,10 @@ Work discovered along the way that is not a plan story.
 | FG-195 | Gate 1 fixes: review follow-ups | done | `forge data fetch` reports hf_xet's bare `RuntimeError` with the retry hint, `canonical_json` sorts keys as the strings JSON writes so a manifest's copy of an int-keyed config hashes like it, and a `/` after the `@` outside `refs/` makes a model ref a path; the FG-192 note on `extract_sql` no longer claims short sentences that parse as a SELECT are passed over |
 | FG-196 | Gate 1 fixes: sandbox polish | done | A watchdog test that fails if the watchdog is removed (a query the progress handler never checks); a worker that dies under an official EX item counts as no match instead of aborting the run, and both eval CLIs catch `SandboxError`; a job whose result can't be pickled reports the type instead of killing its worker; the executor, ADR-0014 and progress narrowed to say the in-process few-hundredths bound was measured for four functions only and the item timeout covers the whole item (FG-508) |
 | FG-197 | Gate 1 fixes: final polish | done | Official EX counts only a worker's death as a miss, so a pool that can't start raises again; a reply the parent can't unpickle keeps its worker; `statement_keyword` reads byte order marks, Tcl-style parameters, ASCII keywords and the `WITH` grammar as SQLite does; a forced Hub download that fails shows its cause, the bad zip and the hint; the timing tests assert the kill and use the worst rows the limits allow, gold is measured as the evaluator runs it, and ADR-0014 lists the known limits |
+| FG-292 | Gate 2 fixes: run provenance | done | A run's commit and dirty check cover the whole checkout `FORGE_ROOT` names, wherever the run starts, and outside a checkout `forge eval run` prints one `error:` line; run locks are gitignored under `docs/runs`; `make smoke` prints its report and writes the marker only with every phase (PHASE unset or 8); `--split train --limit N` takes the first N in file order, train_spider before the rowless train_others, while val and dev stay in id order; `HfBackend` checks adapter and dtype before loading, and a test ends rows of one batch at different steps; `forge eval run --help` names the first-tries file |
+| FG-293 | Gate 2 fixes: statistics and reports | done | McNemar's exact test pairs gold clusters, which key on gold queries with whitespace collapsed; the taxonomy reads a whole ORDER BY alias as SQLite does and drops derived-table and CTE qualifiers; `rebuild` masks only the Generated line's time, fails without the chart and compares its bytes where the renderer its PNG names is this machine's; `compare --out` that resolves to the default path is the default; a spy shows retried SQL runs in `SandboxPool`; the pilot's report regenerated |
+| FG-294 | Gate 2 fixes: plan and pilot notes | done | FG-291 gets a Phase 2 story block whose Tests line names its 15 tests, so traceability covers 22 Phase 0 to 2 stories, and moves to the Phase 2 table; section 5.5 lets a pilot or found story hold `FG-N91`, with gate fixes from the next free number; the pilot's unfenced replies and rule-3 cuts counted; the Phase 2 demo says `make smoke` prints its report from a scratch folder |
+| FG-295 | Gate 2 fixes: last items | done | The taxonomy reads a whole ORDER BY alias in parentheses or with COLLATE, drops parentheses around a whole ORDER BY term, and lets a derived table's or CTE's columns win over an alias; `rebuild` skips a chart only for a renderer-shaped Software text, and the full-data pilot test skips rather than pass when its chart isn't compared; `compare --out` naming the default file through a symlink or letter case writes that file; `git_sha` excludes the logs where `forge.ops.paths` puts them; the pilot's rule-3 note recounted by `scripts/count_pilot_extraction.py`; `GitError` hand-off for Phase 3 |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -177,7 +182,8 @@ Work discovered along the way that is not a plan story.
   with `FittedPrompt.dropped_columns`. The model can't see the columns it needs there, so FG-401
   and FG-505 should drop those examples or flag them.
 - An excluded example keeps its shortest prompt in `FittedPrompt.prompt` and stays in the eval
-  denominator. FG-202 decides whether eval sends that prompt or the full one.
+  denominator. FG-202 decides whether eval sends that prompt or the full one. It sends that
+  prompt: eval fits prompts with the backend's tokenizer, as training does.
 - `prompt-stats` reads dev questions and schemas without logging a dev use: it runs no model.
   ADR-0004 now says what counts as a dev use, and `prompt-stats` and `forge eval gold` print a
   note saying so with `--split dev` (FG-192).
@@ -197,6 +203,7 @@ Work discovered along the way that is not a plan story.
   and 16,049 rows), flight_4 val 06877-06878 (10,507) and wta_1 dev 00455-00456 (20,662). Their
   results come back truncated, so FG-107 has to decide how a truncated result compares, or
   FG-202/FG-503 run gold with a higher cap. Found by running gold SQL only, so not a dev use.
+  FG-202 runs gold, and predictions against it, with a 100,000-row cap, the evaluator's own.
 - The slowest gold query (baseball_1, `spider-train-03657`) takes 1.2 s on the laptop against the
   2 s default timeout. On a slower Kaggle CPU with busy workers it could time out, so the FG-503
   gold cache should run gold with a longer timeout.
@@ -392,3 +399,236 @@ Work discovered along the way that is not a plan story.
 - Tests that time a batch call `SandboxPool.start()` first, which waits until every worker is
   ready. A two-query warm-up could leave one worker still starting (1 of 20 rounds), and the
   rest of its start-up then landed in the timed batch (FG-197).
+- transformers 5 fills every generation setting a call leaves unset from the checkpoint's
+  `generation_config.json`. The tiny model ships temperature 0.7, top_k 20, top_p 0.8 and a 1.05
+  repetition penalty, so `HfBackend` keeps only the special token ids and greedy is a plain
+  argmax. FG-306 should check what vLLM takes from the same file (FG-201).
+- transformers 5 loads a checkpoint in the dtype it was saved in (bfloat16 for the tiny model);
+  `HfBackend` defaults to float32 (FG-201).
+- Every row of an `HfBackend` batch gets the batch's wall time as `latency_ms`, so a sum over
+  generations counts each batch once per row; FG-202 and FG-301 should time each `generate` call
+  for total generation time (FG-201). `forge eval run` prints that total for each attempt
+  (`EvalRun.generate_s`, FG-202).
+- `check_params` refuses `n > 1` at temperature 0, which would give n copies of one greedy reply,
+  so FG-202's `--n` needs a `--temperature` above 0 (FG-201).
+- The tiny model's logits are nearly flat (std about 0.01), so its greedy replies can change with
+  batch padding through float error. Tests that compare batchings use the offline model in
+  `tests/tiny_hf.py`, whose smallest top-1 lead over the tests' 72 greedy steps is 0.0025; FG-207's
+  smoke checks should compare runs with the same batches only (FG-201).
+- For a `qwen2` checkpoint, transformers 5 loads `Qwen2Tokenizer` whatever `tokenizer_config.json`
+  names and rebuilds any other kind of tokenizer wrongly, so the offline test model has a
+  byte-level Qwen2 tokenizer (FG-201).
+- `chat_token_counter` (FG-105) passes `enable_thinking=False` to every template and `render_chat`
+  only to one that reads it; other templates ignore the flag, so both render the same prompt
+  and `tokens_in` matches the overflow policy's count (FG-201).
+- `split_ref` reads `org/model@feature/x` as branch `feature/x` of `org/model` unless a directory
+  by that name exists, where `make_run_id` slugs it as a path (FG-201).
+- transformers 5 types `generate`'s `self` with a protocol that mypy can't match to any model
+  class, so `HfBackend` holds its model through a one-method `CausalLM` protocol; FG-402's train
+  backends will meet the same (FG-201).
+- Eval prompts go through `fit_prompt` measured by the backend's tokenizer (words for the fake
+  backend), so a long schema is cut as in training, and a prompt still over 1,536 tokens is sent
+  as cut and stays in the denominator. At p1 no val or dev prompt passes the limit (FG-202).
+- The gold cache, `cache/gold/<split>-<data hash[:12]>.jsonl`, took 0.9 s to build for val, 1.3 s
+  for dev and 3.6 s for train on the laptop, and 0.1 s or less to read back; the files are 1.8, 1.8
+  and 6.0 MB. No Spider gold result holds a blob or an infinite float, which pydantic's JSON would
+  turn into text and `null`; the cache tags both anyway. FG-503 can reuse `forge.eval.gold_cache`
+  for rewards (FG-202).
+- On full val, `forge eval run --backend fake --model gold` scores 872 of 872 with both checkers in
+  about 6 s, and `--model select-1` scores 2 of 872 with both: spider-train-01784 and 01785
+  (small_bank_1) have the answer 1. FG-501's constant-query guard can't assume that `SELECT 1`
+  never scores (FG-202).
+- `--split train --limit N` takes the first N questions in the loader's file order. By id,
+  train_others sorts first, so before FG-292 a limit up to 1,659 scored only its rowless
+  databases. On the full data the first 4,511 train questions in file order are all on databases
+  with rows, and music_2's 100 come next. Val and dev keep id order, so the committed pilot is
+  unchanged. FG-505's curriculum starts from a limited train run (FG-292).
+- Resuming a dev run calls `load_dev` again, which logs a second row with the same run id, since
+  every call is a look (ADR-0004). FG-304 could let a resumed run keep its first look (FG-202).
+- Without `--run-id`, `make_run_id` gives two evals of one model on the same commit and day the same
+  id, whatever their splits, so the second is refused as a run with other options; pass `--run-id`.
+  A finished run is never resumed or overwritten (FG-202).
+- A run folder holds the `.lock` file that keeps a second process off it; FG-304's Hub mirror should
+  leave it out (FG-202).
+- The `.lock` stays after the run or report that held the folder, so `.gitignore` ignores it
+  under `docs/runs` as well as `/runs`: a report written for a committed run leaves the tree
+  clean (FG-292).
+- Before FG-292 `git_sha` ran git in the current directory, so a run started in a subfolder
+  checked only that folder for changes, and one started outside the repo named the commit of
+  whatever checkout held the cwd, or crashed, not `FORGE_ROOT`'s. It now checks the whole
+  checkout from its top, with the append-only logs excluded by top-anchored pathspecs, and
+  raises `GitError` outside one (FG-292). Each exclude is the log's real path
+  (`ledger_path`, `dev_usage_path`) relative to the top, so a Forge root below the top of a
+  bigger checkout still runs clean after a run appends to its logs, and a `docs/dev-usage.md`
+  at that top is no log (FG-295). git spells that path itself, so a `FORGE_ROOT` typed in
+  other letter case on macOS keeps the excludes, and a Forge root whose `docs/PLAN.md` the
+  checkout around it doesn't track (copied into another repository, untracked or ignored
+  there) raises `GitError` instead of recording that repository's commit (FG-295).
+- `git_sha` raises `GitError`, a `RuntimeError`, outside a checkout or where git can't run,
+  and no longer `subprocess.CalledProcessError` or `OSError`, so every caller must catch
+  `GitError`. On the Phase 3 branches `forge kaggle publish-code`'s except tuple (FG-302) and
+  `_kaggle_job_errors` (FG-303) catch `CalledProcessError` and not `GitError`, and rebasing
+  them onto this stack gives no conflict that shows it: add `GitError` to both, or those
+  commands print a traceback where they printed one `error:` line (FG-292, FG-295).
+- The scores and generations files hold the contract types only, so the executor's error message
+  for a failed prediction is not stored. FG-204 classifies from the live result in the runner;
+  FG-205's failure examples can show the class, or a later story can store the message (FG-202).
+- `forge eval run` records `platform: local-cpu`, `build_manifest`'s default, whatever the device;
+  FG-303 should set `kaggle` for runs there (FG-202).
+- Spider asks most questions twice in other words with one gold query, so `summarize` and
+  `compare` take `clusters`, and `gold_clusters` puts each such pair in one (val: 872 questions
+  in 455 clusters). FG-205 should pass them for val and dev, or the intervals come out too
+  narrow (FG-203).
+- Gold queries of one pair can differ in spacing alone, so `gold_clusters` compares them with
+  each run of whitespace as one space; on val that joins one pair the raw text split. With
+  clusters, McNemar's exact test counts the clusters each run gets more right and drops ties,
+  as the intervals draw clusters; reports keep the table of questions and say what the test
+  paired (FG-293).
+- `compare` gives McNemar's table but no p-value when a question has several samples, which
+  are not independent pairs; the change in EX keeps its interval (FG-203).
+- Each interval reseeds `default_rng(0)`, so it depends only on the scores it covers, and
+  FG-207's I4 can recompute any interval in a report by summarizing the same scores. A test
+  pins one interval, so a numpy release that changes the stream fails it before reports
+  drift (FG-203).
+- statsmodels takes about a second to import, since it brings in pandas and scipy, so
+  `forge.eval.metrics` imports it inside `compare` only (FG-203).
+- `classify` takes the database's columns (`table_columns`) where the plan's signature has the
+  gold result: resolving a bare or a double-quoted name needs the schema, and the gold result
+  decides no class. `forge eval run` reads each database's columns once, in process (FG-204).
+- No train or val gold query double-quotes a column or table name, though 2,848 of the 8,659
+  double-quote text, such as `"France"`. So the taxonomy reads a double-quoted name that no table
+  in scope has as a string, as SQLite does, and `"France"` and `'France'` are one value (FG-204).
+- Each of the 8,656 train and val gold queries that run classifies as `other` against itself: the
+  canonical form finds no difference where there is none. On 4,000 agreement mutations of the same
+  questions (seed 0), every change landed in a class its rule allows, which
+  `tests/integration/test_taxonomy.py` checks on the fixture. A classification takes about 1 ms on
+  the laptop (FG-204).
+- The taxonomy reads a whole ORDER BY term that names a select alias as the alias, as SQLite
+  does even when a column has that name, and drops the names of derived tables and CTEs from
+  their columns. All 8,656 gold queries still classify as `other` against themselves, and of
+  the pilot's 191 stored classes that the two queries decide, none changes with the fix, so its
+  stored scores stand (FG-293).
+- A whole ORDER BY term is also the alias in parentheses or with COLLATE, which SQLite skips
+  before it looks for one, and parentheses around a whole ORDER BY term are dropped. A
+  derived table or CTE has the columns its select list names (or its column list), and those
+  win over an alias in WHERE, GROUP BY, HAVING and inside ORDER BY expressions, as a table's
+  do; behind a `*` a name it may have is left as written. All 8,659 train and val gold
+  queries still classify as `other` against themselves, the canonical forms of 2 change
+  (spider-train-06103 and 06104 lose parentheses around an ORDER BY term), and none of the
+  pilot's 191 classes the queries decide changes, so its stored scores and report stand
+  (FG-295).
+- A query nested in a condition counts in that condition, so a filter whose subquery is missing or
+  picks another column or aggregate is `where`. Dropping the condition that held a table's only use
+  is `wrong_tables`, since tables come first (FG-204).
+- `error_class` follows fast EX, since a score is written before the official batch runs, so a
+  prediction that only the official evaluator accepts keeps a class. FG-205's taxonomy table should
+  count the failures of the metric it reports (FG-204).
+- Reports read questions and gold queries from `FORGE_DATA_DIR`, which must hash to the run's
+  data manifest hash, so a Kaggle run's report needs the same Spider files where it renders
+  (FG-303, FG-304). On full val (872 questions) `forge report run` took 1.1 s on the laptop,
+  `compare` 1.9 s and `rebuild` 1.6 s (FG-205).
+- A dev run's report shows answers the run's own look already saw, so it needs the run's row in
+  `docs/dev-usage.md`, refuses without it, and adds none; ADR-0004 now says so. FG-303 and FG-304
+  have to bring a Kaggle dev run's row home before its report renders, and FG-508's dev compare
+  reports spend no extra looks (FG-205).
+- Example failures show the error class and whether the query ran, not the executor's message,
+  which the scores and generations don't store (FG-202). Storing it means a contract change or
+  a file of its own (FG-205).
+- Error classes count the failures of official EX. A failure only official EX finds has no class,
+  since a run classifies the misses of fast EX, so reports count it as `unclassified`; a compare
+  report gives a paired change for official EX only (FG-205).
+- `rebuild` diffs the markdown, masking only a `Generated:` line that holds the time as the
+  report writes it, and fails when the chart is missing. The chart's bytes repeat on one machine,
+  in matplotlib's default style whatever a matplotlibrc says, but CI's Linux draws other bytes
+  than the Mac with the same releases. So the PNG's `Software` text names the releases and the
+  platform that drew it, and `rebuild` compares the bytes only where that is the same and says
+  so of a chart drawn elsewhere. Render a committed run's reports where its rebuild will run, as
+  the pilot's were on the Mac (FG-205, FG-293). Only a Software text in `chart_renderer`'s form
+  is skipped, so a chart an image editor saved is compared and fails, and the full-data pilot
+  test skips, naming both renderers, where the chart isn't compared (FG-295).
+- `rebuild <b>` checks the compare reports in run b's `eval` folder; one written with `--out`
+  isn't checked and doesn't say it is, unless `--out` names that folder's file, through '..', a
+  symlink or other letter case where the file system ignores it, and then that file is written.
+  FG-307 and FG-405 commit reports under `docs/runs/`, so their checks should diff those copies
+  against the run store's or rebuild in place (FG-205, FG-293, FG-295).
+- For FG-207's I4: numbers from the stored files are in a report's title, its table rows and the
+  headings over example failures, and in some prose lines: in a run report the checkers'
+  disagreement and the questions and clusters in the line on intervals; in a compare report the
+  questions and samples both runs answered, the questions and clusters on intervals, the
+  questions they disagree on, the clusters each wins and McNemar's p-value. Table headers hold
+  95%, the other prose lines only constants (1,000 resamples and seed 0, the 5 failures of 3
+  classes, and Spider's citation: 1.0, 2018 and 4.0), and the `Generated:` line the time and
+  nothing more. Question lines and code blocks quote the data and the generations, and cluster
+  counts come from `gold_clusters` over the scored questions (FG-205, FG-293).
+- Official EX can match a first query the executor rejects: the evaluator drops `DISTINCT`
+  and turns `> =` into `>=` before running, so `SELECT count(DISTINCT *) FROM Aircraft`, a
+  syntax error to SQLite, matches `SELECT count(*) FROM Aircraft`. EX without retry therefore
+  judges each retried sample's first query in the official batch instead of counting it a miss,
+  and retry can lose a sample official EX had (ADR-0015, FG-206).
+- FG-508 plans a `--retry 1` dev run "using the same generations plus one retry turn (counted
+  within the same dev use)". `forge eval run --retry 1` generates its first replies again and
+  calls `load_dev`, which logs another look, so FG-508 needs a way to retry a stored run's
+  failures from its generations without a second look (FG-206).
+- A retried sample's tokens and latency are split between its first try and its generation, so
+  FG-705's cost and latency table has to add both for a retry run. FG-304's Hub store must carry
+  `eval/<split>-first-tries.jsonl` with the other outputs; the manifest lists it as
+  `first_tries` (FG-206).
+- A retry is drawn with a seed derived from the run's seed and the sample index, and a backend
+  seeds each reply by its example id and its index among the prompt's replies, so FG-306's vLLM
+  backend has to seed requests the same way (`sample_seed`) for retries to stay independent of
+  first replies and of each other (FG-206).
+- `make smoke` takes 40 to 50 s on the laptop, 25 to 33 s of it the smoke tests and 6 to 10 s the
+  tiny model's 20 replies. The first CI smoke job took 57 s, setup and the tiny model's download
+  included (7.5 MB once cached), and `make smoke` 38 s of it, the replies 1.9 s.
+  `scripts/smoke/phase_2.sh` takes about 32 s on the full data (FG-207).
+- The smoke run passes `--allow-dirty`, so it also runs on uncommitted work, but it writes the
+  marker only when the run's manifest names HEAD's commit without `-dirty`. Each attempt first
+  removes HEAD's marker and a pass removes the others, so a marker means the last smoke on that
+  commit passed. FG-303 checks for `.smoke-ok-<HEAD sha>` (FG-207).
+- A smoke with `PHASE` below 8, as `make gate PHASE=N` runs it, skips later phases' smoke tests,
+  so it passes without a marker and says so; run `make smoke` for one. The smoke prints its
+  report before the scratch folder goes, so a gate's demo can paste it (FG-292).
+- The tiny model's 256-token replies hold no SQL, so on the smoke run every sample is `no_sql`,
+  and with `--retry 1` each is asked again and fails the same way. The smoke proves the wiring of
+  that path; I4's fake-backend run covers results of every other kind (FG-207).
+- Two prose lines of a run report hold numbers from the scores, not constants: the checkers'
+  disagreement, and the questions and clusters in the line on intervals. I4 traces both (FG-207).
+- I4 covers a run report. A compare report's numbers (McNemar's table and p-value, the changes
+  by hardness and class) aren't traced yet; FG-801's I4 for the results page can build on
+  `tests/report_trace.py` (FG-207).
+- `forge eval run --workers N` sizes the run's sandbox pool (by default one per CPU, up to 4).
+  The manifest leaves it out, since it changes no score; `make smoke` uses 2 (FG-207).
+- Before FG-291 `forge eval run` built `HfBackend` with `device="auto"`, so on a Mac the
+  model ran on MPS while the manifest said `local-cpu`. `--device` now defaults to `cpu`, and
+  `mps` is asked for by name, recorded in the config and filed as `local-mps` (FG-291).
+- `forge eval run --config <yaml>` loads the file into click's default map: each value is
+  checked by its option's type, and options on the command line override it. A file may set
+  only the options that change a score; the run id, store and dev reason stay on the command
+  line (FG-291). FG-303's `forge kaggle run --job eval --config` can read the same files with
+  `read_config_file`.
+- Report headers name the run's platform, so a pilot can't pass for a T4 run; I4's trace
+  checks the row (FG-291).
+- A pilot's numbers are a 0.5B model's in float32 on MPS through transformers, so they say
+  roughly where a small model starts, not where the T4 baselines (float16, vLLM) will
+  (ADR-0016, FG-291).
+- The pilot ran on MPS with no fallback to the CPU; its ledger row has the hours, taken from
+  the manifest's start and end (FG-291).
+- In the pilot's report `schema_link` is the most common class of official EX failures, well
+  ahead of `wrong_tables`: the 0.5B model mostly names tables and columns its database
+  doesn't have. Worth watching in FG-307's baselines and in what SFT and GRPO change (FG-291).
+- Counted by `scripts/count_pilot_extraction.py` from the pilot's committed generations and
+  scores: 763 of its 872 replies have no ```` ```sql ```` block although p1 asks for one.
+  `extract_sql` read 761 of them by rule 3, the last line that starts with SELECT or WITH and
+  parses as a query, and 2 have no such line and are `no_sql`. In 12 the query ran over
+  several lines and rule 3 kept only the first, the select list without its FROM, so all 12
+  fail as `schema_link`. Run whole, 7 of them still name a column their database doesn't
+  have, so extraction alone made 5 of that class's 266: 4 run and 1 fails on a misused
+  aggregate, and 1 of the 5 (spider-train-01806) matches gold, the one official EX match
+  rule 3 cost. A prompt or model that leaves the fence off loses multi-line queries this way,
+  which FG-307's p1/p2 choice (ADR-0007) should count apart from schema errors. The
+  extraction rules are unchanged (FG-294, FG-295).
+- `docs/runs/<run_id>/` holds a run whole (manifest, config, generations, scores, report and
+  chart), so `FORGE_RUNS_DIR=docs/runs forge report rebuild <run_id>` checks it, and
+  `tests/integration/test_artifacts.py` checks the pilot offline and, with the full data, its
+  rebuild and I4 trace. FG-307's `test_phase3_baseline_reports_present` can join that file
+  (FG-291).

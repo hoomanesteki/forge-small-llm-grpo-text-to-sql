@@ -72,6 +72,8 @@ class Score(BaseModel):
     ex_fast: bool  # forge.sql.compare
     ex_official: bool | None = None  # test-suite evaluator, when run
     error_class: str | None = None  # taxonomy label (FG-204)
+    attempts: int = 1  # 2 when the first query failed to run and was retried (FG-206)
+    first_try_ex: bool | None = None  # official EX of the first reply when there were 2 (ADR-0015)
 
 
 class RunManifest(BaseModel):
@@ -84,7 +86,7 @@ class RunManifest(BaseModel):
     model_ref: str
     adapter_ref: str | None = None
     parent_run: str | None = None
-    platform: Literal["local-cpu", "kaggle", "colab", "modal"]
+    platform: Literal["local-cpu", "local-mps", "kaggle", "colab", "modal"]  # local-mps: ADR-0016
     gpu: str | None = None
     seed: int
     started_at: datetime

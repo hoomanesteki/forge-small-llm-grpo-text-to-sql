@@ -11,7 +11,14 @@ from pydantic import ValidationError
 
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
-from forge.ops.manifest import DirtyTreeError, Platform, build_manifest, config_hash, git_sha
+from forge.ops.manifest import (
+    DirtyTreeError,
+    GitError,
+    Platform,
+    build_manifest,
+    config_hash,
+    git_sha,
+)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -23,8 +30,17 @@ def _fixture_data(spider_mini: Path) -> None:
     """build_manifest hashes the data, so give it the small committed subset."""
 
 
+def _forge_root(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``root`` the Forge root, so the append-only logs are under its docs folder."""
+    monkeypatch.setenv("FORGE_ROOT", str(root))
+    monkeypatch.delenv("FORGE_LEDGER", raising=False)
+    monkeypatch.delenv("FORGE_DEV_USAGE", raising=False)
+
+
 @pytest.fixture
-def repo(tmp_path: Path) -> Path:
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A one-commit checkout that is the Forge root."""
+    _forge_root(tmp_path, monkeypatch)
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "test@example.com")
     _git(tmp_path, "config", "user.name", "Test")
@@ -186,3 +202,134 @@ def test_unknown_platform_rejected_at_runtime(repo: Path) -> None:
 @pytest.mark.phase(1)
 def test_platforms_match_the_manifest_contract() -> None:
     assert get_args(RunManifest.model_fields["platform"].annotation) == get_args(Platform)
+
+
+def _commit_layout(repo: Path) -> str:
+    """Give ``repo`` a src module and both append-only logs, committed; return HEAD."""
+    for rel in ("src/x.py", "docs/compute-ledger.md", "docs/dev-usage.md"):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("one\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "layout")
+    return git_sha(repo)
+
+
+@pytest.mark.phase(2)
+def test_dirty_src_is_seen_from_a_subdirectory(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _commit_layout(repo)
+    (repo / "src" / "x.py").write_text("two\n")
+    # The check covers the whole checkout, not the folder git happens to start in.
+    monkeypatch.chdir(repo / "docs")
+    with pytest.raises(DirtyTreeError):
+        git_sha()
+    with pytest.raises(DirtyTreeError):
+        git_sha(repo / "docs")
+
+
+@pytest.mark.phase(2)
+def test_appended_dev_log_is_clean_from_a_subdirectory(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _commit_layout(repo)
+    with (repo / "docs" / "dev-usage.md").open("a") as log:
+        log.write("| 2026-11-15 | row |\n")
+    for where in (repo / "docs", repo / "src"):
+        monkeypatch.chdir(where)
+        assert git_sha() == head
+        assert git_sha(where) == head
+
+
+@pytest.mark.phase(2)
+def test_appended_logs_are_clean_with_the_forge_root_below_the_top(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Forge root one level below the top of the checkout that holds it, as in a bigger
+    # repository. The top has a docs/dev-usage.md of its own, which is no Forge log.
+    top, forge = tmp_path / "mono", tmp_path / "mono" / "forge"
+    for rel in ("docs/dev-usage.md", "forge/docs/PLAN.md"):
+        (top / rel).parent.mkdir(parents=True, exist_ok=True)
+        (top / rel).write_text("one\n")
+    _git(top, "init", "-q")
+    _git(top, "config", "user.email", "test@example.com")
+    _git(top, "config", "user.name", "Test")
+    _git(top, "add", ".")
+    _forge_root(forge, monkeypatch)
+    head = _commit_layout(forge)
+    for log in ("compute-ledger.md", "dev-usage.md"):
+        with (forge / "docs" / log).open("a") as appended:
+            appended.write("| 2026-11-15 | row |\n")
+    # The run appended only to the Forge logs, so the tree is clean, from wherever git
+    # starts, and with the root found from the working directory as without FORGE_ROOT.
+    assert git_sha(forge) == head
+    monkeypatch.delenv("FORGE_ROOT")
+    monkeypatch.chdir(forge / "src")
+    assert git_sha() == head
+    assert git_sha(top) == head
+    # The rest of the checkout still counts, the top's own docs/dev-usage.md too.
+    (top / "docs" / "dev-usage.md").write_text("two\n")
+    with pytest.raises(DirtyTreeError):
+        git_sha(forge)
+
+
+@pytest.mark.phase(2)
+@pytest.mark.parametrize("ignored", [False, True])
+def test_a_forge_root_its_checkout_does_not_track_is_a_git_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignored: bool
+) -> None:
+    # A Forge root copied into an unrelated repository. Untracked, its files would make
+    # the tree dirty; ignored, the other repository's commit would pass as clean.
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q")
+    _git(other, "config", "user.email", "test@example.com")
+    _git(other, "config", "user.name", "Test")
+    (other / ".gitignore").write_text("forge/\n" if ignored else "")
+    _git(other, "add", ".gitignore")
+    _git(other, "commit", "-q", "-m", "init")
+    forge = other / "forge"
+    (forge / "docs").mkdir(parents=True)
+    (forge / "docs" / "PLAN.md").write_text("plan\n")
+    _forge_root(forge, monkeypatch)
+    with pytest.raises(GitError, match="doesn't track it"):
+        git_sha(forge, allow_dirty=True)
+
+
+def _ignores_case(folder: Path) -> bool:
+    probe = folder / "Case-Probe"
+    probe.write_text("")
+    try:
+        return (folder / "case-probe").exists()
+    finally:
+        probe.unlink()
+
+
+@pytest.mark.phase(2)
+def test_a_forge_root_in_other_letter_case_keeps_its_logs_out(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not _ignores_case(repo):
+        pytest.skip(f"{repo} is on a file system that tells letter case apart")
+    head = _commit_layout(repo)
+    # FORGE_ROOT typed in another case than the folder on disk, which such a file system
+    # accepts; git's pathspecs still need the logs as git spells them.
+    _forge_root(repo.with_name(repo.name.swapcase()), monkeypatch)
+    with (repo / "docs" / "dev-usage.md").open("a") as log:
+        log.write("| 2026-11-15 | row |\n")
+    assert git_sha(repo) == head
+    (repo / "src" / "x.py").write_text("two\n")
+    with pytest.raises(DirtyTreeError):
+        git_sha(repo)
+
+
+@pytest.mark.phase(2)
+def test_outside_a_checkout_is_a_git_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    # Keeps git from finding a checkout that happens to hold the temp folder.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    with pytest.raises(GitError, match=f"{re.escape(str(plain))} is not in a git checkout") as err:
+        git_sha(plain, allow_dirty=True)
+    assert "FORGE_ROOT" in str(err.value)
+    # The checkout is required, so no build can name a commit it doesn't have.
+    with pytest.raises(GitError):
+        build_manifest("eval", {}, model_ref="m", seed=0, repo=plain, allow_dirty=True)

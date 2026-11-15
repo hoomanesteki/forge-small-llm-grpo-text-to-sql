@@ -29,6 +29,17 @@ often, training optimizes something other than what is reported.
   #33). Each item runs in a sandbox worker process that is killed when the item takes
   longer than `item_timeout_s` (60 s by default; a killed item is false), under one
   overall deadline (ADR-0014).
+- **The eval runner bounds official EX tighter than upstream** (FG-202, decided after the
+  Phase 1 gate). `forge eval run` calls `official_exec_match` with `item_timeout_s=10`,
+  and a prediction whose sandboxed run timed out at 2,000 ms is no match without going
+  to the evaluator at all. Upstream gives each query 60 s. At 60 s, one adversarial
+  prediction could hold an item for a minute while its worker's memory grows with no
+  limit (ADR-0014, Known limits), and a batch of them could take hours. Most of Spider's
+  gold queries run in milliseconds and the slowest, a training one, in 1.2 s on the
+  laptop, so 10 s for the whole item cuts off no correct prediction with Spider's one
+  database per folder. The price is a correct prediction slower than 2 s in the executor,
+  or an item slower than 10 s, which counts as wrong here and might pass upstream.
+  `tests/integration/test_eval_runner.py::test_official_ex_bounds` checks both bounds.
 - **Agreement is measured, not assumed.** `forge eval agreement` mutates gold queries
   with sqlglot (`forge.eval.mutations`), scores each prediction with both checkers and
   writes the rate and the first 20 distinct disagreements to
@@ -73,8 +84,15 @@ evaluator would mean rewriting predictions before they run.
   which will measure that case.
 - Two checkers must be kept in step: a change to `forge.sql.compare` reruns the agreement
   check and commits a new report.
+- Reported EX from `forge eval run` is upstream's verdict within those two bounds, and
+  the run's manifest records them (`execution.timeout_ms`,
+  `execution.official_item_timeout_s`), so a number made under other bounds can't pass
+  for one made under these.
 
 ## Revisit if
 
 Agreement on real model outputs (FG-307) falls under 98%, or `DISTINCT` cases make up
-a large share of the disagreements there.
+a large share of the disagreements there. Also if a correct prediction is ever cut off
+by the 2 s or 10 s bound, and when the test-suite databases land (FG-508): an item then
+runs gold and the prediction on every database in the folder, so its 10 s must scale
+with their number (ADR-0014).
