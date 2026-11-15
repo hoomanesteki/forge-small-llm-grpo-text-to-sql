@@ -1,15 +1,16 @@
 """The run store: where a run's files live once the machine that made them is gone.
 
 A Kaggle session lasts 12 hours at most, so every run keeps its files in a store off the
-machine. ``LocalRunStore`` is a folder such as ``runs/``, and holds plan section 3.9's
-layout, one folder a run:
+machine. ``HubRunStore`` is the private Hugging Face model repo that ``FORGE_RUN_STORE``
+names (``hoomanesteki/forge-runs`` by default), and ``LocalRunStore`` a folder such as
+``runs/``. Both hold plan section 3.9's layout, one folder a run:
 
     runs/<run_id>/manifest.json, config.yaml, metrics.jsonl, eval/..., samples/...
     runs/<run_id>/checkpoints/step-NNNNNN/   the latest KEEP_CHECKPOINTS are kept
     runs/<run_id>/checkpoints/best/
 
 In a local store the folder is ``<root>/<run_id>/``. Paths inside a run are POSIX paths
-relative to its folder, such as ``eval/val-scores.jsonl``, in every store.
+relative to its folder, such as ``eval/val-scores.jsonl``, in either store.
 
 ``RunStore`` is plan section 3.5's protocol with three methods more: ``put_folder``, since
 a checkpoint goes up as a folder; ``runs``, for ``forge runs list``; and
@@ -29,9 +30,10 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from collections.abc import Iterable
+import tempfile
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, TypeVar
 
 from pydantic import ValidationError
 
@@ -39,6 +41,10 @@ from forge.core.types import RunManifest
 from forge.eval.config import check_run_id
 from forge.eval.run_files import LOCK_FILE, MANIFEST_FILE, RunCorrupt, write_atomic
 
+T = TypeVar("T")
+
+REPO_TYPE = "model"
+RUNS = "runs"
 CHECKPOINTS = "checkpoints"
 BEST = f"{CHECKPOINTS}/best"
 KEEP_CHECKPOINTS = 2
@@ -132,7 +138,7 @@ def _same(a: Path, b: Path) -> bool:
     return a.resolve() == b.resolve()
 
 
-def _mirror(source: Path, target: Path) -> None:
+def _mirror(source: Path, target: Path, *, move: bool) -> None:
     """Replace each top-level item of ``target`` that ``source`` holds, lock file aside."""
     target.mkdir(parents=True, exist_ok=True)
     for item in sorted(source.iterdir()):
@@ -143,7 +149,9 @@ def _mirror(source: Path, target: Path) -> None:
             shutil.rmtree(there)
         elif there.exists() or there.is_symlink():
             there.unlink()
-        if item.is_dir():
+        if move:
+            shutil.move(item, there)
+        elif item.is_dir():
             shutil.copytree(item, there, ignore=shutil.ignore_patterns(LOCK_FILE))
         else:
             shutil.copy2(item, there)
@@ -233,4 +241,223 @@ class LocalRunStore:
         if not source.is_dir():
             raise RunNotFound(f"no run {run_id} in {self.root}")
         if not _same(source, target):
-            _mirror(source, target)
+            _mirror(source, target, move=False)
+
+
+class HubApi(Protocol):
+    """The part of ``huggingface_hub.HfApi`` the Hub run store calls."""
+
+    def upload_file(
+        self,
+        *,
+        path_or_fileobj: str | Path | bytes,
+        path_in_repo: str,
+        repo_id: str,
+        repo_type: str | None = None,
+        commit_message: str | None = None,
+    ) -> object: ...
+
+    def upload_folder(
+        self,
+        *,
+        repo_id: str,
+        folder_path: str | Path,
+        path_in_repo: str | None = None,
+        commit_message: str | None = None,
+        repo_type: str | None = None,
+        ignore_patterns: list[str] | str | None = None,
+        delete_patterns: list[str] | str | None = None,
+    ) -> object: ...
+
+    def list_repo_files(self, repo_id: str, *, repo_type: str | None = None) -> list[str]: ...
+
+    def delete_files(
+        self,
+        repo_id: str,
+        delete_patterns: list[str],
+        *,
+        repo_type: str | None = None,
+        commit_message: str | None = None,
+    ) -> object: ...
+
+    def hf_hub_download(
+        self,
+        repo_id: str,
+        filename: str,
+        *,
+        repo_type: str | None = None,
+        local_dir: str | Path | None = None,
+    ) -> object: ...
+
+    def snapshot_download(
+        self,
+        repo_id: str,
+        *,
+        repo_type: str | None = None,
+        local_dir: str | Path | None = None,
+        allow_patterns: list[str] | str | None = None,
+    ) -> object: ...
+
+
+class HubRunStore:
+    """A run store in a private Hugging Face model repo: run ``<run_id>`` lives in
+    ``runs/<run_id>/``.
+
+    ``api`` stands in for ``HfApi(token=token)``. Without a token the client finds one as
+    it always does (``HF_TOKEN``, or a saved login).
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        token: str | None = None,
+        api: HubApi | None = None,
+    ) -> None:
+        if api is None:
+            # Imported here: only a Hub store needs the client.
+            from huggingface_hub import HfApi
+
+            api = HfApi(token=token)
+        self.repo_id = repo_id
+        self.api = api
+
+    def __str__(self) -> str:
+        return self.repo_id
+
+    def _path(self, run_id: str, dest: str = "") -> str:
+        check_run_id(run_id)
+        return f"{RUNS}/{run_id}/{dest}" if dest else f"{RUNS}/{run_id}"
+
+    def _call(self, method: Callable[..., T], **kwargs: Any) -> T:
+        """``method`` on this repo."""
+        return method(repo_id=self.repo_id, repo_type=REPO_TYPE, **kwargs)
+
+    def put_file(self, run_id: str, local_path: str | Path, dest: str) -> str:
+        """Upload the file ``local_path`` to ``dest`` in the run; returns its path in the repo."""
+        source, path = Path(local_path), self._path(run_id, _inside(dest))
+        if not source.is_file():
+            raise FileNotFoundError(f"{source} is not a file, so it can't go to run {run_id}")
+        self._call(
+            self.api.upload_file,
+            path_or_fileobj=str(source),
+            path_in_repo=path,
+            commit_message=f"Add {dest} to run {run_id}",
+        )
+        return path
+
+    def put_folder(
+        self, run_id: str, local_dir: str | Path, dest: str = "", *, replace: bool = False
+    ) -> str:
+        """Upload the folder ``local_dir`` into ``dest`` in the run, the run's own folder
+        when ``dest`` is empty. Files there that it lacks stay, unless ``replace`` deletes
+        them in the same commit. Returns its path in the repo.
+
+        A folder of a few hundred files goes up in one commit; huggingface_hub splits a
+        larger one, and the same call made again carries on where it stopped.
+        """
+        source, path = Path(local_dir), self._path(run_id, _inside(dest, root_ok=True))
+        if not source.is_dir():
+            raise NotADirectoryError(f"{source} is not a folder, so it can't go to run {run_id}")
+        self._call(
+            self.api.upload_folder,
+            folder_path=str(source),
+            path_in_repo=path,
+            ignore_patterns=[LOCK_FILE],
+            # Matched inside path_in_repo; a file being uploaded is never deleted.
+            delete_patterns=["*"] if replace else None,
+            commit_message=f"Add {dest} to run {run_id}" if dest else f"Add run {run_id}",
+        )
+        return path
+
+    def put_manifest(self, manifest: RunManifest) -> None:
+        path = self._path(manifest.run_id, MANIFEST_FILE)
+        self._call(
+            self.api.upload_file,
+            path_or_fileobj=manifest_bytes(manifest),
+            path_in_repo=path,
+            commit_message=f"Write the {manifest.status} manifest of run {manifest.run_id}",
+        )
+
+    def get_manifest(self, run_id: str) -> RunManifest:
+        from huggingface_hub.errors import EntryNotFoundError
+
+        path = self._path(run_id, MANIFEST_FILE)
+        # A folder of its own rather than the Hub cache, which would keep every copy.
+        with tempfile.TemporaryDirectory(prefix="forge-manifest-") as folder:
+            try:
+                self._call(
+                    self.api.hf_hub_download,
+                    filename=path,
+                    local_dir=folder,
+                )
+            except EntryNotFoundError as exc:
+                raise RunNotFound(f"no run {run_id} in {self.repo_id}: it has no {path}") from exc
+            data = Path(folder, path).read_bytes()
+        return _read_manifest(data, run_id, f"{self.repo_id}/{path}")
+
+    def _files(self, run_id: str) -> list[str]:
+        """Every file of the run, as a path inside its folder."""
+        prefix = self._path(run_id) + "/"
+        files = self._call(self.api.list_repo_files)
+        return [name.removeprefix(prefix) for name in files if name.startswith(prefix)]
+
+    def _checkpoints(self, run_id: str) -> set[str]:
+        return {
+            parts[1]
+            for name in self._files(run_id)
+            if len(parts := name.split("/")) > 2 and parts[0] == CHECKPOINTS
+        }
+
+    def latest_checkpoint(self, run_id: str) -> str | None:
+        """The run's highest ``checkpoints/step-NNNNNN``, or None before its first."""
+        return _latest(self._checkpoints(run_id))
+
+    def prune_checkpoints(self, run_id: str, keep: int = KEEP_CHECKPOINTS) -> list[str]:
+        """Delete all but the latest ``keep`` step checkpoints, in one commit; returns what
+        went."""
+        doomed = _to_prune(self._checkpoints(run_id), keep)
+        if doomed:
+            self._call(
+                self.api.delete_files,
+                delete_patterns=[f"{self._path(run_id, rel)}/*" for rel in doomed],
+                commit_message=f"Keep the latest {keep} checkpoints of run {run_id}",
+            )
+        return doomed
+
+    def runs(self) -> list[str]:
+        """The ids of the runs in the repo, those with a manifest, sorted (by date first)."""
+        files = self._call(self.api.list_repo_files)
+        return sorted(
+            parts[1]
+            for name in files
+            if len(parts := name.split("/")) == 3 and parts[0] == RUNS and parts[2] == MANIFEST_FILE
+        )
+
+    def pull(self, run_id: str, local_dir: str | Path) -> None:
+        """Mirror the run into ``local_dir``, as the module docstring describes."""
+        path, target = self._path(run_id), Path(local_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Staged beside the target, so moving the files in is a rename, and nothing of a
+        # download that fails reaches it.
+        with tempfile.TemporaryDirectory(prefix=".pull-", dir=target.parent) as staging:
+            self._call(
+                self.api.snapshot_download,
+                local_dir=staging,
+                allow_patterns=[f"{path}/*"],
+            )
+            fetched = Path(staging, path)
+            if not fetched.is_dir():
+                raise RunNotFound(f"no run {run_id} in {self.repo_id}")
+            _mirror(fetched, target, move=True)
+
+
+def hub_store(env: Mapping[str, str] | None = None) -> HubRunStore:
+    """The Hub run store ``FORGE_RUN_STORE`` names, with ``HF_TOKEN`` when it is set, both
+    read from the environment and the repo's ``.env``."""
+    from forge.ops.doctor import DEFAULT_RUN_STORE
+    from forge.ops.dotenv import forge_env
+
+    values = forge_env() if env is None else env
+    return HubRunStore(
+        values.get("FORGE_RUN_STORE", DEFAULT_RUN_STORE), token=values.get("HF_TOKEN") or None
+    )
