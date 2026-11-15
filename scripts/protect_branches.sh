@@ -12,8 +12,8 @@ REPO="${REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 # Check names as GitHub reports them; matrix jobs get the Python version appended.
 CHECKS=(
   "lint-type"
-  "unit (3.11)" "unit (3.12)"
-  "integration (3.11)" "integration (3.12)"
+  "unit (3.11)" "unit (3.12)" "unit (3.13)"
+  "integration (3.11)" "integration (3.12)" "integration (3.13)"
   "smoke"
   "security"
 )

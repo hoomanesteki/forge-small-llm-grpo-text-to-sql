@@ -15,8 +15,11 @@ today's numbers.
   latest stable releases, among them torch 2.15.0, transformers 5.23.0, trl 1.18.0,
   peft 0.21.3, datasets 5.2.0, accelerate 1.15.0, pydantic 2.14.3, sqlglot 30.31.0
   and huggingface-hub 2.4.0.
-- Local development uses Python 3.12 (`.python-version`). CI runs Python 3.11 and
-  3.12 so either Kaggle image version is covered.
+- Local development uses Python 3.12 (`.python-version`). CI runs Python 3.11, 3.12
+  and 3.13. Kaggle's GPU image moved to Python 3.13 (v173, October 2026), and the code
+  dataset's wheel installs there only if `requires-python` allows it, so since FG-303
+  it is `>=3.11,<3.14`. Every package CI installs has a 3.13 wheel; re-locking changed
+  no version and added only `audioop-lts`, which the demo extra's gradio needs on 3.13.
 - On Linux, torch comes from the PyTorch CPU index so CI never downloads CUDA wheels.
 - GPU packages (unsloth, vllm, bitsandbytes) are not in the lock. They must match
   the CUDA build of torch preinstalled on Kaggle, so FG-301 pins them in
