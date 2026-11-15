@@ -431,6 +431,16 @@ def _raise(exc: BaseException) -> Callable[..., Any]:
         ("hf", "huggingface_hub.hf_hub_download", _hub_status_error()),
         # Still failing after the Hub client's own retries; not an OSError.
         ("mirror", "huggingface_hub.hf_hub_download", httpx2.ConnectError("connection reset")),
+        # hf_xet, which moves the bytes of the Hub zips, raises a bare RuntimeError when a
+        # transfer fails; this is its message when the storage server can't be reached.
+        (
+            "hf",
+            "huggingface_hub.hf_hub_download",
+            RuntimeError(
+                "Task error: File reconstruction error: CAS Client Error: Request middleware "
+                "error: error sending request for url (http://127.0.0.1:9/v2/reconstructions/0)"
+            ),
+        ),
         ("gdrive", "urllib.request.urlopen", urllib.error.URLError("timed out")),
         # A body cut short; not an OSError either.
         ("gdrive", "urllib.request.urlopen", http.client.IncompleteRead(b"PK\x03\x04", 10)),
