@@ -6,7 +6,8 @@ are removed and whitespace collapsed (``normalize_sql``). Prompt version ``p2`` 
 each table with up to three of its rows as ``-- sample:`` comments.
 
 Results are cached per (data directory, database, version), so building thousands of
-prompts reads each database once.
+prompts reads each database once. Databases are opened with
+``forge.sql.executor.connect_readonly``, like every other Spider connection.
 """
 
 from __future__ import annotations
@@ -20,7 +21,8 @@ from functools import cache
 from pathlib import Path
 from typing import Literal, get_args
 
-from forge.data.spider import DATA_DIR_ENV, DataNotFound, db_path, resolve_data_dir
+from forge.data.spider import db_path, resolve_data_dir
+from forge.sql.executor import connect_readonly
 
 PromptVersion = Literal["p1", "p2"]
 PROMPT_VERSIONS: tuple[PromptVersion, ...] = get_args(PromptVersion)
@@ -138,13 +140,8 @@ def _schema_text(root: Path, db_id: str, version: PromptVersion) -> str:
 @cache
 def _tables(root: Path, db_id: str, version: PromptVersion) -> tuple[Table, ...]:
     path = db_path(db_id, root)
-    if not path.is_file():
-        raise DataNotFound(
-            f"database/{db_id}/{db_id}.sqlite not found in {root}; run `forge data fetch`, "
-            f"or point {DATA_DIR_ENV} at a Spider data directory"
-        )
     tables: list[Table] = []
-    with closing(_connect_read_only(path)) as conn:
+    with closing(connect_readonly(path)) as conn:
         rows = conn.execute(
             "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY rowid"
         ).fetchall()
@@ -158,19 +155,6 @@ def _tables(root: Path, db_id: str, version: PromptVersion) -> tuple[Table, ...]
     if not tables:
         raise ValueError(f"{path} has no tables")
     return tuple(tables)
-
-
-def _connect_read_only(path: Path) -> sqlite3.Connection:
-    # Read-only and immutable, so SQLite never writes, locks or journals a Spider file.
-    # FG-106 moves this into forge.sql.executor, which then opens every connection.
-    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
-    # A few Spider rows are not valid UTF-8; they show with replacement characters.
-    conn.text_factory = _decode
-    return conn
-
-
-def _decode(raw: bytes) -> str:
-    return raw.decode("utf-8", errors="replace")
 
 
 def _sample_lines(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
