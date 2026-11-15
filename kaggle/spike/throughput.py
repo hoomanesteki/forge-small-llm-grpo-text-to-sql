@@ -7,11 +7,15 @@ which question each stage answers:
 - env: Python, CUDA, torch, the GPUs, the image build, internet and disk.
 - secrets: whether Kaggle Secrets can be read in a pushed run. The report says only
   whether a read worked, never what it returned.
+- download:<model>: how long a model takes to fetch, and the commit fetched.
+- install:<stack>: how long a candidate GPU stack takes to install into a venv of its own.
+- vllm:<model>: fp16 generation throughput with vLLM on 100 prompts.
 - limit-probe, pushed as its own CPU kernel: a heartbeat file rewritten until the session
   is killed, so the output of a timed-out session shows what survives the kill.
 
 Each stage runs in a child process, so a crash or an out-of-memory kill in one leaves the
-others and the report intact; the report is rewritten after every stage.
+others and the report intact; the report is rewritten after every stage. A GPU stack
+installs into a venv of its own, deleted after use, so it can't disturb the image.
 
 The script needs only the standard library to start: heavy imports happen inside the
 stages, and nothing runs on import. Kaggle runs a script kernel without arguments, so
@@ -38,7 +42,7 @@ import traceback
 import urllib.request
 from collections import deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -48,6 +52,8 @@ KERNEL_ARGV: list[str] = []
 REPORT_SCHEMA = "forge-kaggle-spike/1"
 REPORT_NAME = "spike-report.json"
 PROBE_NAME = "limit-probe.json"
+DEFAULT_MODELS = ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B")
+MODEL_FILES = ["*.json", "*.safetensors", "*.txt", "*.jinja"]
 PACKAGES = (
     "torch",
     "transformers",
@@ -62,6 +68,90 @@ PACKAGES = (
     "kaggle",
 )
 INTERNET_PROBE_URL = "https://huggingface.co"
+UV_PIN = "uv==0.12.3"
+
+# The prompt format of forge.data.prompts (p1), copied because the kernel runs without
+# Forge installed. A unit test keeps the copy in step.
+SYSTEM_PROMPT = (
+    "You write SQLite queries. Reply with exactly one SQL query in a ```sql code block. "
+    "No explanation."
+)
+USER_TEMPLATE = "Database schema:\n{schema}\n\nQuestion: {question}"
+# A made-up schema of about a Spider database's size, so the prompts carry no dataset text.
+SCHEMA = "\n".join(
+    [
+        "CREATE TABLE author (author_id INTEGER PRIMARY KEY, name TEXT, country TEXT, "
+        "birth_year INTEGER)",
+        "CREATE TABLE book (book_id INTEGER PRIMARY KEY, title TEXT, author_id INTEGER, "
+        "genre TEXT, pages INTEGER, published_year INTEGER, "
+        "FOREIGN KEY (author_id) REFERENCES author(author_id))",
+        "CREATE TABLE library (library_id INTEGER PRIMARY KEY, name TEXT, city TEXT, "
+        "opened_year INTEGER)",
+        "CREATE TABLE copy (copy_id INTEGER PRIMARY KEY, book_id INTEGER, library_id INTEGER, "
+        "condition TEXT, FOREIGN KEY (book_id) REFERENCES book(book_id), "
+        "FOREIGN KEY (library_id) REFERENCES library(library_id))",
+        "CREATE TABLE member (member_id INTEGER PRIMARY KEY, name TEXT, library_id INTEGER, "
+        "joined_year INTEGER, FOREIGN KEY (library_id) REFERENCES library(library_id))",
+        "CREATE TABLE loan (loan_id INTEGER PRIMARY KEY, copy_id INTEGER, member_id INTEGER, "
+        "loan_date TEXT, return_date TEXT, FOREIGN KEY (copy_id) REFERENCES copy(copy_id), "
+        "FOREIGN KEY (member_id) REFERENCES member(member_id))",
+    ]
+)
+QUESTIONS = (
+    "How many books are in the {genre} genre?",
+    "List the titles of {genre} books with more than {pages} pages.",
+    "Which library in {city} holds the most copies of {genre} books?",
+    "What is the average page count of books published after {year}?",
+    "Name the authors from {country} who wrote at least {count} books.",
+    "How many loans did members of libraries in {city} take out in {year}?",
+    "Which members joined after {year} and have never borrowed a {genre} book?",
+    "For each genre, how many copies are in poor condition in {city}?",
+    "What is the title of the longest book by an author born before {year}?",
+    "List the libraries opened before {year} that have more than {count} members.",
+)
+FILLS = (
+    ("fantasy", 300, "Lyon", 1990, "Chile", 3),
+    ("history", 450, "Osaka", 2005, "Kenya", 2),
+    ("poetry", 120, "Quito", 1975, "Norway", 5),
+    ("science", 600, "Perth", 2012, "India", 4),
+    ("travel", 250, "Tunis", 1999, "Peru", 6),
+    ("drama", 180, "Leeds", 1984, "Egypt", 2),
+    ("crime", 380, "Turin", 2018, "Ghana", 3),
+    ("biography", 520, "Hanoi", 1968, "Spain", 7),
+    ("comics", 90, "Accra", 2001, "Japan", 2),
+    ("cooking", 210, "Basel", 1993, "Mexico", 4),
+)
+
+
+def spike_prompts(count: int) -> list[list[dict[str, str]]]:
+    """``count`` chat prompts in Forge's format, the same ones on every run."""
+    prompts = []
+    for i in range(count):
+        genre, pages, city, year, country, many = FILLS[(i // len(QUESTIONS)) % len(FILLS)]
+        question = QUESTIONS[i % len(QUESTIONS)].format(
+            genre=genre, pages=pages, city=city, year=year, country=country, count=many
+        )
+        user = USER_TEMPLATE.format(schema=SCHEMA, question=question)
+        prompts.append(
+            [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
+        )
+    return prompts
+
+
+@dataclass(frozen=True)
+class Stack:
+    """A candidate set of GPU packages, installed together into one venv."""
+
+    requirements: tuple[str, ...]
+    # Reuse the image's torch and its CUDA build instead of downloading another.
+    system_site_packages: bool
+
+
+# Candidate pins, unverified until FG-301 runs on a T4. vLLM 0.33.0 pins torch 2.14.0 and
+# transformers < 5.21, so it gets a venv of its own.
+STACKS = {
+    "vllm": Stack(("vllm==0.33.0",), system_site_packages=False),
+}
 
 
 @dataclass(frozen=True)
@@ -69,6 +159,8 @@ class Stage:
     name: str
     python: str  # the interpreter the child runs under
     argv: tuple[str, ...]  # the child's subcommand and arguments
+    needs: tuple[str, ...] = ()  # stages that must have passed first
+    removes: str | None = None  # a venv to delete once this stage is over
 
 
 @dataclass(frozen=True)
@@ -85,9 +177,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="throughput.py", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
 
-    run = commands.add_parser("run", help="every stage, one child each")
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--prompts", type=_positive, default=100)
+    shared.add_argument("--seed", type=int, default=0)
+
+    run = commands.add_parser("run", parents=[shared], help="every stage, one child each")
     run.add_argument("--out-dir", default="/kaggle/working", help="kept as the kernel's output")
     run.add_argument("--work-dir", default="/kaggle/temp/forge-spike", help="discarded scratch")
+    run.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS))
+    run.add_argument("--vllm", action=argparse.BooleanOptionalAction, default=True)
+    run.add_argument("--max-tokens", type=_positive, default=256, help="vLLM tokens per reply")
     run.add_argument("--secret-labels", nargs="*", default=["HF_TOKEN"])
     run.add_argument(
         "--budget-minutes",
@@ -101,6 +200,18 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     commands.add_parser("env", parents=[child])
     secrets = commands.add_parser("secrets", parents=[child])
     secrets.add_argument("--labels", nargs="*", default=["HF_TOKEN"])
+    download = commands.add_parser("download", parents=[child])
+    download.add_argument("--model", required=True)
+    download.add_argument("--revision", default=None)
+    install = commands.add_parser("install", parents=[child])
+    install.add_argument("--stack", choices=sorted(STACKS), required=True)
+    install.add_argument("--venv", required=True)
+    vllm = commands.add_parser("vllm-bench", parents=[child, shared])
+    vllm.add_argument("--model", required=True)
+    vllm.add_argument("--revision", default=None)
+    vllm.add_argument("--max-tokens", type=_positive, default=256)
+    vllm.add_argument("--max-model-len", type=_positive, default=2048)
+    vllm.add_argument("--gpu-memory-utilization", type=float, default=0.85)
 
     probe = commands.add_parser("limit-probe", help="rewrite a heartbeat until killed")
     probe.add_argument("--out-dir", default="/kaggle/working")
@@ -118,11 +229,54 @@ def _positive(text: str) -> int:
 
 
 def plan_stages(args: argparse.Namespace, python: str = sys.executable) -> list[Stage]:
-    """What ``run`` does, in order."""
-    return [
+    """What ``run`` does, in order: probes, downloads, then each stack's install and benches."""
+    work = Path(args.work_dir)
+    stages = [
         Stage("env", python, ("env",)),
         Stage("secrets", python, ("secrets", "--labels", *args.secret_labels)),
     ]
+    stages += [Stage(f"download:{m}", python, ("download", "--model", m)) for m in args.models]
+    if args.vllm:
+        stages += _stack_stages("vllm", "vllm", work, python, args, _vllm_argv)
+    return stages
+
+
+def _stack_stages(
+    stack: str,
+    label: str,
+    work: Path,
+    python: str,
+    args: argparse.Namespace,
+    bench_argv: Callable[[str, argparse.Namespace], tuple[str, ...]],
+) -> list[Stage]:
+    """Install ``stack`` into its own venv, bench each model in it, then delete it."""
+    venv = work / "venvs" / stack
+    install = Stage(f"install:{stack}", python, ("install", "--stack", stack, "--venv", str(venv)))
+    benches = [
+        Stage(
+            f"{label}:{model}",
+            str(venv / "bin" / "python"),
+            bench_argv(model, args),
+            needs=(install.name, f"download:{model}"),
+        )
+        for model in args.models
+    ]
+    benches[-1] = replace(benches[-1], removes=str(venv))
+    return [install, *benches]
+
+
+def _vllm_argv(model: str, args: argparse.Namespace) -> tuple[str, ...]:
+    options = _options(prompts=args.prompts, max_tokens=args.max_tokens, seed=args.seed)
+    return ("vllm-bench", "--model", model, *options)
+
+
+def _options(**values: object) -> tuple[str, ...]:
+    """``--name value`` pairs, underscores in names written as hyphens."""
+    return tuple(
+        part
+        for name, value in values.items()
+        for part in (f"--{name.replace('_', '-')}", str(value))
+    )
 
 
 def new_report(args: argparse.Namespace) -> dict[str, Any]:
@@ -146,23 +300,35 @@ def run(
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Run every planned stage and keep the report at ``out_dir`` current after each."""
-    runner = runner or run_child
     out_dir, work = Path(args.out_dir), Path(args.work_dir)
+    # Children share one model cache, kept out of the output folder.
+    runner = runner or functools.partial(run_child, hf_home=work / "hf")
     report = new_report(args)
     report_path = out_dir / REPORT_NAME
     write_json(report_path, report)
     deadline = clock() + args.budget_minutes * 60
+    passed: set[str] = set()
     for stage in plan_stages(args):
         entry: dict[str, Any] = {"name": stage.name, "status": "skipped", "started_at": _now()}
         entry.update(seconds=None, result=None, error=None)
+        missing = [name for name in stage.needs if name not in passed]
         left = deadline - clock()
-        if left <= 0:
+        if missing:
+            entry["error"] = "needs " + ", ".join(missing)
+        elif left <= 0:
             entry["error"] = f"out of budget ({args.budget_minutes:g} min)"
         else:
             start = clock()
             outcome = runner(stage, work / "results" / f"{_slug(stage.name)}.json", left)
             entry.update(status=outcome.status, result=outcome.result, error=outcome.error)
             entry["seconds"] = round(clock() - start, 3)
+            if outcome.status == "ok":
+                passed.add(stage.name)
+        if stage.removes and Path(stage.removes).exists():
+            try:
+                shutil.rmtree(stage.removes)
+            except OSError as exc:
+                entry["cleanup_error"] = f"{type(exc).__name__}: {exc}"
         report["stages"].append(entry)
         report["updated_at"] = _now()
         write_json(report_path, report)
@@ -172,12 +338,16 @@ def run(
     return report
 
 
-def run_child(stage: Stage, result_file: Path, timeout: float) -> Outcome:
+def run_child(
+    stage: Stage, result_file: Path, timeout: float, hf_home: Path | None = None
+) -> Outcome:
     """Run one stage as ``python throughput.py <argv> --out <file>``, its output in the log."""
     result_file.unlink(missing_ok=True)
     result_file.parent.mkdir(parents=True, exist_ok=True)
     command = [stage.python, _script_path(), *stage.argv, "--out", str(result_file)]
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
+    if hf_home is not None:
+        env["HF_HOME"] = str(hf_home)
     # A session of its own, so a kill also reaches every process the stage started.
     proc = subprocess.Popen(
         command,
@@ -278,6 +448,95 @@ def secrets_stage(args: argparse.Namespace) -> dict[str, Any]:
     return found
 
 
+def download_stage(args: argparse.Namespace) -> dict[str, Any]:
+    from huggingface_hub import snapshot_download
+
+    start = time.perf_counter()
+    path = Path(snapshot_download(args.model, revision=args.revision, allow_patterns=MODEL_FILES))
+    return {
+        "model": args.model,
+        "commit": path.name,  # a snapshot folder is named after its commit
+        "seconds": round(time.perf_counter() - start, 3),
+        "bytes": _tree_bytes(path),
+    }
+
+
+def install_stage(args: argparse.Namespace) -> dict[str, Any]:
+    """Create the stack's venv and time how long its packages take to install with uv."""
+    stack = STACKS[args.stack]
+    venv = Path(args.venv)
+    uv = [found] if (found := shutil.which("uv")) else None
+    bootstrap = None
+    if uv is None:
+        start = time.perf_counter()
+        _check([sys.executable, "-m", "pip", "install", "--quiet", UV_PIN])
+        bootstrap = round(time.perf_counter() - start, 3)
+        uv = [sys.executable, "-m", "uv"]
+    start = time.perf_counter()
+    flags = ["--system-site-packages"] if stack.system_site_packages else []
+    _check([*uv, "venv", "--python", sys.executable, *flags, str(venv)])
+    python = str(venv / "bin" / "python")
+    _check([*uv, "pip", "install", "--python", python, *stack.requirements])
+    seconds = round(time.perf_counter() - start, 3)
+    return {
+        "stack": args.stack,
+        "requirements": list(stack.requirements),
+        "system_site_packages": stack.system_site_packages,
+        "uv": _check([*uv, "--version"]).strip(),
+        "uv_bootstrap_seconds": bootstrap,
+        "install_seconds": seconds,
+        "venv_bytes": _tree_bytes(venv),
+        "freeze": _check([*uv, "pip", "freeze", "--python", python]).splitlines(),
+    }
+
+
+def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
+    """Greedy fp16 generation on the spike prompts: a T4 has no bf16."""
+    from vllm import LLM, SamplingParams
+
+    start = time.perf_counter()
+    llm = LLM(
+        model=args.model,
+        revision=args.revision,
+        dtype="half",
+        max_model_len=args.max_model_len,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        seed=args.seed,
+    )
+    load_seconds = time.perf_counter() - start
+    params = SamplingParams(temperature=0.0, max_tokens=args.max_tokens, seed=args.seed)
+    start = time.perf_counter()
+    outputs = llm.chat(
+        spike_prompts(args.prompts),
+        params,
+        use_tqdm=False,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    seconds = time.perf_counter() - start
+    completion_tokens = sum(len(out.outputs[0].token_ids) for out in outputs)
+    return {
+        "model": args.model,
+        "settings": {
+            "dtype": "half",
+            "max_model_len": args.max_model_len,
+            "gpu_memory_utilization": args.gpu_memory_utilization,
+            "temperature": 0.0,
+            "max_tokens": args.max_tokens,
+        },
+        "versions": versions(),
+        "load_seconds": round(load_seconds, 3),
+        "generate_seconds": round(seconds, 3),
+        "prompts": len(outputs),
+        "prompt_tokens": sum(len(out.prompt_token_ids) for out in outputs),
+        "completion_tokens": completion_tokens,
+        "completion_tokens_per_second": round(completion_tokens / seconds, 1),
+        "cut_at_max_tokens": sum(out.outputs[0].finish_reason == "length" for out in outputs),
+        "memory": cuda_memory(),
+        # A few replies, to check they are SQL and that thinking stayed off.
+        "samples": [out.outputs[0].text[:400] for out in outputs[:3]],
+    }
+
+
 def limit_probe(args: argparse.Namespace) -> int:
     """Rewrite a heartbeat file every interval until the session is killed."""
     path = Path(args.out_dir) / PROBE_NAME
@@ -309,6 +568,22 @@ def versions() -> dict[str, str | None]:
         except importlib.metadata.PackageNotFoundError:
             found[name] = None
     return found
+
+
+def cuda_memory() -> dict[str, int] | None:
+    """Peak memory of this process's allocator, and what the whole device has in use."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return None
+    free, total = torch.cuda.mem_get_info()
+    return {
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+        "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+        # vLLM's engine runs in a process of its own, which only this number sees.
+        "device_used_bytes": total - free,
+        "device_total_bytes": total,
+    }
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -377,6 +652,10 @@ def _check(command: list[str]) -> str:
     return done.stdout
 
 
+def _tree_bytes(path: Path) -> int:
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -401,6 +680,9 @@ def _script_path() -> str:
 CHILDREN: dict[str, Callable[[argparse.Namespace], Any]] = {
     "env": env_stage,
     "secrets": secrets_stage,
+    "download": download_stage,
+    "install": install_stage,
+    "vllm-bench": vllm_stage,
 }
 
 
