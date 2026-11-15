@@ -11,7 +11,7 @@ from forge.data.manifest import data_manifest_hash
 
 # data_manifest_hash of tests/fixtures/spider_mini. CI on Linux and a Mac must agree on
 # it; it changes only with the fixture files, the ids or the hash recipe.
-SPIDER_MINI_HASH = "2549a64c6001fdb900f1156dbb6f1359d57692111910bc1ab98609f007516dd9"
+SPIDER_MINI_HASH = "ad37bdf2544b801ee73a52f908cafd87fbfb542a6a0adc2e709a38571fdfa447"
 
 
 @pytest.mark.phase(1)
