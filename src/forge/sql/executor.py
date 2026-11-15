@@ -6,17 +6,18 @@ file, and its authorizer is default-deny: only ``SQLITE_SELECT``, ``SQLITE_READ`
 ``SQLITE_FUNCTION`` and ``SQLITE_RECURSIVE`` pass, so writes, DDL, ``ATTACH``, ``VACUUM``,
 ``PRAGMA`` and transactions fail as they are prepared, before anything runs.
 
-``SqliteExecutor.run`` adds the rest and never raises for bad SQL: a deadline checked
-from a progress handler, a row cap, and one statement per call. Each failure comes back
-as an ``ExecResult`` with an ``ErrorKind``:
+``SqliteExecutor.run`` adds the rest and never raises for bad SQL: one statement per
+call, and only a query; a deadline checked from a progress handler; and a row cap. Each
+failure comes back as an ``ExecResult`` with an ``ErrorKind``:
 
-- ``denied``: the authorizer refused the statement, there was more than one statement,
-  or the statement returns no columns, so it isn't a query. Statements are counted here
-  before SQLite sees them. ``SELECT 1;`` and trailing comments are one statement; a stray
-  ``;`` after the first statement makes two, as it does for ``sqlite3``. A ``CREATE
-  TRIGGER`` body counts as several, which changes nothing because a trigger is a write.
-  A write that names a missing table fails with ``no_such_table`` before the authorizer
-  is asked.
+- ``denied``: there was more than one statement, the statement is not a query, or the
+  authorizer refused it. Statements are counted and classified here, before SQLite sees
+  them. ``SELECT 1;`` and trailing comments are one statement; a stray ``;`` after the
+  first statement makes two, as it does for ``sqlite3``. A ``CREATE TRIGGER`` body counts
+  as several, which changes nothing because a trigger is a write. A statement is a query
+  when its keyword (``statement_keyword``) is ``SELECT`` or ``VALUES``; any other
+  statement keyword is denied, even when SQLite would fail first on a missing name. One
+  that returns no columns is denied too.
 - ``timeout``: the deadline passed while the query ran or its rows were fetched.
 - ``syntax``, ``no_such_table``, ``no_such_column``: from SQLite's error message.
 - ``empty_sql``: nothing but whitespace, comments and semicolons.
@@ -50,22 +51,42 @@ ALLOWED_ACTIONS = frozenset(
 
 MULTIPLE_STATEMENTS = "more than one statement; only a single statement may run"
 NOT_A_QUERY = "not a query; only statements that return rows may run"
+NOT_A_QUERY_KEYWORD = "{keyword} is not a query; only SELECT and VALUES statements may run"
 EMPTY_SQL = "no SQL"
 
-# How sqlite3 sees a string of SQL: whitespace and comments (``gap``), statement ends,
-# and everything else, with quoted strings and names kept whole so a ``;`` inside them
-# doesn't end anything. SQLite runs an unclosed block comment to the end of the input,
-# and an unclosed quote is an error SQLite reports itself, so both run to the end here.
-# Whitespace is the five characters sqlite3 skips between statements.
+QUERY_KEYWORDS = frozenset({"SELECT", "VALUES"})
+# Every keyword a SQLite statement can start with.
+STATEMENT_KEYWORDS = frozenset(
+    {
+        *("ALTER", "ANALYZE", "ATTACH", "BEGIN", "COMMIT", "CREATE", "DELETE", "DETACH"),
+        *("DROP", "END", "EXPLAIN", "INSERT", "PRAGMA", "REINDEX", "RELEASE", "REPLACE"),
+        *("ROLLBACK", "SAVEPOINT", "SELECT", "UPDATE", "VACUUM", "VALUES", "WITH"),
+    }
+)
+# The statements a WITH clause can lead into.
+_WITH_BODIES = frozenset({"SELECT", "VALUES", "INSERT", "REPLACE", "UPDATE", "DELETE"})
+
+# How sqlite3 sees a string of SQL: whitespace, comments, statement ends, parentheses,
+# quoted strings and names (kept whole, so a ``;`` inside them doesn't end anything), and
+# other words. SQLite runs an unclosed block comment to the end of the input, and an
+# unclosed quote is an error SQLite reports itself, so both run to the end here. SQLite
+# reads whitespace as one of `` \t\n\f\r`` followed by any of those or ``\v``; a ``\v``
+# anywhere else is an unrecognized token.
 _LEXEME = re.compile(
     r"""
-    (?P<gap>[ \t\n\f\r]+|--[^\n]*|/\*.*?(?:\*/|\Z))
+    (?P<space>[ \t\n\f\r][ \t\n\v\f\r]*)
+    |(?P<comment>--[^\n]*|/\*.*?(?:\*/|\Z))
     |(?P<end>;)
-    |(?P<text>'(?:[^']|'')*'?|"(?:[^"]|"")*"?|`(?:[^`]|``)*`?|\[[^\]]*\]?
-        |[^ \t\n\f\r;'"`\[/-]+|[/-])
+    |(?P<open>\()
+    |(?P<close>\))
+    |(?P<quoted>'(?:[^']|'')*'?|"(?:[^"]|"")*"?|`(?:[^`]|``)*`?|\[[^\]]*\]?)
+    |(?P<word>[^ \t\n\f\r;'"`\[()/-]+|[/-])
     """,
     re.VERBOSE | re.DOTALL,
 )
+_GAPS = frozenset({"space", "comment"})
+# SQLite identifiers: ASCII letters, digits, ``_`` and ``$``, and any non-ASCII character.
+_IDENTIFIER = re.compile("[A-Za-z_\u0080-\U0010ffff][A-Za-z0-9_$\u0080-\U0010ffff]*")
 
 # Whole-message patterns, so a name quoted inside a message can't change its kind.
 _ERROR_KINDS: tuple[tuple[re.Pattern[str], ErrorKind], ...] = (
@@ -118,23 +139,69 @@ def statement_count(sql: str) -> int:
 
     Semicolons before the first statement are skipped, as SQLite skips them. After the
     first statement only whitespace and comments may follow, so a stray ``;`` there
-    counts as a statement of its own.
+    counts as a statement of its own, and so does a ``\v``, which Python's check there
+    never skips.
     """
     count = 0
     in_statement = False
     for match in _LEXEME.finditer(sql):
         kind = match.lastgroup
-        if kind == "gap":
-            continue
         if kind == "end":
             if in_statement:
                 in_statement = False
             elif count:
                 count += 1
-        elif not in_statement:
+            continue
+        after_first = count > 0 and not in_statement
+        if kind == "comment" or (kind == "space" and not (after_first and "\v" in match.group())):
+            continue
+        if not in_statement:
             count += 1
             in_statement = True
     return count
+
+
+def strip_leading(sql: str) -> str:
+    """``sql`` from its first statement on: the whitespace, comments and semicolons SQLite
+    skips before it are gone."""
+    for match in _LEXEME.finditer(sql):
+        if match.lastgroup not in _GAPS and match.lastgroup != "end":
+            return sql[match.start() :]
+    return ""
+
+
+def statement_keyword(sql: str) -> str | None:
+    """The upper-case keyword that says what the first statement in ``sql`` does.
+
+    That is the statement's first word or, after a ``WITH`` clause, the first ``SELECT``,
+    ``VALUES``, ``INSERT``, ``REPLACE``, ``UPDATE`` or ``DELETE`` outside the parentheses
+    of its common table expressions. ``None`` when the first word is no statement keyword,
+    which SQLite reports as a syntax error, or nothing follows the ``WITH`` clause.
+    """
+    lexemes = (m for m in _LEXEME.finditer(strip_leading(sql)) if m.lastgroup not in _GAPS)
+    first = next(lexemes, None)
+    if first is None or first.lastgroup != "word":
+        return None
+    word = _IDENTIFIER.match(first.group())
+    keyword = word.group().upper() if word is not None else None
+    if keyword not in STATEMENT_KEYWORDS:
+        return None
+    if keyword != "WITH":
+        return keyword
+    depth = 0
+    for match in lexemes:
+        kind = match.lastgroup
+        if kind == "end":
+            break
+        if kind == "open":
+            depth += 1
+        elif kind == "close":
+            depth -= 1
+        elif kind == "word" and depth <= 0:
+            for name in _IDENTIFIER.finditer(match.group()):
+                if name.group().upper() in _WITH_BODIES:
+                    return name.group().upper()
+    return None
 
 
 def classify_error(message: str) -> ErrorKind:
@@ -176,6 +243,12 @@ class SqliteExecutor:
             return ExecResult(
                 ok=False, error=MULTIPLE_STATEMENTS, error_kind="denied", ms=_ms(start)
             )
+        keyword = statement_keyword(sql)
+        if keyword is not None and keyword not in QUERY_KEYWORDS:
+            # Decided here because SQLite resolves names before it asks the authorizer,
+            # so a write on a missing table would come back as no_such_table.
+            error = NOT_A_QUERY_KEYWORD.format(keyword=keyword)
+            return ExecResult(ok=False, error=error, error_kind="denied", ms=_ms(start))
 
         deadline = start + timeout_ms / 1000
         timed_out = False

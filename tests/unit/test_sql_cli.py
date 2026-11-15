@@ -41,7 +41,8 @@ def test_sql_run_prints_rows(spider_mini: Path) -> None:
 def test_sql_run_reports_failures(spider_mini: Path) -> None:
     code, lines, _ = _run("DELETE FROM department")
     assert code == 1
-    assert re.fullmatch(r"denied: not authorized \(\d+\.\d ms\)", lines[0])
+    denied = r"denied: DELETE is not a query; only SELECT and VALUES statements may run"
+    assert re.fullmatch(denied + r" \(\d+\.\d ms\)", lines[0])
 
     runaway = "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) SELECT max(x) FROM r"
     code, lines, _ = _run(runaway, "--timeout-ms", "50")
