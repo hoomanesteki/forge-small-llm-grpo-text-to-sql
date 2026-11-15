@@ -4,7 +4,9 @@
 can take, and those that a later story builds, before any data is loaded or any file
 written. ``manifest_config`` is what a run's manifest records and hashes: every setting
 that can change a score, the sandbox and official-EX bounds among them (ADR-0008), so a
-resumed run has to match it exactly.
+resumed run has to match it exactly. That includes the device, since greedy decoding on
+another device can pick another token where two are nearly tied; the manifest's platform
+follows it (ADR-0016).
 """
 
 from __future__ import annotations
@@ -21,11 +23,15 @@ from forge.data.splits import SPLITS
 from forge.eval.agreement import GOLD_TIMEOUT_MS
 from forge.eval.gold_cache import MAX_ROWS
 from forge.infer.base import check_params
+from forge.ops.manifest import Platform
 from forge.sql.executor import DEFAULT_TIMEOUT_MS
 
 Backend = Literal["hf", "vllm", "llamacpp", "fake"]
+# Where the hf backend runs the model: the CPU, or Apple silicon's GPU through MPS.
+Device = Literal["cpu", "mps"]
 Store = Literal["local", "hub"]
 BACKENDS: tuple[Backend, ...] = get_args(Backend)
+DEVICES: tuple[Device, ...] = get_args(Device)
 STORES: tuple[Store, ...] = get_args(Store)
 # The fake backend's models: one answers with each question's gold query, the other
 # always with SELECT 1. Tests build other fakes with FakeBackend(fn).
@@ -55,6 +61,7 @@ class EvalConfig:
     model: str
     adapter: str | None = None
     backend: Backend = "hf"
+    device: Device = "cpu"
     split: Split = "val"
     reason: str | None = None
     limit: int | None = None
@@ -69,6 +76,12 @@ class EvalConfig:
     def params(self) -> GenParams:
         return GenParams(temperature=self.temperature, n=self.n)
 
+    @property
+    def platform(self) -> Platform:
+        """Where the run's model runs, as its manifest names it: a run on MPS is a
+        ``local-mps`` pilot (ADR-0016)."""
+        return "local-mps" if self.device == "mps" else "local-cpu"
+
     def manifest_config(self) -> dict[str, Any]:
         """What the manifest records and hashes: everything that can change a score.
 
@@ -76,6 +89,7 @@ class EvalConfig:
         """
         return {
             "backend": self.backend,
+            "device": self.device,
             "model": self.model,
             "adapter": self.adapter,
             "split": self.split,
@@ -110,6 +124,13 @@ def check_config(config: EvalConfig) -> None:
         raise ValueError("--reason goes with --split dev, the only split whose uses are logged")
     if config.backend not in BACKENDS:
         raise ValueError(f"backend must be one of {', '.join(BACKENDS)}, got {config.backend!r}")
+    if config.device not in DEVICES:
+        raise ValueError(f"device must be one of {', '.join(DEVICES)}, got {config.device!r}")
+    if config.device == "mps" and config.split == "dev":
+        raise ValueError(
+            "--device mps makes the run a local-mps pilot, and pilots never evaluate dev, "
+            "so none spends one of the six dev looks (ADR-0016)"
+        )
     if config.store not in STORES:
         raise ValueError(f"store must be one of {', '.join(STORES)}, got {config.store!r}")
     check_version(config.prompt_version)
@@ -126,6 +147,11 @@ def check_config(config: EvalConfig) -> None:
             )
         if config.adapter is not None:
             raise ValueError("--backend fake loads no adapter")
+        if config.device != "cpu":
+            # Its manifest would call a run with no model a pilot on the laptop's GPU.
+            raise ValueError(
+                f"--backend fake runs no model, so it takes no --device {config.device}"
+            )
     check_params(config.params)
     if config.backend in LATER_BACKENDS:
         raise NotAvailable(

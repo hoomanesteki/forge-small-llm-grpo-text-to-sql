@@ -241,6 +241,7 @@ def test_report_renders_from_scores(runs: Path) -> None:
         "| Model | `gold` |",
         "| Adapter | none |",
         "| Backend | `fake` |",
+        "| Platform | `local-cpu` |",
         "| Prompt version | `p1` |",
         "| Split | val: 20 questions, 1 sample each |",
         "| Generation | greedy, at most 256 new tokens |",

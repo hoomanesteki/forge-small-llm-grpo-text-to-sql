@@ -274,6 +274,7 @@ def _expected(stored: Stored) -> tuple[dict[tuple[str, str], Expected], dict[str
         ("", "Model"): _names(manifest.model_ref),
         ("", "Adapter"): _names(*filter(None, [manifest.adapter_ref])),
         ("", "Backend"): _names(config["backend"]),
+        ("", "Platform"): _names(manifest.platform),
         ("", "Prompt version"): _names(config["prompt_version"]),
         ("", "Split"): _says(f"{questions:,}", *limit, f"{generation['n']:,}"),
         ("", "Generation"): _says(*sampled, f"{generation['max_new_tokens']:,}"),
