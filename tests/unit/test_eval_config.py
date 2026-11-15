@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import re
+from pathlib import Path
 from typing import Any, get_args, get_type_hints
 
 import pytest
@@ -14,7 +16,16 @@ from forge.core.types import GenParams
 from forge.data.schema import PROMPT_VERSIONS
 from forge.data.splits import SPLITS
 from forge.eval import runner
-from forge.eval.config import BACKENDS, DEVICES, STORES, EvalConfig, NotAvailable, check_config
+from forge.eval.config import (
+    BACKENDS,
+    DEVICES,
+    FILE_OPTIONS,
+    STORES,
+    EvalConfig,
+    NotAvailable,
+    check_config,
+    read_config_file,
+)
 
 BASE = EvalConfig(model="org/model")
 
@@ -136,3 +147,104 @@ def test_cli_sizes_the_sql_worker_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     refused = cli_runner.invoke(cli.app, [*args, "--workers", "0"])
     assert refused.exit_code == 2 and "--workers" in refused.stderr
     assert len(pools) == 2
+
+
+def _captured(monkeypatch: pytest.MonkeyPatch) -> list[EvalConfig]:
+    """The configs ``forge eval run`` hands the runner, which stops before any work."""
+    configs: list[EvalConfig] = []
+
+    def run_eval(config: EvalConfig, **kwargs: Any) -> None:
+        configs.append(config)
+        raise ValueError("stopped before any work")
+
+    monkeypatch.setattr(runner, "run_eval", run_eval)
+    return configs
+
+
+@pytest.mark.phase(2)
+def test_config_file_gives_defaults_the_command_line_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configs = _captured(monkeypatch)
+    path = tmp_path / "eval.yaml"
+    path.write_text(
+        "model: gold\nbackend: fake\nsplit: train\nlimit: 3\nprompt_version: p2\n"
+        "n: 2\ntemperature: 0.7\nretry: 1\nadapter: null\n",
+        encoding="utf-8",
+    )
+    cli_runner = CliRunner()
+    for args in ([], ["--limit", "5", "--model", "select-1"]):
+        result = cli_runner.invoke(cli.app, ["eval", "run", "--config", str(path), *args])
+        assert (result.exit_code, result.stderr) == (1, "error: stopped before any work\n")
+    from_file = EvalConfig(
+        model="gold",
+        backend="fake",
+        split="train",
+        limit=3,
+        prompt_version="p2",
+        n=2,
+        temperature=0.7,
+        retry=1,
+    )
+    assert configs == [from_file, dataclasses.replace(from_file, limit=5, model="select-1")]
+
+    # Without a file nothing changes, and the model is still required.
+    missing = cli_runner.invoke(cli.app, ["eval", "run", "--backend", "fake"])
+    assert missing.exit_code == 2 and "Missing option '--model'" in missing.stderr
+
+
+@pytest.mark.phase(2)
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("model: gold\nrun_id: x\n", "sets run_id, which a config file can't"),
+        ("model: gold\nreason: a look\nstore: hub\n", "sets reason, store, which"),
+        ("model: gold\nn: '2'\n", "n must be a whole number, got '2'"),
+        ("model: gold\nretry: true\n", "retry must be a whole number, got True"),
+        ("model: gold\ntemperature: warm\n", "temperature must be a number"),
+        ("model: null\n", "model must be text, got None"),
+        ("- model\n- gold\n", "must be a mapping of options"),
+        ("", "must be a mapping of options"),
+        ("model: [gold\n", "is not valid YAML"),
+    ],
+)
+def test_config_file_refused_unless_it_holds_options(
+    tmp_path: Path, text: str, message: str
+) -> None:
+    path = tmp_path / "eval.yaml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=re.escape(message)):
+        read_config_file(path)
+
+
+@pytest.mark.phase(2)
+def test_cli_refuses_a_bad_config_file_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configs = _captured(monkeypatch)
+    path = tmp_path / "eval.yaml"
+    cli_runner = CliRunner()
+    for text, message in (
+        ("model: gold\nrun_id: x\n", "sets run_id, which a config file can't"),
+        # A value of the right kind is still checked by its option's type.
+        ("model: gold\nbackend: onnx\n", "Invalid value for '--backend'"),
+    ):
+        path.write_text(text, encoding="utf-8")
+        result = cli_runner.invoke(cli.app, ["eval", "run", "--config", str(path)])
+        assert result.exit_code == 2 and message in _unboxed(result.stderr), result.stderr
+    gone = cli_runner.invoke(cli.app, ["eval", "run", "--config", str(tmp_path / "none.yaml")])
+    assert gone.exit_code == 2 and "does not exist" in _unboxed(gone.stderr)
+    assert configs == []
+
+
+def _unboxed(text: str) -> str:
+    """A usage error as one line: click's message comes in a box, wrapped to its width."""
+    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", text).split())
+
+
+@pytest.mark.phase(2)
+def test_config_file_options_are_eval_run_options() -> None:
+    # The file's keys feed click's default map, which knows options by parameter name.
+    parameters = inspect.signature(cli.eval_run).parameters
+    fields = {field.name for field in dataclasses.fields(EvalConfig)}
+    assert set(FILE_OPTIONS) <= set(parameters) & fields
