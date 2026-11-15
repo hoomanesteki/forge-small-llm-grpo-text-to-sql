@@ -30,6 +30,7 @@ from forge.sql.executor import (
     connect_readonly,
     row_size,
 )
+from forge.sql.sandbox import KILL_GRACE_MS
 from tests.sandbox_jobs import review_query
 
 DB = "department_management"
@@ -41,6 +42,19 @@ _LIKE = "(printf('%.*c', 4000, 'a') || x LIKE '%' || printf('%.*c', 90, 'a') || 
 SLOW_ROWS = (
     RUNAWAY + " WHERE " + " + ".join([_INSTR] * 20) + " > 0",
     RUNAWAY + " WHERE " + " + ".join([_LIKE] * 20) + " > 0",
+)
+
+# Ten rows, each a handful of bounded-but-slow calls (ltrim with a large character set),
+# together under PROGRESS_STEPS virtual-machine steps. The progress handler fires only
+# every PROGRESS_STEPS steps, so on its own it never reaches a check and the query runs to
+# completion; only the watchdog's interrupt at the deadline stops it.
+_WATCHDOG_CALL = "length(ltrim(printf('%.*c', 3600, 'a') || x, printf('%.*c', 340, 'b') || 'a'))"
+WATCHDOG_ROWS = (
+    "WITH r(x) AS (VALUES "
+    + ", ".join(f"({i})" for i in range(1, 11))
+    + ") SELECT count(*) FROM r WHERE ("
+    + " + ".join([_WATCHDOG_CALL] * 10)
+    + ") >= 0"
 )
 
 
@@ -249,10 +263,56 @@ def test_timeout_holds_for_expensive_rows(executor: SqliteExecutor) -> None:
         elapsed_ms = (time.perf_counter() - started) * 1000
 
         assert (result.ok, result.error_kind) == (False, "timeout"), (sql, result)
-        # The watchdog interrupts at the next row, so at most one row's work (well under
-        # 100 ms here) runs past the deadline; the margin is for slow CI machines.
+        # These many-row queries run enough VM steps that the progress handler stops them
+        # near the deadline; the watchdog's separate job (rows the handler never sees) is
+        # test_watchdog_stops_a_query_the_handler_never_checks. The margin is for slow CI.
         assert elapsed_ms < 300 + 700, sql
     assert executor.run(DB, _counting(3)).rows == [(1,), (2,), (3,)]
+
+
+@pytest.mark.phase(1)
+def test_watchdog_stops_a_query_the_handler_never_checks(executor: SqliteExecutor) -> None:
+    # This fails if the watchdog is removed: without it only the progress handler is left,
+    # and for this query (under PROGRESS_STEPS steps) it never fires, so the query runs to
+    # completion instead of stopping at the deadline.
+    started = time.perf_counter()
+    result = executor.run(DB, WATCHDOG_ROWS, timeout_ms=100)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    assert (result.ok, result.error_kind) == (False, "timeout"), result
+    assert elapsed_ms < 100 + 700
+    # Interrupting leaves the connection usable, with no deadline left over.
+    assert executor.run(DB, _counting(3)).rows == [(1,), (2,), (3,)]
+
+
+@pytest.mark.phase(1)
+def test_in_process_deadline_is_soft_for_one_row(executor: SqliteExecutor) -> None:
+    # The in-process deadline is soft. ltrim with a large character set (like unhex with a
+    # large ignore set) is far slower than the instr, replace, LIKE and GLOB that
+    # test_limits_bound_the_work_in_one_row measures, and SQLite can't stop work inside one
+    # row, so a single row packed with such calls runs past the deadline. Only the pool's
+    # kill is a hard bound.
+    sql_bytes = LIMITS[sqlite3.SQLITE_LIMIT_SQL_LENGTH]
+    text = "printf('%.*c', 3800, 'a')"  # a 3,800-character string
+    chars = "printf('%.*c', 340, 'b') || 'a'"  # a 341-character trim set
+    head = f"WITH t(x, y) AS (SELECT {text}, {chars}) SELECT "
+    call, tail = "length(ltrim(x, y))", " AS v FROM t"
+    n = (sql_bytes - len(head) - len(tail) + 3) // (len(call) + 3)
+    sql = head + " + ".join([call] * n) + tail
+    assert len(sql) <= sql_bytes
+
+    started = time.perf_counter()
+    soft = executor.run(DB, sql, timeout_ms=100)
+    in_process_ms = (time.perf_counter() - started) * 1000
+    assert soft.error_kind == "timeout"
+    # The one row runs past even the pool's hard deadline (timeout + the kill grace): the
+    # few-hundredths-of-a-second bound holds only for the functions measured above.
+    assert in_process_ms > 100 + KILL_GRACE_MS, in_process_ms
+
+    # The pool's SIGKILL is what actually bounds the same row.
+    killed = executor.run_many([(DB, sql)], workers=1, timeout_ms=100)[0]
+    assert killed.error_kind == "timeout"
+    assert killed.ms < 100 + KILL_GRACE_MS + 1000, killed.ms
 
 
 @pytest.mark.phase(1)

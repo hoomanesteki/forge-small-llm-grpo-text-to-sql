@@ -25,6 +25,7 @@ from forge.eval.agreement import (
     score,
 )
 from forge.eval.testsuite import GoldQueryFailed, OfficialEvalTimeout, official_exec_match
+from forge.sql.sandbox import SandboxError
 from tests.fakes import InlineSandbox
 from tests.sandbox_jobs import review_query
 
@@ -32,6 +33,22 @@ DB = "department_management"
 # No head is older than 1000, so this gold result is empty.
 EMPTY_GOLD = "SELECT name FROM head WHERE age > 1000"
 COUNT_GOLD = "SELECT count(*) FROM head WHERE age  >  56"
+
+
+class _PoolThatLosesAWorker:
+    """An ``InlineSandbox`` that raises ``SandboxError`` for one chosen prediction, the
+    way the real pool does when a worker dies under a job."""
+
+    def __init__(self, data_dir: Path, die_on: str) -> None:
+        self.data_dir = data_dir.resolve()
+        self._inner = InlineSandbox(data_dir)
+        self._die_on = die_on
+
+    def call(self, fn: object, *args: object, timeout_s: float) -> object:
+        item = args[-1]
+        if getattr(item, "pred_sql", None) == self._die_on:
+            raise SandboxError("sandbox worker died with exit code 1")
+        return self._inner.call(fn, *args, timeout_s=timeout_s)
 
 
 def _upstream(pred: str, gold: str) -> int:
@@ -207,6 +224,25 @@ def test_official_match_raises_for_broken_gold_or_data(spider_mini: Path) -> Non
         official_exec_match([("no_such_db", "SELECT 1", "SELECT 1")])
 
 
+@pytest.mark.phase(1)
+def test_official_match_survives_a_worker_death(
+    spider_mini: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A worker that dies under one item used to raise SandboxError out of the whole call,
+    # ending the scoring of every other item. Now the item is counted as no match and the
+    # rest are scored.
+    good = "SELECT name FROM head WHERE age > 2000"  # empty, so it matches EMPTY_GOLD
+    crash = "SELECT name FROM head"
+    items = [(DB, good, EMPTY_GOLD), (DB, crash, EMPTY_GOLD), (DB, good, EMPTY_GOLD)]
+    pool = _PoolThatLosesAWorker(spider_mini, die_on=crash)
+    caplog.set_level(logging.WARNING, logger="forge.eval.testsuite")
+
+    verdicts = official_exec_match(items, pool=pool)
+
+    assert verdicts == [True, False, True]
+    assert "official EX item 1 on department_management" in caplog.text
+
+
 def _cells(text: str) -> list[list[str]]:
     return [line.split() for line in text.splitlines()]
 
@@ -294,6 +330,40 @@ def test_gold_check_fails_when_a_checker_misses(
     assert _cells(result.stdout)[3] == ["official", "EX", "0/20", "0.00%"]
     assert "20 gold queries don't match themselves" in result.stderr
     assert "fast True, official False" in result.stderr
+
+
+@pytest.mark.phase(1)
+def test_eval_gold_reports_a_sandbox_failure(
+    spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A pool that can't start its workers raises SandboxError; the command prints a clean
+    # error, not a traceback.
+    def boom(items: list[tuple[str, str | None, str]], **_: object) -> list[bool]:
+        raise SandboxError("a sandbox worker didn't start in 60 s")
+
+    monkeypatch.setattr("forge.eval.agreement.official_exec_match", boom)
+    result = CliRunner().invoke(cli.app, ["eval", "gold", "--split", "val"])
+
+    assert result.exit_code == 1
+    assert "error: a sandbox worker didn't start in 60 s" in result.stderr
+
+
+@pytest.mark.phase(1)
+def test_eval_agreement_reports_a_sandbox_failure(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(items: list[tuple[str, str | None, str]], **_: object) -> list[bool]:
+        raise SandboxError("a sandbox worker didn't start in 60 s")
+
+    monkeypatch.setattr("forge.eval.agreement.official_exec_match", boom)
+    out = tmp_path / "agreement.md"
+    result = CliRunner().invoke(
+        cli.app, ["eval", "agreement", "--mutations", "20", "--out", str(out)]
+    )
+
+    assert result.exit_code == 1
+    assert "error: a sandbox worker didn't start in 60 s" in result.stderr
+    assert not out.exists()
 
 
 @pytest.mark.phase(1)

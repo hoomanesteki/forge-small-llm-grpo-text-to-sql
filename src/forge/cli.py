@@ -315,6 +315,7 @@ def eval_gold(
     from forge.eval.agreement import GOLD_TIMEOUT_MS, gold_mutations, score
     from forge.eval.testsuite import OfficialEvalTimeout
     from forge.ops.paths import RepoRootNotFound
+    from forge.sql.sandbox import SandboxError
 
     try:
         data_dir = resolve_data_dir()
@@ -323,8 +324,9 @@ def eval_gold(
         if not kept:
             raise ValueError(f"the {split} split has no questions in {data_dir}")
         scores = score(gold_mutations(kept), data_dir=data_dir, pred_timeout_ms=GOLD_TIMEOUT_MS)
-    # ValueError covers GoldQueryFailed, a gold query that fails on its database.
-    except (DataNotFound, OfficialEvalTimeout, RepoRootNotFound, ValueError) as exc:
+    # ValueError covers GoldQueryFailed, a gold query that fails on its database;
+    # SandboxError a sandbox pool that can't start or keep its workers.
+    except (DataNotFound, OfficialEvalTimeout, RepoRootNotFound, SandboxError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
@@ -387,6 +389,7 @@ def eval_agreement(
     )
     from forge.eval.testsuite import OfficialEvalTimeout
     from forge.ops.paths import RepoRootNotFound, repo_root
+    from forge.sql.sandbox import SandboxError
 
     try:
         data_dir = resolve_data_dir()
@@ -416,8 +419,8 @@ def eval_agreement(
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(render_report(scores, run), encoding="utf-8")
     # OSError covers a missing database (DataNotFound) and a report that can't be written;
-    # ValueError covers GoldQueryFailed.
-    except (OSError, OfficialEvalTimeout, RepoRootNotFound, ValueError) as exc:
+    # ValueError covers GoldQueryFailed; SandboxError a pool that can't start its workers.
+    except (OSError, OfficialEvalTimeout, RepoRootNotFound, SandboxError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
