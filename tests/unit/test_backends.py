@@ -1,11 +1,14 @@
-"""Choosing a training backend, and what it asks of TRL, without a GPU or a download:
-torch's device checks are stood in for."""
+"""Choosing a training backend, and what each one asks of TRL, without a GPU or a
+download: torch's device checks and Unsloth are stood in for."""
 
 from __future__ import annotations
 
+import importlib.machinery
 import logging
+import sys
+import types
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import torch
@@ -19,6 +22,7 @@ from forge.train.backends import (
     BackendUnavailable,
     Precision,
     TrlBackend,
+    UnslothBackend,
     check_targets,
     drop_long_prompts,
     peft_lora,
@@ -43,18 +47,91 @@ def _devices(
     monkeypatch.setattr(torch.backends.mps, "is_macos_or_newer", lambda major, minor: macos_14)
 
 
+class FastLanguageModel:
+    """Unsloth's loader, recording what it is asked for."""
+
+    calls: ClassVar[list[tuple[str, dict[str, Any]]]] = []
+
+    @classmethod
+    def from_pretrained(cls, **kwargs: Any) -> tuple[Any, Any]:
+        cls.calls.append(("from_pretrained", kwargs))
+        return "model", "tokenizer"
+
+    @classmethod
+    def get_peft_model(cls, model: Any, **kwargs: Any) -> Any:
+        cls.calls.append(("get_peft_model", {"model": model, **kwargs}))
+        names = [f"model.layers.0.mlp.{target}" for target in kwargs["target_modules"]]
+        return types.SimpleNamespace(base_model=types.SimpleNamespace(targeted_module_names=names))
+
+
+@pytest.fixture
+def unsloth(monkeypatch: pytest.MonkeyPatch) -> type[FastLanguageModel]:
+    """An installed Unsloth, as far as the backend can tell."""
+    module = types.ModuleType("unsloth")
+    module.__spec__ = importlib.machinery.ModuleSpec("unsloth", None)
+    module.FastLanguageModel = FastLanguageModel  # type: ignore[attr-defined]
+    FastLanguageModel.calls = []
+    monkeypatch.setitem(sys.modules, "unsloth", module)
+    return FastLanguageModel
+
+
+@pytest.fixture
+def no_unsloth(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A None entry makes both find_spec and import say there is no such package.
+    monkeypatch.setitem(sys.modules, "unsloth", None)
+
+
 @pytest.mark.phase(4)
-def test_auto_selects_cpu_without_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
-    # CI: no CUDA and no MPS.
+def test_auto_selects_cpu_without_cuda(
+    monkeypatch: pytest.MonkeyPatch, unsloth: type[FastLanguageModel]
+) -> None:
+    # CI: no CUDA and no MPS. Unsloth being installed changes nothing without a GPU.
     _devices(monkeypatch)
     backend = select_backend("auto")
     assert isinstance(backend, TrlBackend)
     assert backend.name == "trl" and backend.device == "cpu"
     assert backend.precision == Precision("float32", fp16=False, bf16=False, use_cpu=True)
+    assert unsloth.calls == []
 
 
 @pytest.mark.phase(4)
-def test_auto_uses_trl_on_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_selects_unsloth_with_cuda(
+    monkeypatch: pytest.MonkeyPatch, unsloth: type[FastLanguageModel]
+) -> None:
+    _devices(monkeypatch, cuda=True)  # a T4: no bf16
+    backend = select_backend("auto", max_seq_length=1792, gpu_memory_utilization=0.6)
+    assert isinstance(backend, UnslothBackend)
+    assert backend.precision == Precision("float16", fp16=True)
+    # A device that can't be CUDA keeps auto on the TRL backend.
+    assert isinstance(select_backend("auto", device="cpu"), TrlBackend)
+
+    _, tok = backend.load("unsloth/Qwen3-1.7B@abc123", LoraConfig(r=16), load_in_4bit=True, seed=7)
+    (load, loaded), (peft, peft_args) = unsloth.calls
+    assert (load, peft) == ("from_pretrained", "get_peft_model")
+    assert loaded == {
+        "model_name": "unsloth/Qwen3-1.7B",
+        "revision": "abc123",
+        "max_seq_length": 1792,
+        "load_in_4bit": True,
+        "dtype": torch.float16,
+        "fast_inference": True,
+        "gpu_memory_utilization": 0.6,
+        "max_lora_rank": 16,
+    }
+    assert peft_args["target_modules"] == list(LoraConfig().target)
+    assert (peft_args["r"], peft_args["lora_alpha"], peft_args["random_state"]) == (16, 32, 7)
+    assert tok == "tokenizer"
+
+    # Without a memory share, GRPO generates through TRL and Unsloth starts no vLLM.
+    unsloth.calls.clear()
+    UnslothBackend().load("org/model", LoraConfig(), load_in_4bit=False, seed=0)
+    assert "fast_inference" not in unsloth.calls[0][1]
+
+
+@pytest.mark.phase(4)
+def test_auto_uses_trl_on_cuda_without_unsloth(
+    monkeypatch: pytest.MonkeyPatch, no_unsloth: None
+) -> None:
     _devices(monkeypatch, cuda=True, cuda_bf16=True)
     backend = select_backend()
     assert isinstance(backend, TrlBackend) and backend.device == "cuda"
@@ -62,10 +139,20 @@ def test_auto_uses_trl_on_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.phase(4)
-def test_backend_says_what_it_lacks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unsloth_backend_says_what_it_lacks(
+    monkeypatch: pytest.MonkeyPatch, no_unsloth: None
+) -> None:
     _devices(monkeypatch)
-    with pytest.raises(ValueError, match="a backend is auto or trl, not 'vllm'"):
+    with pytest.raises(BackendUnavailable, match="trains on a CUDA GPU, and torch sees none"):
+        select_backend("unsloth")
+    _devices(monkeypatch, cuda=True)
+    with pytest.raises(BackendUnavailable, match="needs the unsloth package"):
+        select_backend("unsloth")
+    with pytest.raises(ValueError, match="trains on CUDA only, not on device mps"):
+        select_backend("unsloth", device="mps")
+    with pytest.raises(ValueError, match="a backend is auto, trl or unsloth, not 'vllm'"):
         select_backend("vllm")  # type: ignore[arg-type]
+    _devices(monkeypatch)
     with pytest.raises(BackendUnavailable, match="device cuda needs a GPU"):
         TrlBackend("cuda")
 
@@ -145,6 +232,59 @@ class Recorder:
         self.kwargs = kwargs
         self.made.append((type(self).__name__, kwargs))
         self.model = kwargs.get("model")
+
+
+@pytest.mark.phase(4)
+def test_both_backends_build_trainers_alike(
+    monkeypatch: pytest.MonkeyPatch, unsloth: type[FastLanguageModel], tmp_path: Path
+) -> None:
+    made: list[tuple[str, dict[str, Any]]] = []
+    for name in ("SFTConfig", "SFTTrainer", "GRPOConfig", "GRPOTrainer"):
+        monkeypatch.setattr(trl, name, type(name, (Recorder,), {"made": made}))
+    _devices(monkeypatch, cuda=True)
+    callbacks: list[Any] = [object(), object()]
+    dataset = Dataset.from_list([{"prompt": [{"role": "user", "content": "how many"}]}])
+
+    def reward(prompts: list[Any], completions: list[Any], **kwargs: Any) -> list[float]:
+        return [0.0] * len(completions)
+
+    built = {}
+    for backend in (TrlBackend("cuda"), UnslothBackend()):
+        made.clear()
+        backend.sft_trainer(
+            "model", WordTokenizer(), dataset, SftConfig(), callbacks, output_dir=tmp_path, seed=3
+        )
+        backend.grpo_trainer(
+            "model",
+            WordTokenizer(),
+            dataset,
+            [reward],
+            GrpoConfig(),
+            callbacks,
+            output_dir=tmp_path,
+            seed=3,
+        )
+        assert [kind for kind, _ in made] == [
+            "SFTConfig",
+            "SFTTrainer",
+            "GRPOConfig",
+            "GRPOTrainer",
+        ]
+        sft_args, sft_trainer, grpo_args, grpo_trainer = (kwargs for _, kwargs in made)
+        # The callbacks each trainer gets are the ones given, as they are.
+        assert sft_trainer["callbacks"] == callbacks and grpo_trainer["callbacks"] == callbacks
+        assert sft_trainer["callbacks"] is not callbacks
+        assert sft_trainer["args"].kwargs is sft_args and grpo_trainer["reward_funcs"] == [reward]
+        built[backend.name] = (sft_args, grpo_args)
+
+    # One T4, two backends: the same settings, fp16 included.
+    assert built["trl"] == built["unsloth"]
+    sft_args, grpo_args = built["trl"]
+    for args in (sft_args, grpo_args):
+        assert args["report_to"] == "none" and args["save_strategy"] == "no"
+        assert (args["fp16"], args["bf16"], args["use_cpu"]) == (True, False, False)
+        assert (args["seed"], args["output_dir"]) == (3, str(tmp_path))
+    assert "max_prompt_length" not in grpo_args
 
 
 @pytest.mark.phase(4)
