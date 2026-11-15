@@ -15,6 +15,7 @@ from forge.data.prompts import (
     build_prompt,
     chat_token_counter,
     fit_prompt,
+    load_tokenizer,
     names_table,
     prompt_stats,
     render_prompt_stats,
@@ -257,3 +258,22 @@ def test_prompt_stats_counts_lengths_and_overflow() -> None:
     assert (one.p50, one.p95, one.max) == (2000, 2000, 2000)
     with pytest.raises(ValueError, match="no prompts"):
         prompt_stats([])
+
+
+@pytest.mark.phase(4)
+def test_load_tokenizer_takes_a_pinned_ref(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from transformers import AutoTokenizer
+
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_from_pretrained(repo: str, *, revision: str | None) -> WordTokenizer:
+        calls.append((repo, revision))
+        return WordTokenizer()
+
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", fake_from_pretrained)
+    for name in ("org/model@0123abc", "org/model", str(tmp_path)):
+        assert isinstance(load_tokenizer(name), WordTokenizer)
+    # A pinned commit, the default branch, and a local directory as it is.
+    assert calls == [("org/model", "0123abc"), ("org/model", None), (str(tmp_path), None)]
+    with pytest.raises(FileNotFoundError, match="neither a directory nor a Hub repo id"):
+        load_tokenizer(str(tmp_path / "no" / "such" / "model"))
