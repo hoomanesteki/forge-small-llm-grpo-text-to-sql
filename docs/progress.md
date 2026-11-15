@@ -123,6 +123,7 @@ Work discovered along the way that is not a plan story.
 | FG-292 | Gate 2 fixes: run provenance | done | A run's commit and dirty check cover the whole checkout `FORGE_ROOT` names, wherever the run starts, and outside a checkout `forge eval run` prints one `error:` line; run locks are gitignored under `docs/runs`; `make smoke` prints its report and writes the marker only with every phase (PHASE unset or 8); `--split train --limit N` takes the first N in file order, train_spider before the rowless train_others, while val and dev stay in id order; `HfBackend` checks adapter and dtype before loading, and a test ends rows of one batch at different steps; `forge eval run --help` names the first-tries file |
 | FG-293 | Gate 2 fixes: statistics and reports | done | McNemar's exact test pairs gold clusters, which key on gold queries with whitespace collapsed; the taxonomy reads a whole ORDER BY alias as SQLite does and drops derived-table and CTE qualifiers; `rebuild` masks only the Generated line's time, fails without the chart and compares its bytes where the renderer its PNG names is this machine's; `compare --out` that resolves to the default path is the default; a spy shows retried SQL runs in `SandboxPool`; the pilot's report regenerated |
 | FG-294 | Gate 2 fixes: plan and pilot notes | done | FG-291 gets a Phase 2 story block whose Tests line names its 15 tests, so traceability covers 22 Phase 0 to 2 stories, and moves to the Phase 2 table; section 5.5 lets a pilot or found story hold `FG-N91`, with gate fixes from the next free number; the pilot's unfenced replies and rule-3 cuts counted; the Phase 2 demo says `make smoke` prints its report from a scratch folder |
+| FG-295 | Gate 2 fixes: last items | done | The taxonomy reads a whole ORDER BY alias in parentheses or with COLLATE, drops parentheses around a whole ORDER BY term, and lets a derived table's or CTE's columns win over an alias; `rebuild` skips a chart only for a renderer-shaped Software text, and the full-data pilot test skips rather than pass when its chart isn't compared; `compare --out` naming the default file through a symlink or letter case writes that file; `git_sha` excludes the logs where `forge.ops.paths` puts them; the pilot's rule-3 note recounted by `scripts/count_pilot_extraction.py`; `GitError` hand-off for Phase 3 |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -456,7 +457,16 @@ Work discovered along the way that is not a plan story.
   checked only that folder for changes, and one started outside the repo named the commit of
   whatever checkout held the cwd, or crashed, not `FORGE_ROOT`'s. It now checks the whole
   checkout from its top, with the append-only logs excluded by top-anchored pathspecs, and
-  raises `GitError` outside one (FG-292).
+  raises `GitError` outside one (FG-292). Each exclude is the log's real path
+  (`ledger_path`, `dev_usage_path`) relative to the top, so a Forge root below the top of a
+  bigger checkout still runs clean after a run appends to its logs, and a `docs/dev-usage.md`
+  at that top is no log (FG-295).
+- `git_sha` raises `GitError`, a `RuntimeError`, outside a checkout or where git can't run,
+  and no longer `subprocess.CalledProcessError` or `OSError`, so every caller must catch
+  `GitError`. On the Phase 3 branches `forge kaggle publish-code`'s except tuple (FG-302) and
+  `_kaggle_job_errors` (FG-303) catch `CalledProcessError` and not `GitError`, and rebasing
+  them onto this stack gives no conflict that shows it: add `GitError` to both, or those
+  commands print a traceback where they printed one `error:` line (FG-292, FG-295).
 - The scores and generations files hold the contract types only, so the executor's error message
   for a failed prediction is not stored. FG-204 classifies from the live result in the runner;
   FG-205's failure examples can show the class, or a later story can store the message (FG-202).
@@ -495,6 +505,15 @@ Work discovered along the way that is not a plan story.
   their columns. All 8,656 gold queries still classify as `other` against themselves, and of
   the pilot's 191 stored classes that the two queries decide, none changes with the fix, so its
   stored scores stand (FG-293).
+- A whole ORDER BY term is also the alias in parentheses or with COLLATE, which SQLite skips
+  before it looks for one, and parentheses around a whole ORDER BY term are dropped. A
+  derived table or CTE has the columns its select list names (or its column list), and those
+  win over an alias in WHERE, GROUP BY, HAVING and inside ORDER BY expressions, as a table's
+  do; behind a `*` a name it may have is left as written. All 8,659 train and val gold
+  queries still classify as `other` against themselves, the canonical forms of 2 change
+  (spider-train-06103 and 06104 lose parentheses around an ORDER BY term), and none of the
+  pilot's 191 classes the queries decide changes, so its stored scores and report stand
+  (FG-295).
 - A query nested in a condition counts in that condition, so a filter whose subquery is missing or
   picks another column or aggregate is `where`. Dropping the condition that held a table's only use
   is `wrong_tables`, since tables come first (FG-204).
@@ -521,11 +540,14 @@ Work discovered along the way that is not a plan story.
   than the Mac with the same releases. So the PNG's `Software` text names the releases and the
   platform that drew it, and `rebuild` compares the bytes only where that is the same and says
   so of a chart drawn elsewhere. Render a committed run's reports where its rebuild will run, as
-  the pilot's were on the Mac (FG-205, FG-293).
+  the pilot's were on the Mac (FG-205, FG-293). Only a Software text in `chart_renderer`'s form
+  is skipped, so a chart an image editor saved is compared and fails, and the full-data pilot
+  test skips, naming both renderers, where the chart isn't compared (FG-295).
 - `rebuild <b>` checks the compare reports in run b's `eval` folder; one written with `--out`
-  isn't checked and doesn't say it is, unless `--out` resolves to that folder's file. FG-307 and
-  FG-405 commit reports under `docs/runs/`, so their checks should diff those copies against the
-  run store's or rebuild in place (FG-205, FG-293).
+  isn't checked and doesn't say it is, unless `--out` names that folder's file, through '..', a
+  symlink or other letter case where the file system ignores it, and then that file is written.
+  FG-307 and FG-405 commit reports under `docs/runs/`, so their checks should diff those copies
+  against the run store's or rebuild in place (FG-205, FG-293, FG-295).
 - For FG-207's I4: numbers from the stored files are in a report's title, its table rows and the
   headings over example failures, and in some prose lines: in a run report the checkers'
   disagreement and the questions and clusters in the line on intervals; in a compare report the
@@ -591,14 +613,17 @@ Work discovered along the way that is not a plan story.
 - In the pilot's report `schema_link` is the most common class of official EX failures, well
   ahead of `wrong_tables`: the 0.5B model mostly names tables and columns its database
   doesn't have. Worth watching in FG-307's baselines and in what SFT and GRPO change (FG-291).
-- Counted from the pilot's committed generations and scores: 763 of its 872 replies have no
-  ```` ```sql ```` block although p1 asks for one, so `extract_sql` read them by rule 3, the
-  last line that starts with SELECT or WITH and parses as a query. In 12 the query ran over
+- Counted by `scripts/count_pilot_extraction.py` from the pilot's committed generations and
+  scores: 763 of its 872 replies have no ```` ```sql ```` block although p1 asks for one.
+  `extract_sql` read 761 of them by rule 3, the last line that starts with SELECT or WITH and
+  parses as a query, and 2 have no such line and are `no_sql`. In 12 the query ran over
   several lines and rule 3 kept only the first, the select list without its FROM, so all 12
-  fail as `schema_link`: 12 of that class's 266 come from extraction, not from names the
-  database lacks. A prompt or model that leaves the fence off loses multi-line queries this
-  way, which FG-307's p1/p2 choice (ADR-0007) should count apart from schema errors. The
-  extraction rules are unchanged (FG-294).
+  fail as `schema_link`. Run whole, 7 of them still name a column their database doesn't
+  have, so extraction alone made 5 of that class's 266: 4 run and 1 fails on a misused
+  aggregate, and 1 of the 5 (spider-train-01806) matches gold, the one official EX match
+  rule 3 cost. A prompt or model that leaves the fence off loses multi-line queries this way,
+  which FG-307's p1/p2 choice (ADR-0007) should count apart from schema errors. The
+  extraction rules are unchanged (FG-294, FG-295).
 - `docs/runs/<run_id>/` holds a run whole (manifest, config, generations, scores, report and
   chart), so `FORGE_RUNS_DIR=docs/runs forge report rebuild <run_id>` checks it, and
   `tests/integration/test_artifacts.py` checks the pilot offline and, with the full data, its

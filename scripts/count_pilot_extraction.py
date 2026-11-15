@@ -1,0 +1,116 @@
+"""Count the pilot replies that extract_sql read by rule 3, and score the queries it cut.
+
+Usage: FORGE_DATA_DIR=data/spider uv run python scripts/count_pilot_extraction.py [RUN]
+
+RUN is a stored run's folder, by default the committed pilot's. A reply with no complete
+```sql block is read by rule 3, which keeps one line. Where more lines follow that line,
+the whole query, up to a blank line or a code fence, is scored as a run scores a query: run
+in a sandbox pool, then by score_generation and official EX. The counts use
+extract_sql's own patterns, so they follow its rules. docs/progress.md quotes the output.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from pathlib import Path
+
+from forge.core.types import Generation
+from forge.data.spider import load_raw, resolve_data_dir
+from forge.data.splits import split_examples
+from forge.eval import testsuite
+from forge.eval.agreement import table_columns
+from forge.eval.config import OFFICIAL_ITEM_TIMEOUT_S, PRED_TIMEOUT_MS
+from forge.eval.gold_cache import MAX_ROWS, run_gold
+from forge.eval.run_files import read_run
+from forge.eval.scoring import score_generation
+from forge.sql.executor import SqliteExecutor
+from forge.sql.extract import _QUERY_LINE, _SQL_BLOCK, _THINK_BLOCK, extract_sql
+from forge.sql.sandbox import SandboxPool
+
+PILOT = Path("docs/runs/2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7")
+
+
+def whole_query(generation: Generation) -> str | None:
+    """The query rule 3 cut, from its kept line up to a blank line or a code fence, or
+    None where the kept line is the whole of it."""
+    lines = _THINK_BLOCK.sub("", generation.text).splitlines()
+    kept = max(
+        i
+        for i, line in enumerate(lines)
+        if _QUERY_LINE.match(line) and extract_sql(line) == generation.sql
+    )
+    end = next(
+        (i for i in range(kept + 1, len(lines)) if lines[i].strip() in ("", "```")),
+        len(lines),
+    )
+    if end == kept + 1:
+        return None
+    return "\n".join(lines[kept:end]).strip().removesuffix(";")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("run", nargs="?", type=Path, default=PILOT)
+    args = parser.parse_args()
+    data = resolve_data_dir().resolve()
+    stored = read_run(args.run)
+    scores = {(s.example_id, s.sample_idx): s for s in stored.scores}
+    split = stored.manifest.config["split"]
+    examples = {e.id: e for e in split_examples(load_raw(data))[split]}
+
+    replies = list(stored.generations.values())
+    unfenced = [g for g in replies if not _SQL_BLOCK.search(_THINK_BLOCK.sub("", g.text))]
+    rule_3 = [g for g in unfenced if g.sql is not None]
+    no_query = Counter(
+        scores[(g.example_id, g.sample_idx)].error_class for g in unfenced if g.sql is None
+    )
+    cut = [(g, whole) for g in rule_3 if (whole := whole_query(g)) is not None]
+    print(f"replies: {len(replies)}")
+    print(f"with no complete sql block: {len(unfenced)}")
+    print(f"  read by rule 3: {len(rule_3)}")
+    print(f"  with no SELECT or WITH line: {len(unfenced) - len(rule_3)}, classes {dict(no_query)}")
+    schema_link = sum(score.error_class == "schema_link" for score in stored.scores)
+    print(f"schema_link failures in the run: {schema_link}")
+    classes = Counter(scores[(g.example_id, g.sample_idx)].error_class for g, _ in cut)
+    print(f"rule 3 kept the first line of a longer query: {len(cut)}, classes {dict(classes)}")
+
+    chosen = [examples[g.example_id] for g, _ in cut]
+    gold = run_gold(chosen, data_dir=data)
+    with SqliteExecutor(data) as executor:
+        columns = {db: table_columns(executor, db) for db in {e.db_id for e in chosen}}
+    with SandboxPool(1, data_dir=data, imports=(testsuite.__name__,)) as pool:
+        ran = pool.run_many(
+            [(e.db_id, whole) for e, (_, whole) in zip(chosen, cut, strict=True)],
+            timeout_ms=PRED_TIMEOUT_MS,
+            max_rows=MAX_ROWS,
+        )
+        official = testsuite.official_exec_match(
+            [(e.db_id, whole, e.gold_sql) for e, (_, whole) in zip(chosen, cut, strict=True)],
+            data_dir=data,
+            item_timeout_s=OFFICIAL_ITEM_TIMEOUT_S,
+            pool=pool,
+        )
+    outcomes: Counter[str] = Counter()
+    for (g, whole), example, pred, verdict in zip(cut, chosen, ran, official, strict=True):
+        score = score_generation(
+            example,
+            g.model_copy(update={"sql": whole}),
+            pred,
+            gold[example.id],
+            columns=columns[example.db_id],
+        )
+        result = "ran" if pred.ok else f"{pred.error_kind}: {pred.error}"
+        outcome = "matches gold" if verdict else f"class {score.error_class}"
+        print(f"  {g.example_id} run whole: {result}; {outcome}")
+        outcomes["still name a missing table or column"] += pred.error_kind in (
+            "no_such_table",
+            "no_such_column",
+        )
+        outcomes["change class"] += score.error_class != "schema_link"
+        outcomes["match gold by official EX"] += verdict
+    print("run whole, the cut queries " + ", ".join(f"{n} {what}" for what, n in outcomes.items()))
+
+
+if __name__ == "__main__":
+    main()
