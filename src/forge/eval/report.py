@@ -12,7 +12,8 @@ comes from a run's memory: ``load_run`` reads
 
 Rates are official EX unless labeled fast (ADR-0008), so every sample needs an official
 verdict. Intervals come from ``forge.eval.metrics``, with the questions that share a gold
-query drawn together (``gold_clusters``). Error classes count the failures of official
+query drawn together (``gold_clusters``), and McNemar's test in a compare report pairs
+those clusters, under the question table. Error classes count the failures of official
 EX. A run classifies the failures of fast EX (``forge.eval.scoring``), so a failure that
 only official EX finds has no class and counts as ``unclassified``. The report shows
 ``SHOWN_FAILURES`` failures of each of the ``TOP_CLASSES`` most common classes, picked by
@@ -71,6 +72,7 @@ from forge.eval.metrics import (
     RESAMPLES,
     SEED,
     Estimate,
+    McNemar,
     Rate,
     Summary,
     compare,
@@ -336,7 +338,7 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
         f"[{_points(delta.low)}, {_points(delta.high)}]"
     )
     if table.pvalue is not None:
-        title += f", McNemar {_p(table.pvalue)}"
+        title += f", McNemar {_p(table.pvalue)} on {table.unit}s"
     written = (
         f"Written by `forge report compare {a.run_id} {b.run_id}` from both runs' stored files"
     )
@@ -390,7 +392,7 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
         "",
         f"The runs disagree on {table.only_a + table.only_b:,} of {_count(overall.n, unit)}: "
         f"run b alone is right on {table.only_b:,}, run a alone on {table.only_a:,}.",
-        _mcnemar(table.pvalue),
+        *_mcnemar(table),
         "",
         "## By hardness",
         "",
@@ -708,13 +710,20 @@ def _without_retry_row(a: ReportRun, b: ReportRun) -> str:
     return f"| official EX without retry | {rates} | {_change(change.delta)} |"
 
 
-def _mcnemar(pvalue: float | None) -> str:
-    if pvalue is None:
-        return (
+def _mcnemar(table: McNemar) -> list[str]:
+    if table.pvalue is None:
+        return [
             "There is no p-value: each question has several samples, which are not "
             "independent pairs. The interval of the change draws whole questions, so it holds."
-        )
-    return f"Exact two-sided McNemar test: {_p(pvalue)}."
+        ]
+    unit = table.unit
+    # The questions that share a gold query aren't independent pairs either, so the test
+    # pairs what the intervals draw, and says so.
+    return [
+        f"The test pairs whole {unit}s, as the intervals draw them: run b gets more right in "
+        f"{_count(table.wins_b, unit)}, run a in {table.wins_a:,}, and the rest tie.",
+        f"Exact two-sided McNemar test on those {unit}s: {_p(table.pvalue)}.",
+    ]
 
 
 def _failures(scores: Iterable[Score]) -> Counter[str]:

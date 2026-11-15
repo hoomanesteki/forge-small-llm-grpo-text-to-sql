@@ -149,12 +149,20 @@ def test_gold_clusters_join_questions_with_one_gold_query() -> None:
         _example(2, "concert_singer", "SELECT name FROM singer"),
         # The same text on another database is another query.
         _example(4, "singer", "SELECT count(*) FROM singer"),
+        # Spacing alone doesn't make another query, as with Spider's spider-train-00165
+        # and 00166, whose gold queries differ only in the spaces around = and !=.
+        _example(5, "concert_singer", "SELECT name FROM singer WHERE age  >  30"),
+        _example(6, "concert_singer", "SELECT name\tFROM singer\n WHERE age > 30 "),
+        _example(7, "concert_singer", "SELECT name FROM singer WHERE age > 31"),
     ]
     assert gold_clusters(examples) == {
         "spider-dev-00001": "spider-dev-00001",
         "spider-dev-00002": "spider-dev-00002",
         "spider-dev-00003": "spider-dev-00001",
         "spider-dev-00004": "spider-dev-00004",
+        "spider-dev-00005": "spider-dev-00005",
+        "spider-dev-00006": "spider-dev-00005",
+        "spider-dev-00007": "spider-dev-00007",
     }
 
 
@@ -181,8 +189,19 @@ def test_clusters_resample_together() -> None:
     twins_b = [*single_b, *(_score(100 + q, fast=q % 3 == 0 or q in gained) for q in range(30))]
     paired = compare(twins, twins_b, clusters=clusters)
     assert paired.delta == compare(single, single_b).delta
-    # McNemar's test counts each question whatever the clusters.
-    assert paired.mcnemar == compare(twins, twins_b).mcnemar
+    # McNemar's test pairs the clusters too, so a pair counts once, as one question does,
+    # while the table still counts each question.
+    alone, apart_test = compare(single, single_b).mcnemar, compare(twins, twins_b).mcnemar
+    assert paired.mcnemar.model_dump(include={"both", "only_a", "only_b", "neither"}) == (
+        apart_test.model_dump(include={"both", "only_a", "only_b", "neither"})
+    )
+    assert (paired.mcnemar.unit, paired.mcnemar.wins_a, paired.mcnemar.wins_b) == (
+        "cluster",
+        alone.only_a,
+        alone.only_b,
+    )
+    assert alone.pvalue is not None and apart_test.pvalue is not None
+    assert paired.mcnemar.pvalue == alone.pvalue > apart_test.pvalue
 
     with pytest.raises(ValueError, match="no cluster for 1 of the scored questions"):
         summarize([*twins, _score(130, fast=True)], clusters=clusters)
@@ -204,6 +223,8 @@ def test_mcnemar_known_table() -> None:
     assert result.metric == "ex_official"
     table = result.mcnemar
     assert (table.both, table.only_a, table.only_b, table.neither) == (5, 1, 9, 5)
+    # Without clusters the test pairs questions, so its counts are the table's.
+    assert (table.unit, table.wins_a, table.wins_b) == ("question", 1, 9)
     assert table.pvalue == pytest.approx(reference, rel=1e-12)
     # Two-sided: swapping the runs mirrors the table and keeps p.
     swapped = compare(b, a).mcnemar
@@ -214,6 +235,69 @@ def test_mcnemar_known_table() -> None:
     one_sided = compare(*_runs(both=3, only_a=0, only_b=5, neither=2)).mcnemar
     assert one_sided.pvalue == pytest.approx(2 / 2**5, rel=1e-12)
     assert compare(*_runs(both=4, only_a=3, only_b=3, neither=0)).mcnemar.pvalue == 1.0
+
+
+def _exact_pvalue(wins_a: int, wins_b: int) -> float:
+    """Two-sided exact binomial test of an even split, counted out by hand."""
+    n, low = wins_a + wins_b, min(wins_a, wins_b)
+    return min(1.0, 2 * sum(math.comb(n, i) for i in range(low + 1)) / 2**n)
+
+
+@pytest.mark.phase(2)
+def test_mcnemar_pairs_clusters() -> None:
+    # 50 gold queries, each asked in two wordings that both runs answer alike: the
+    # clusters make the table both=20, only_a=5, only_b=13, neither=12, and the questions
+    # twice that.
+    outcomes = (
+        [(True, True)] * 20 + [(True, False)] * 5 + [(False, True)] * 13 + [(False, False)] * 12
+    )
+    a = [_score(offset + q, fast=ra) for q, (ra, _) in enumerate(outcomes) for offset in (0, 100)]
+    b = [_score(offset + q, fast=rb) for q, (_, rb) in enumerate(outcomes) for offset in (0, 100)]
+    clusters = gold_clusters(
+        _example(offset + q, "concert_singer", f"SELECT {q}")
+        for q in range(50)
+        for offset in (0, 100)
+    )
+    paired = compare(a, b, clusters=clusters)
+    table = paired.mcnemar
+    assert (table.both, table.only_a, table.only_b, table.neither) == (40, 10, 26, 24)
+    assert (table.unit, table.wins_a, table.wins_b) == ("cluster", 5, 13)
+    assert table.pvalue == pytest.approx(_exact_pvalue(5, 13), rel=1e-12)
+    # Counted as 100 independent questions, the same answers would pass for a real gain,
+    # while the change's interval over clusters still reaches 0.
+    apart = compare(a, b).mcnemar
+    assert apart.pvalue == pytest.approx(_exact_pvalue(10, 26), rel=1e-12)
+    assert apart.pvalue < 0.05 < table.pvalue
+    assert paired.delta.low <= 0.0 < paired.delta.value
+
+    # A cluster counts for the run right on more of its questions, and a tie drops out.
+    a = [
+        *(_score(1, fast=True), _score(101, fast=False)),  # one each way: a tie
+        *(_score(2, fast=False), _score(102, fast=False)),  # b gains both
+        *(_score(3, fast=False), _score(103, fast=True)),  # b gains one, both right on one
+        *(_score(4, fast=True), _score(104, fast=False)),  # a gains one, neither right on one
+        _score(5, fast=False),  # one question, b gains it
+    ]
+    b = [
+        *(_score(1, fast=False), _score(101, fast=True)),
+        *(_score(2, fast=True), _score(102, fast=True)),
+        *(_score(3, fast=True), _score(103, fast=True)),
+        *(_score(4, fast=False), _score(104, fast=False)),
+        _score(5, fast=True),
+    ]
+    clusters = gold_clusters(
+        [_example(q, "concert_singer", f"SELECT {q % 100}") for q in (1, 2, 3, 4, 5)]
+        + [_example(q, "concert_singer", f"SELECT {q % 100}") for q in (101, 102, 103, 104)]
+    )
+    table = compare(a, b, clusters=clusters).mcnemar
+    assert (table.only_a, table.only_b, table.wins_a, table.wins_b) == (2, 5, 1, 3)
+    assert table.pvalue == pytest.approx(_exact_pvalue(1, 3), rel=1e-12) == 0.625
+
+    # Several samples a question still give no p-value, clusters or not.
+    twice_a = [*a, *(score.model_copy(update={"sample_idx": 1}) for score in a)]
+    twice_b = [*b, *(score.model_copy(update={"sample_idx": 1}) for score in b)]
+    sampled = compare(twice_a, twice_b, clusters=clusters).mcnemar
+    assert (sampled.unit, sampled.wins_a, sampled.wins_b, sampled.pvalue) == ("cluster", 1, 3, None)
 
 
 @pytest.mark.phase(2)

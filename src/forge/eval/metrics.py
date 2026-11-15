@@ -9,6 +9,12 @@ A resample draws whole questions, since the samples of one question are not
 independent. Nor are the questions Spider asks twice in other words, which share a gold
 query: given ``clusters`` (``gold_clusters``), a resample draws whole clusters instead.
 
+McNemar's exact test in ``compare`` pairs the same units. Each question, or each cluster
+when there are clusters, counts for the run that gets more of its samples right and drops
+out on a tie, and the test asks whether the units split evenly between the runs. With one
+question a cluster that is the usual test on the table of questions, which ``McNemar``
+keeps either way.
+
 ``compare`` and ``pass_at_k`` count a sample as right by official EX when every score
 has an official verdict, and by fast EX otherwise (``ex_metric``). Reported numbers are
 official (ADR-0008), and a run stopped before its official batch can still be compared.
@@ -29,6 +35,7 @@ from forge.eval.run_files import Key, key
 
 Metric = Literal["ex_fast", "ex_official"]
 Outcome = Literal["valid", "ex_fast", "ex_official"]
+Unit = Literal["question", "cluster"]
 # Example id to the name of its cluster; questions with one name are drawn together.
 Clusters = Mapping[str, str]
 # A question's share of a ratio: its example id, numerator and denominator.
@@ -78,14 +85,18 @@ class Summary(BaseModel, frozen=True):
 
 
 class McNemar(BaseModel, frozen=True):
-    """Paired outcomes as a 2x2 table, with the exact McNemar test on them."""
+    """Paired outcomes as a 2x2 table of samples, with the exact McNemar test on the
+    units the intervals draw."""
 
     both: int  # right in a and in b
     only_a: int  # right in a, wrong in b
     only_b: int  # wrong in a, right in b
     neither: int  # wrong in both
-    # Two-sided, with each question an independent pair; clusters widen only the delta's
-    # interval. None when a question has several samples, which are not independent.
+    unit: Unit  # what the test pairs: each question, or each cluster
+    wins_a: int  # units in which a gets more samples right than b
+    wins_b: int  # units in which b gets more right than a; the rest tie
+    # Two-sided, wins_b against wins_a. None when a question has several samples, which
+    # are not independent.
     pvalue: float | None
 
 
@@ -159,6 +170,7 @@ def compare(
     both, only_a = table[True, True], table[True, False]
     only_b, neither = table[False, True], table[False, False]
     low, high = _interval(gains, clusters)
+    wins_a, wins_b = _wins(gains, clusters)
     return Comparison(
         metric=metric,
         n=n,
@@ -171,7 +183,10 @@ def compare(
             only_a=only_a,
             only_b=only_b,
             neither=neither,
-            pvalue=_mcnemar_pvalue(both, only_a, only_b, neither) if n == len(a) else None,
+            unit="question" if clusters is None else "cluster",
+            wins_a=wins_a,
+            wins_b=wins_b,
+            pvalue=_mcnemar_pvalue(wins_a, wins_b) if n == len(a) else None,
         ),
     )
 
@@ -205,11 +220,14 @@ def ex_metric(scores: Iterable[Score]) -> Metric:
 def gold_clusters(examples: Iterable[Example]) -> dict[str, str]:
     """Each example's cluster: the first example, by id, with its database and gold query.
 
-    Spider asks most questions twice in other words, and the two share a gold query.
+    Spider asks most questions twice in other words, and the two share a gold query, though
+    not always its spacing, so gold queries compare with each run of whitespace as one space.
     """
     first: dict[tuple[str, str], str] = {}
     return {
-        example.id: first.setdefault((example.db_id, example.gold_sql), example.id)
+        example.id: first.setdefault(
+            (example.db_id, " ".join(example.gold_sql.split())), example.id
+        )
         for example in sorted(examples, key=lambda example: example.id)
     }
 
@@ -275,11 +293,22 @@ def _interval(parts: Iterable[Part], clusters: Clusters | None) -> tuple[float, 
     return float(low), float(high)
 
 
-def _mcnemar_pvalue(both: int, only_a: int, only_b: int, neither: int) -> float:
+def _wins(gains: Iterable[Part], clusters: Clusters | None) -> tuple[int, int]:
+    """The units, questions or their clusters, in which a and then b gets more samples
+    right, from each question's gain of b over a."""
+    net: dict[str, int] = {}
+    for example_id, gain, _ in gains:
+        unit = example_id if clusters is None else clusters[example_id]
+        net[unit] = net.get(unit, 0) + gain
+    return sum(gain < 0 for gain in net.values()), sum(gain > 0 for gain in net.values())
+
+
+def _mcnemar_pvalue(wins_a: int, wins_b: int) -> float:
     # statsmodels brings in pandas and scipy, about a second, and only compare needs it.
     from statsmodels.stats.contingency_tables import mcnemar
 
-    return float(mcnemar([[both, only_a], [only_b, neither]], exact=True).pvalue)
+    # The exact test reads only the discordant cells, so the ties can stay out.
+    return float(mcnemar([[0, wins_a], [wins_b, 0]], exact=True).pvalue)
 
 
 def _mismatch(a: set[Key], b: set[Key]) -> str:

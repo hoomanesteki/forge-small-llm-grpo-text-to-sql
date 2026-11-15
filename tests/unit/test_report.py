@@ -377,12 +377,16 @@ def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
     comparison = compare(_scores(runs / "base"), _scores(root), clusters=_clusters())
     assert comparison.metric == "ex_official"
     assert comparison.delta.value == pytest.approx(0.4)
-    # The exact binomial test on the 10 discordant pairs: 2 * (1 + 10) / 2**10.
-    assert comparison.mcnemar.pvalue == pytest.approx(0.021484375)
+    # The test pairs the 12 clusters, not the 20 questions: run a gets more right only
+    # where 00018, which b gets wrong, shares 00017's gold query; run b in the 6 clusters
+    # from 00019 to 00027; the other 5 tie. The exact binomial test of 1 against 6 is
+    # 2 * (1 + 7) / 2**7, where the 10 discordant questions would give 0.0215.
+    assert (comparison.mcnemar.wins_a, comparison.mcnemar.wins_b) == (1, 6)
+    assert comparison.mcnemar.pvalue == pytest.approx(0.125)
     delta = comparison.delta
     assert text.startswith(
         "# Official EX on val, run b against run a: +40.0 points "
-        f"[{_signed(delta.low)}, {_signed(delta.high)}], McNemar p = 0.0215\n"
+        f"[{_signed(delta.low)}, {_signed(delta.high)}], McNemar p = 0.1250 on clusters\n"
     )
     assert "\n| Run | `base` | `tuned` |\n| Model | `gold` | `tuned` |\n" in text
     links = "[manifest.json](../../base/manifest.json) | [manifest.json](../manifest.json)"
@@ -394,7 +398,11 @@ def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
     assert "disagree on 10 of 20 questions: run b alone is right on 9, run a alone on 1." in (
         mcnemar
     )
-    assert "Exact two-sided McNemar test: p = 0.0215." in mcnemar
+    assert (
+        "\nThe test pairs whole clusters, as the intervals draw them: run b gets more right in "
+        "6 clusters, run a in 1, and the rest tie.\n"
+        "Exact two-sided McNemar test on those clusters: p = 0.1250.\n"
+    ) in mcnemar
 
     accuracy = _section(text, "Execution accuracy")
     rates = f"{_ci(_official(runs / 'base'))} | {_ci(_official(root))}"

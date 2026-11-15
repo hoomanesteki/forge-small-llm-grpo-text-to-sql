@@ -48,9 +48,10 @@ def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> Non
     path = runs / "select-one" / "eval" / "compare-gold-run.md"
     assert compared.stdout == f"report: {path}\n"
     text = path.read_text()
+    # Run a gets more right in each of the 12 clusters: p = 2 / 2**12.
     assert text.startswith(
         "# Official EX on val, run b against run a: -100.0 points [-100.0, -100.0], "
-        "McNemar p < 0.0001\n"
+        "McNemar p = 0.0005 on clusters\n"
     )
     assert "| run a right | 0 | 20 |\n| run a wrong | 0 | 0 |" in text
     assert "\n| wrong_tables | 0 | 20 | +20 |\n" in text
