@@ -93,8 +93,8 @@ known-first-party = ["forge"]
 
 [tool.mypy]
 python_version = "3.11"
-# The spike script runs on Kaggle without Forge, so it lives outside the package.
-files = ["src/forge", "kaggle/spike"]
+# The kernel scripts run on Kaggle before Forge is installed, so they live outside the package.
+files = ["src/forge", "kaggle/spike", "kaggle/entry.py"]
 exclude = ["third_party/"]
 check_untyped_defs = true
 warn_unused_ignores = true
