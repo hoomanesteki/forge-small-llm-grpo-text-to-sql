@@ -398,7 +398,25 @@ def _serve(conn: Connection, data_dir: Path, imports: tuple[str, ...]) -> None:
                     reply: tuple[str, object] = ("done", fn(executor, *args))
                 except Exception as exc:
                     reply = ("error", _portable(exc))
-                conn.send(reply)
+                try:
+                    conn.send(reply)
+                except (BrokenPipeError, ConnectionResetError):
+                    # The pool was closed; there is no one to report to.
+                    return
+                except Exception as exc:
+                    # Only exceptions are made portable before sending, so a return value
+                    # that can't be pickled would crash the worker here. Report it as an
+                    # error that names the value's type and keep the worker up. Pickling
+                    # fails before any bytes are written, so the pipe is still clean.
+                    conn.send(
+                        (
+                            "error",
+                            SandboxError(
+                                f"a sandbox job's result could not be sent back: "
+                                f"{type(reply[1]).__name__}: {exc}"
+                            ),
+                        )
+                    )
         except BrokenPipeError:
             # The pool was closed before this worker was ready or done.
             return

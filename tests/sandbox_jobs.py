@@ -65,5 +65,16 @@ def fail_unpicklably(executor: SqliteExecutor) -> None:
     raise Unpicklable("one", "two")
 
 
+class Unsendable:
+    """A value that raises when pickled, so a job returning it can't reply over the pipe."""
+
+    def __reduce__(self) -> tuple[object, ...]:
+        raise TypeError("Unsendable cannot be pickled")
+
+
+def returns_unsendable(executor: SqliteExecutor) -> Unsendable:
+    return Unsendable()
+
+
 def sleep(executor: SqliteExecutor, seconds: float) -> None:
     time.sleep(seconds)
