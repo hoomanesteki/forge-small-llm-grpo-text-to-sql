@@ -17,11 +17,18 @@ RUN_KINDS: tuple[str, ...] = get_args(RunKind)
 # Full or abbreviated SHA-1/SHA-256, plus the suffix forge.ops.manifest adds on a dirty tree.
 _GIT_SHA = re.compile(r"[0-9a-f]{7,64}(-dirty)?")
 _NOT_SLUG = re.compile(r"[^a-z0-9]+")
+# The shape huggingface_hub accepts for a repo id: an optional namespace and a name, each
+# of word characters, '-' and '.', starting and ending with a word character.
+_HUB_REPO_ID = re.compile(r"(?:\w(?:[\w.-]*\w)?/)?\w(?:[\w.-]*\w)?")
 
 
 def _model_slug(model_ref: str) -> str:
-    # Hub repo ids can't contain '@', so whatever follows the first one is a revision.
-    name = model_ref.split("@", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    repo, at, _ = model_ref.partition("@")
+    # Only a hub ref, "<repo id>@<revision>", carries a revision, which may hold slashes
+    # (refs/pr/1). In a local path such as ./runs/a@b/ckpt the '@' belongs to a directory
+    # name. "@main" names a revision of no model, so it gets no slug.
+    is_hub_ref = bool(at) and (not repo or _HUB_REPO_ID.fullmatch(repo) is not None)
+    name = (repo if is_hub_ref else model_ref).rstrip("/").rsplit("/", 1)[-1]
     slug = _NOT_SLUG.sub("-", name.lower()).strip("-")
     if not slug:
         raise ValueError(f"model_ref {model_ref!r} has no letters or digits to name a run by")
