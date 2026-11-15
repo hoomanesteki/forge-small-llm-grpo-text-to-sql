@@ -391,7 +391,7 @@ user:   Database schema:
 
 - Version `p2` adds 3 sample rows per table as SQL comments. FG-307 compares p1 and p2 on val for the chosen model, and the winner is fixed for all later phases.
 - Qwen3-family models run in non-thinking mode (`enable_thinking=False` in the chat template), with `max_new_tokens=256`. Long reasoning traces would multiply GPU time on a T4; a short-reasoning variant is a post-v1 ablation.
-- `extract_sql` takes the last ```sql block. If there is none, it takes the last line starting with `SELECT` or `WITH`, and otherwise returns `None`.
+- `extract_sql` takes the last ```sql block. If there is none, it takes the last line starting with `SELECT` or `WITH` that parses as a query (sqlglot), and otherwise returns `None`.
 
 ### 3.8 Compute plan and budget
 

@@ -21,6 +21,7 @@ from forge.data.splits import (
     SPLITS,
     VAL_SEED,
     SplitLeak,
+    assert_train_only,
     load_dev,
     load_train,
     load_val,
@@ -48,28 +49,6 @@ def _example(i: int, db_id: str, split: Split = "train") -> Example:
         hardness="easy",
         split=split,
     )
-
-
-@pytest.fixture
-def dev_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A scratch dev-usage log, so no test spends the project's real dev budget."""
-    path = tmp_path / "dev-usage.md"
-    monkeypatch.setenv("FORGE_DEV_USAGE", str(path))
-    return path
-
-
-@pytest.fixture
-def with_dev(spider_mini: Path, tmp_path: Path) -> Path:
-    """The fixture with dorm_1 moved from train to dev, so dev isn't empty."""
-    root = Path(shutil.copytree(spider_mini, tmp_path / "with_dev"))
-    items = json.loads((root / "train_spider.json").read_text(encoding="utf-8"))
-    (root / "train_spider.json").write_text(
-        json.dumps([item for item in items if item["db_id"] != "dorm_1"]), encoding="utf-8"
-    )
-    (root / "dev.json").write_text(
-        json.dumps([item for item in items if item["db_id"] == "dorm_1"]), encoding="utf-8"
-    )
-    return root
 
 
 @pytest.mark.phase(1)
@@ -200,6 +179,29 @@ def test_load_dev_requires_reason(with_dev: Path, dev_log: Path) -> None:
     with pytest.raises(DevBudgetExceeded):
         load_dev(reason="one more look", run_id="run-7", data_dir=with_dev)
     assert len(read_uses(dev_log)) == MAX_DEV_USES
+
+
+@pytest.mark.phase(1)
+def test_load_dev_with_no_dev_questions_spends_nothing(spider_mini: Path, dev_log: Path) -> None:
+    # The fixture's dev.json is empty, like a partial download's: there is nothing to look at.
+    assert spider.load_raw() and not split_examples(spider.load_raw())["dev"]
+
+    with pytest.raises(DataNotFound, match=r"no dev questions in .*spider_mini"):
+        load_dev(reason="baseline", run_id="2026-11-14-x-eval-abcdef0")
+    assert not dev_log.exists()
+
+
+@pytest.mark.phase(1)
+def test_assert_train_only_refuses_one_shot_iterators() -> None:
+    examples = [_example(0, "dorm_1"), _example(1, "dorm_1")]
+    assert_train_only(examples)
+    assert_train_only(tuple(examples))
+
+    # Checking an iterator would use it up, and training would then get nothing.
+    for one_shot in (iter(examples), (example for example in examples)):
+        with pytest.raises(TypeError, match="needs a sequence"):
+            assert_train_only(one_shot)
+        assert len(list(one_shot)) == 2
 
 
 @pytest.mark.phase(1)

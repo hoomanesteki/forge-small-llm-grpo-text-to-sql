@@ -11,7 +11,9 @@ have; they are skipped, with the reason, wherever it is absent.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,28 @@ def spider_mini(monkeypatch: pytest.MonkeyPatch) -> Path:
     """The committed Spider subset, with FORGE_DATA_DIR pointing at it."""
     monkeypatch.setenv("FORGE_DATA_DIR", str(SPIDER_MINI))
     return SPIDER_MINI
+
+
+@pytest.fixture
+def with_dev(spider_mini: Path, tmp_path: Path) -> Path:
+    """A copy of the fixture with dorm_1 moved from train to dev, so dev isn't empty."""
+    root = Path(shutil.copytree(spider_mini, tmp_path / "with_dev"))
+    items = json.loads((root / "train_spider.json").read_text(encoding="utf-8"))
+    (root / "train_spider.json").write_text(
+        json.dumps([item for item in items if item["db_id"] != "dorm_1"]), encoding="utf-8"
+    )
+    (root / "dev.json").write_text(
+        json.dumps([item for item in items if item["db_id"] == "dorm_1"]), encoding="utf-8"
+    )
+    return root
+
+
+@pytest.fixture
+def dev_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A scratch dev-usage log, so no test spends the project's real dev budget."""
+    path = tmp_path / "dev-usage.md"
+    monkeypatch.setenv("FORGE_DEV_USAGE", str(path))
+    return path
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
