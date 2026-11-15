@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from typing import Any
+from typing import Any, get_args, get_type_hints
 
 import pytest
 
+from forge import cli
 from forge.core.types import GenParams
-from forge.eval.config import EvalConfig, NotAvailable, check_config
+from forge.data.schema import PROMPT_VERSIONS
+from forge.data.splits import SPLITS
+from forge.eval.config import BACKENDS, STORES, EvalConfig, NotAvailable, check_config
 
 BASE = EvalConfig(model="org/model")
 
@@ -73,3 +76,12 @@ def test_manifest_config_records_what_changes_a_score() -> None:
     assert dataclasses.replace(BASE, store="hub").manifest_config() == config
     dev = dataclasses.replace(BASE, split="dev", reason="a look").manifest_config()
     assert "reason" not in dev and dev == {**config, "split": "dev"}
+
+
+@pytest.mark.phase(2)
+def test_cli_offers_exactly_the_backends_stores_splits_and_prompts() -> None:
+    hints = get_type_hints(cli.eval_run, include_extras=False)
+    assert get_args(hints["backend"]) == BACKENDS
+    assert get_args(hints["store"]) == STORES
+    assert get_args(hints["split"]) == SPLITS
+    assert get_args(hints["prompt_version"]) == PROMPT_VERSIONS

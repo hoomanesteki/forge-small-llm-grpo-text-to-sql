@@ -27,7 +27,8 @@ sql_app = typer.Typer(
 )
 app.add_typer(sql_app, name="sql")
 eval_app = typer.Typer(
-    help="Check the checkers: gold scored against itself, and fast against official EX.",
+    help="Evaluate a model on a split, and check the checkers: gold scored against itself, "
+    "and fast against official EX.",
     no_args_is_help=True,
 )
 app.add_typer(eval_app, name="eval")
@@ -62,6 +63,8 @@ SplitName = Literal["train", "val", "dev"]
 PromptVersionName = Literal["p1", "p2"]
 # The agreement check mutates training-side gold queries only (plan FG-108).
 AgreementSplitName = Literal["train", "val"]
+BackendName = Literal["hf", "vllm", "llamacpp", "fake"]
+StoreName = Literal["local", "hub"]
 
 # Printed by the commands that read dev without a model, so nobody logs them as dev uses
 # or holds back from running them.
@@ -299,6 +302,122 @@ def _sql_value(value: object) -> str:
     if isinstance(value, bytes):
         return f"X'{value.hex()}'"
     return str(value)
+
+
+@eval_app.command("run")
+def eval_run(
+    model: Annotated[
+        str,
+        typer.Option(
+            help="Hub repo id (with @revision to pin it) or local directory; for --backend "
+            "fake, gold or select-1."
+        ),
+    ],
+    adapter: Annotated[
+        str | None, typer.Option(help="LoRA adapter to load on the model, Hub id or directory.")
+    ] = None,
+    backend: Annotated[
+        BackendName, typer.Option(help="hf runs transformers; fake answers without a model.")
+    ] = "hf",
+    split: Annotated[SplitName, typer.Option(help="Which questions to answer.")] = "val",
+    reason: Annotated[
+        str | None,
+        typer.Option(help="Why dev is evaluated: required for --split dev, and logged."),
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option(min=1, help="Answer only the first N questions by id.")
+    ] = None,
+    prompt_version: Annotated[
+        PromptVersionName, typer.Option(help="p1, or p2 with sample rows.")
+    ] = "p1",
+    n: Annotated[int, typer.Option("--n", min=1, help="Samples per question.")] = 1,
+    temperature: Annotated[
+        float, typer.Option(min=0.0, help="0 decodes greedily; --n above 1 needs more.")
+    ] = 0.0,
+    retry: Annotated[
+        int, typer.Option(min=0, max=1, help="1 retries a failing query once (FG-206).")
+    ] = 0,
+    run_id: Annotated[
+        str | None,
+        typer.Option("--run-id", help="Name the run, or resume the run of that name."),
+    ] = None,
+    store: Annotated[StoreName, typer.Option(help="Where the run's files go.")] = "local",
+    allow_dirty: Annotated[
+        bool,
+        typer.Option(
+            "--allow-dirty", help="Run on uncommitted changes; the manifest's SHA says -dirty."
+        ),
+    ] = False,
+) -> None:
+    """Generate, execute and score a split; resume a run by passing its --run-id.
+
+    Files go to runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
+    eval/<split>-generations.jsonl and -scores.jsonl. Exits 1 if the run fails.
+    """
+    from forge.eval.config import EvalConfig, NotAvailable
+    from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
+    from forge.eval.runner import run_eval
+    from forge.ops.dev_usage import DevBudgetExceeded
+    from forge.ops.manifest import DirtyTreeError
+    from forge.ops.paths import RepoRootNotFound
+    from forge.sql.sandbox import SandboxError
+
+    config = EvalConfig(
+        model=model,
+        adapter=adapter,
+        backend=backend,
+        split=split,
+        reason=reason,
+        limit=limit,
+        prompt_version=prompt_version,
+        n=n,
+        temperature=temperature,
+        retry=retry,
+        run_id=run_id,
+        store=store,
+    )
+
+    def progress(done: int, total: int) -> None:
+        typer.echo(f"scored {done} of {total}", err=True)
+
+    try:
+        run = run_eval(config, allow_dirty=allow_dirty, progress=progress)
+    # OSError covers missing data (DataNotFound), a model that can't be found and the
+    # official evaluator's overall timeout; ValueError a wrong option, a failing gold
+    # query (GoldFailed) and RunCorrupt; ImportError the cpu extra not installed.
+    except (
+        DevBudgetExceeded,
+        DirtyTreeError,
+        ImportError,
+        NotAvailable,
+        OSError,
+        RepoRootNotFound,
+        RunConflict,
+        RunCorrupt,
+        RunLocked,
+        SandboxError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    scores = run.scores
+    samples = f"{n} samples" if n > 1 else "1 sample"
+    typer.echo(f"run {run.manifest.run_id}: {run.paths.root}")
+    typer.echo(
+        f"split {split}: {run.questions} questions, {samples} each, prompt {prompt_version}, "
+        f"backend {backend}, model {model}" + (f", adapter {adapter}" if adapter else "")
+    )
+    if run.resumed:
+        typer.echo(f"resumed: {run.resumed} scores were stored by an earlier attempt")
+    if len(scores) > run.resumed:
+        typer.echo(f"generated {len(scores) - run.resumed} samples in {run.generate_s:.1f} s")
+    for name, hits in (
+        ("valid", sum(s.valid for s in scores)),
+        ("fast EX", sum(s.ex_fast for s in scores)),
+        ("official EX", sum(s.ex_official is True for s in scores)),
+    ):
+        typer.echo(f"{name:<11}  {hits:>5}/{len(scores)}  {hits / len(scores):.2%}")
 
 
 @eval_app.command("gold")
