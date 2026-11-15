@@ -6,8 +6,9 @@
    ```` ``` ```` block is not an sql block; only its ``SELECT`` or ``WITH`` lines can
    count, through rule 3.
 3. Otherwise take the last line that starts with ``SELECT`` or ``WITH``, ignoring case and
-   indentation. Only that line is taken, so an unfenced query split over several lines
-   loses the lines after it.
+   indentation, and that sqlglot reads as a query, so a sentence such as "With this query
+   you get..." after the query is passed over. Only that line is taken, so an unfenced
+   query split over several lines loses the lines after it.
 4. Otherwise there is no SQL: ``None``.
 
 The result has surrounding whitespace and one trailing semicolon removed. An empty
@@ -17,6 +18,10 @@ result, such as an empty last code block, is ``None`` too.
 from __future__ import annotations
 
 import re
+
+import sqlglot
+from sqlglot import exp
+from sqlglot.errors import SqlglotError
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 _SQL_BLOCK = re.compile(r"```sql\b(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -29,10 +34,23 @@ def extract_sql(text: str) -> str | None:
     blocks = _SQL_BLOCK.findall(text)
     if blocks:
         return _clean(blocks[-1])
-    lines = [line for line in text.splitlines() if _QUERY_LINE.match(line)]
-    if lines:
-        return _clean(lines[-1])
+    for line in reversed(text.splitlines()):
+        if _QUERY_LINE.match(line):
+            sql = _clean(line)
+            if sql is not None and _parses_as_query(sql):
+                return sql
     return None
+
+
+def _parses_as_query(sql: str) -> bool:
+    """Whether sqlglot reads the line as a query; whether it runs is the executor's call."""
+    try:
+        statements = sqlglot.parse(sql, read="sqlite")
+    # sqlglot recurses per nesting level and runs out of stack at about 45 parentheses,
+    # which no real query reaches.
+    except (SqlglotError, RecursionError):
+        return False
+    return bool(statements) and isinstance(statements[0], exp.Query)
 
 
 def _clean(sql: str) -> str | None:

@@ -43,6 +43,34 @@ def test_fallback_select_line(reply: str, sql: str) -> None:
 
 @pytest.mark.phase(1)
 @pytest.mark.parametrize(
+    ("reply", "sql"),
+    [
+        # A sentence that starts with With or Select after the query is not the query.
+        (
+            "SELECT name FROM singer WHERE age > 30\n"
+            "With this query you get the singers older than 30.",
+            "SELECT name FROM singer WHERE age > 30",
+        ),
+        (
+            "select count(*) from singer;\nSelect the singers older than 30.",
+            "select count(*) from singer",
+        ),
+        (
+            "WITH t AS (SELECT 1 AS x) SELECT x FROM t\nWith that, the query is done.",
+            "WITH t AS (SELECT 1 AS x) SELECT x FROM t",
+        ),
+        # Prose alone is no query at all.
+        ("With this query you get the singers.\nSelect the right table first.", None),
+        # A line sqlglot can't follow is not taken for a query, and doesn't raise.
+        ("SELECT " + "(" * 60 + "1" + ")" * 60, None),
+    ],
+)
+def test_fallback_line_must_parse_as_a_query(reply: str, sql: str | None) -> None:
+    assert extract_sql(reply) == sql
+
+
+@pytest.mark.phase(1)
+@pytest.mark.parametrize(
     "reply",
     [
         "",
