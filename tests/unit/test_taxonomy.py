@@ -13,6 +13,17 @@ from forge.eval.scoring import no_sql
 from forge.eval.taxonomy import ERROR_CLASSES, ErrorClass, classify
 from forge.sql.executor import MULTIPLE_STATEMENTS
 
+# flight_1 as table_columns reads it. A name, a distance and an aid are each in more than
+# one table, so a bare column only resolves where one table in scope has it.
+FLIGHT_1 = {
+    "aircraft": ("aid", "name", "distance"),
+    "certificate": ("eid", "aid"),
+    "employee": ("eid", "name", "salary"),
+    "flight": (
+        *("flno", "origin", "destination", "distance"),
+        *("departure_date", "arrival_date", "price", "aid"),
+    ),
+}
 # A query that ran; the taxonomy never looks at the rows.
 RAN = ExecResult(ok=True, columns=["n"], rows=[(1,)])
 
@@ -100,7 +111,7 @@ def _classify(gold_sql: str, pred_sql: str | None, result: ExecResult = RAN) -> 
         tokens_out=5,
         latency_ms=1.0,
     )
-    return classify(example, generation, result)
+    return classify(example, generation, result, columns=FLIGHT_1)
 
 
 @pytest.mark.phase(2)
@@ -144,6 +155,47 @@ def test_the_first_class_that_fits_wins() -> None:
 
 
 @pytest.mark.phase(2)
+def test_names_resolve_to_the_tables_they_read() -> None:
+    # Each prediction differs from its gold query in one literal only, however it names
+    # tables and columns: case, aliases, table names, or bare names one table in scope has.
+    pred = "select T9.AID from AIRCRAFT as T9 where T9.Distance > 2000"
+    assert _classify(GOLD_14, pred) == "value"
+    pred = (
+        "SELECT T2.name FROM Aircraft T2 JOIN Certificate T1 ON T1.aid = T2.aid "
+        "GROUP BY T1.aid ORDER BY count(*) DESC LIMIT 3"
+    )
+    assert _classify(GOLD_27, pred) == "value"
+    gold = (
+        "SELECT T1.name FROM Employee AS T1 JOIN Certificate AS T2 ON T1.eid = T2.eid "
+        "WHERE T1.salary > 100000"
+    )
+    pred = (
+        "SELECT employee.name FROM certificate JOIN employee "
+        "ON certificate.eid = employee.eid WHERE salary > 50000"
+    )
+    assert _classify(gold, pred) == "value"
+    # A bare name that two tables in scope have stays unresolved, as SQLite refuses it.
+    ambiguous = ExecResult(ok=False, error="ambiguous column name: name", error_kind="other")
+    pred = (
+        "SELECT name FROM Employee AS T1 JOIN Certificate AS T2 ON T1.eid = T2.eid "
+        'JOIN Aircraft AS T3 ON T3.aid = T2.aid WHERE T3.name = "Boeing 737-800"'
+    )
+    assert _classify(GOLD_25.split(" INTERSECT ")[0], pred, ambiguous) == "projection"
+
+
+@pytest.mark.phase(2)
+def test_double_quoted_names_read_as_sqlite_reads_them() -> None:
+    gold = 'SELECT aid FROM Aircraft WHERE name = "Boeing 737-800"'
+    # No table has a column by that name, so it is a string, as single quotes would be.
+    assert _classify(gold, "SELECT aid FROM aircraft WHERE name = 'Airbus A340-300'") == "value"
+    assert _classify(gold, 'SELECT aid FROM aircraft WHERE name = "Airbus A340-300"') == "value"
+    assert _classify(gold, 'SELECT aid FROM aircraft WHERE name = "boeing 737-800"') == "value"
+    assert _classify(gold, "SELECT aid FROM aircraft WHERE name = 'Boeing 737-800'") == "other"
+    # A name a table in scope has is that column, quoted or not.
+    assert _classify(GOLD_14, 'SELECT "aid" FROM "Aircraft" WHERE "distance" > 5000') == "value"
+
+
+@pytest.mark.phase(2)
 def test_order_that_cannot_change_the_rows_does_not_count() -> None:
     # Again one literal differs, while conditions, items and the sides of = move around.
     gold = "SELECT name FROM Aircraft WHERE distance > 1000 AND aid < 10"
@@ -166,6 +218,10 @@ def test_order_that_cannot_change_the_rows_does_not_count() -> None:
         "SELECT destination, origin, count(*) FROM flight GROUP BY destination, origin "
         "HAVING count(*) > 2"
     )
+    assert _classify(gold, pred) == "value"
+    # A select alias in ORDER BY stands for its expression.
+    gold = "SELECT origin, count(*) FROM Flight GROUP BY origin ORDER BY count(*) DESC LIMIT 1"
+    pred = "SELECT origin, count(*) AS n FROM flight GROUP BY origin ORDER BY n DESC LIMIT 2"
     assert _classify(gold, pred) == "value"
     # The order of ORDER BY keys does change the rows.
     gold = "SELECT name FROM Aircraft ORDER BY distance, name"

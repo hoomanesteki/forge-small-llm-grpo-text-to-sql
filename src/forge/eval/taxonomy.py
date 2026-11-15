@@ -20,8 +20,13 @@ fits it:
 The first three come from the executor's error kind. The rest compare the structure of
 the two queries as sqlglot reads them, once each is in one form:
 
-- Names are case-insensitive, though a column compares as written, with its qualifier,
-  and the aliases of a select list are dropped.
+- Names are case-insensitive, and a column is known by the table it reads, so ``T1.name``,
+  ``aircraft.name`` and a bare ``name`` that only ``aircraft`` has in its scope are one
+  column. That takes the database's columns, which the caller passes.
+- Aliases are dropped, and a select alias used in WHERE, GROUP BY, HAVING or ORDER BY
+  stands for the expression it names.
+- A double-quoted name that no table in its scope has is a string, as SQLite reads it,
+  so Spider's ``"Boeing 737-800"`` is the value ``'Boeing 737-800'``.
 - Order doesn't count where it can't change the rows: the conditions that AND or OR
   joins, the items of a select list or a GROUP BY, the conditions of the joins, and the
   two sides of ``=`` and ``!=``. Parentheses that change nothing are dropped.
@@ -38,12 +43,13 @@ classes 1 to 3 have taken every kind that names a class, so it is ``other``. So 
 whose gold query sqlglot can't read, though sqlglot reads every Spider training gold query.
 
 Known limits: a comma join with its condition in WHERE is not the same join as
-``JOIN ... ON``.
+``JOIN ... ON``, and both sides of a self-join resolve to one table, so a query that
+swaps them can come out ``other``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Literal, NamedTuple, get_args
 
 import sqlglot
@@ -51,6 +57,7 @@ from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
 from forge.core.types import Example, ExecResult, Generation
+from forge.eval.mutations import Columns
 
 ErrorClass = Literal[
     "no_sql",
@@ -66,6 +73,12 @@ ErrorClass = Literal[
     "other",
 ]
 ERROR_CLASSES: tuple[ErrorClass, ...] = get_args(ErrorClass)
+
+# A table's columns by lowercased name, keyed by the lowercased table name.
+_Known = Mapping[str, frozenset[str]]
+# What each name in one SELECT's FROM and JOIN clauses stands for: a table's own name,
+# or None for a derived table or a common table expression.
+_Sources = Mapping[str, str | None]
 
 # What an aggregate call in a select list shows as when the projection is compared.
 _AGGREGATE = "AGG"
@@ -83,10 +96,13 @@ class _Shape(NamedTuple):
     set_operations: tuple[str, ...]
 
 
-def classify(example: Example, generation: Generation, exec_result: ExecResult) -> ErrorClass:
+def classify(
+    example: Example, generation: Generation, exec_result: ExecResult, *, columns: Columns
+) -> ErrorClass:
     """The class of a prediction that doesn't match gold, by the module docstring's rules.
 
-    ``exec_result`` is the predicted query's result.
+    ``exec_result`` is the predicted query's result, and ``columns`` holds the tables of
+    the example's database with their column names, as ``table_columns`` reads them.
     """
     if generation.sql is None or exec_result.error_kind == "empty_sql":
         return "no_sql"
@@ -94,8 +110,9 @@ def classify(example: Example, generation: Generation, exec_result: ExecResult) 
         return "syntax"
     if exec_result.error_kind in ("no_such_table", "no_such_column"):
         return "schema_link"
-    pred = _canonical(generation.sql)
-    gold = _canonical(example.gold_sql)
+    known = {table.lower(): frozenset(c.lower() for c in names) for table, names in columns.items()}
+    pred = _canonical(generation.sql, known)
+    gold = _canonical(example.gold_sql, known)
     if pred is None or gold is None:
         return "other"
     mine, theirs = _shape(pred, masked=True), _shape(gold, masked=True)
@@ -118,7 +135,7 @@ def classify(example: Example, generation: Generation, exec_result: ExecResult) 
     return "other"
 
 
-def _canonical(sql: str) -> exp.Query | None:
+def _canonical(sql: str, known: _Known) -> exp.Query | None:
     """``sql`` read as one query and put in the module docstring's form, or ``None`` when
     sqlglot can't read it as one."""
     try:
@@ -130,6 +147,8 @@ def _canonical(sql: str) -> exp.Query | None:
     if len(statements) != 1 or not isinstance(statements[0], exp.Query):
         return None
     query = statements[0]
+    _resolve_names(query, known)
+    _expand_alias_refs(query)
     _normalize(query)
     return query
 
@@ -189,6 +208,74 @@ def _signature(query: exp.Query, masked: bool) -> str:
     return "(" + " | ".join(f"{name}: {'; '.join(parts)}" for name, parts in fields if parts) + ")"
 
 
+def _resolve_names(query: exp.Query, known: _Known) -> None:
+    """Qualify each column with the table it reads, and turn each double-quoted name that
+    no table in its scope has into the string SQLite reads it as."""
+    ctes = _cte_names(query)
+    scopes: dict[int, _Sources] = {}
+
+    def sources(select: exp.Select) -> _Sources:
+        if id(select) not in scopes:
+            scopes[id(select)] = _sources(select, ctes)
+        return scopes[id(select)]
+
+    for column in list(query.find_all(exp.Column)):
+        select = column.parent_select
+        # Outside any SELECT, as in a set operation's ORDER BY, a name is an output column.
+        if select is None:
+            continue
+        chain = [sources(scope) for scope in _outward(select)]
+        if column.table:
+            qualifier = column.table.lower()
+            table = next((found[qualifier] for found in chain if qualifier in found), None)
+            if table is not None:
+                column.set("table", exp.to_identifier(table))
+            continue
+        name = column.name.lower()
+        in_scope, owner = _lookup(name, chain, known)
+        if owner is not None:
+            column.set("table", exp.to_identifier(owner))
+        elif not in_scope and _quoted(column) and name not in _aliases(select):
+            column.replace(exp.Literal.string(column.name))
+
+
+def _lookup(name: str, chain: Sequence[_Sources], known: _Known) -> tuple[bool, str | None]:
+    """Whether a table in scope could have the column ``name``, and the table that has it
+    when only one can.
+
+    The nearest scope with a candidate decides, as in SQLite, and a scope that holds a
+    derived table or a common table expression decides nothing more: their columns
+    aren't looked up.
+    """
+    for found in chain:
+        owners = {t for t in found.values() if t is not None and name in known.get(t, ())}
+        derived = None in found.values()
+        if owners or derived:
+            return True, owners.pop() if len(owners) == 1 and not derived else None
+    return False, None
+
+
+def _expand_alias_refs(query: exp.Query) -> None:
+    """Put each select alias used in WHERE, GROUP BY, HAVING or ORDER BY back as the
+    expression it names."""
+    for select in list(query.find_all(exp.Select)):
+        named = {
+            item.alias.lower(): item.this
+            for item in select.expressions
+            if isinstance(item, exp.Alias)
+        }
+        if not named:
+            continue
+        for clause in ("where", "group", "having", "order"):
+            node = select.args.get(clause)
+            if node is None:
+                continue
+            for column in list(node.find_all(exp.Column)):
+                name = column.name.lower()
+                if column.parent_select is select and not column.table and name in named:
+                    column.replace(named[name].copy())
+
+
 def _normalize(query: exp.Query) -> None:
     """Lowercase names, drop needless parentheses and sort what can be sorted.
 
@@ -233,12 +320,37 @@ def _unwrap(paren: exp.Paren) -> None:
         paren.set("this", inner)
 
 
+def _sources(select: exp.Select, ctes: frozenset[str]) -> _Sources:
+    found: dict[str, str | None] = {}
+    for node in _source_nodes(select):
+        table = isinstance(node, exp.Table) and node.name.lower() not in ctes
+        found[node.alias_or_name.lower()] = node.name.lower() if table else None
+    return found
+
+
 def _source_nodes(select: exp.Select) -> list[exp.Expr]:
     """What ``select``'s FROM and JOIN clauses read: tables and derived tables."""
     from_ = select.args.get("from_")
     nodes = [from_.this] if isinstance(from_, exp.From) else []
     nodes.extend(join.this for join in select.args.get("joins") or ())
     return nodes
+
+
+def _outward(select: exp.Select) -> Iterator[exp.Select]:
+    """``select`` and then each SELECT around it, innermost first."""
+    scope: exp.Select | None = select
+    while scope is not None:
+        yield scope
+        scope = scope.parent_select
+
+
+def _aliases(select: exp.Select) -> set[str]:
+    return {item.alias.lower() for item in select.expressions if isinstance(item, exp.Alias)}
+
+
+def _quoted(column: exp.Column) -> bool:
+    identifier = column.this
+    return isinstance(identifier, exp.Identifier) and bool(identifier.quoted)
 
 
 def _cte_names(query: exp.Query) -> frozenset[str]:
