@@ -408,7 +408,9 @@ def eval_run(
 
     With --config, a file in configs/eval/ gives the options it sets. Files go to
     runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
-    eval/<split>-generations.jsonl and -scores.jsonl. Exits 1 if the run fails.
+    eval/<split>-generations.jsonl and -scores.jsonl. With --retry 1,
+    eval/<split>-first-tries.jsonl keeps the first reply of each retried sample, and the
+    generations file holds the reply each score is for. Exits 1 if the run fails.
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked

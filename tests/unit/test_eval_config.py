@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, get_args, get_type_hints
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from forge import cli
@@ -126,6 +127,18 @@ def test_cli_offers_exactly_the_backends_stores_splits_and_prompts() -> None:
     assert get_args(hints["store"]) == STORES
     assert get_args(hints["split"]) == SPLITS
     assert get_args(hints["prompt_version"]) == PROMPT_VERSIONS
+
+
+@pytest.mark.phase(2)
+def test_eval_run_help_names_its_files_and_how_limit_picks() -> None:
+    # The command typer builds, whose help is what --help prints before wrapping it.
+    run = typer.main.get_command(cli.app).commands["eval"].commands["run"]
+    text = " ".join(run.help.split())
+    assert "eval/<split>-first-tries.jsonl keeps the first reply of each retried sample" in text
+    assert "the generations file holds the reply each score is for" in text
+    (limit,) = [param for param in run.params if param.name == "limit"]
+    assert limit.help.startswith("Answer only the first N questions: by id on val and dev")
+    assert "in file order on train (train_spider before the rowless train_others)" in limit.help
 
 
 @pytest.mark.phase(2)

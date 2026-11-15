@@ -120,6 +120,7 @@ Work discovered along the way that is not a plan story.
 | FG-196 | Gate 1 fixes: sandbox polish | done | A watchdog test that fails if the watchdog is removed (a query the progress handler never checks); a worker that dies under an official EX item counts as no match instead of aborting the run, and both eval CLIs catch `SandboxError`; a job whose result can't be pickled reports the type instead of killing its worker; the executor, ADR-0014 and progress narrowed to say the in-process few-hundredths bound was measured for four functions only and the item timeout covers the whole item (FG-508) |
 | FG-197 | Gate 1 fixes: final polish | done | Official EX counts only a worker's death as a miss, so a pool that can't start raises again; a reply the parent can't unpickle keeps its worker; `statement_keyword` reads byte order marks, Tcl-style parameters, ASCII keywords and the `WITH` grammar as SQLite does; a forced Hub download that fails shows its cause, the bad zip and the hint; the timing tests assert the kill and use the worst rows the limits allow, gold is measured as the evaluator runs it, and ADR-0014 lists the known limits |
 | FG-291 | Local pilot baseline on Apple silicon | done | `local-mps` platform (ADR-0016), counted in neither the Kaggle quota nor GPU hours; `forge eval run --device` (`cpu` by default, `mps` refused on dev) and `--config` for `configs/eval/*.yaml`; Qwen2.5-Coder-0.5B-Instruct pinned as `pilot`; the full val run on the M4's GPU is in `docs/runs/` with its generated report, val only |
+| FG-292 | Gate 2 fixes: run provenance | done | A run's commit and dirty check cover the whole checkout `FORGE_ROOT` names, wherever the run starts, and outside a checkout `forge eval run` prints one `error:` line; run locks are gitignored under `docs/runs`; `make smoke` prints its report and writes the marker only with every phase (PHASE unset or 8); `--split train --limit N` takes the first N in file order, train_spider before the rowless train_others, while val and dev stay in id order; `HfBackend` checks adapter and dtype before loading, and a test ends rows of one batch at different steps; `forge eval run --help` names the first-tries file |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -434,6 +435,11 @@ Work discovered along the way that is not a plan story.
   about 6 s, and `--model select-1` scores 2 of 872 with both: spider-train-01784 and 01785
   (small_bank_1) have the answer 1. FG-501's constant-query guard can't assume that `SELECT 1`
   never scores (FG-202).
+- `--split train --limit N` takes the first N questions in the loader's file order. By id,
+  train_others sorts first, so before FG-292 a limit up to 1,659 scored only its rowless
+  databases. On the full data the first 4,511 train questions in file order are all on databases
+  with rows, and music_2's 100 come next. Val and dev keep id order, so the committed pilot is
+  unchanged. FG-505's curriculum starts from a limited train run (FG-292).
 - Resuming a dev run calls `load_dev` again, which logs a second row with the same run id, since
   every call is a look (ADR-0004). FG-304 could let a resumed run keep its first look (FG-202).
 - Without `--run-id`, `make_run_id` gives two evals of one model on the same commit and day the same
@@ -441,6 +447,14 @@ Work discovered along the way that is not a plan story.
   A finished run is never resumed or overwritten (FG-202).
 - A run folder holds the `.lock` file that keeps a second process off it; FG-304's Hub mirror should
   leave it out (FG-202).
+- The `.lock` stays after the run or report that held the folder, so `.gitignore` ignores it
+  under `docs/runs` as well as `/runs`: a report written for a committed run leaves the tree
+  clean (FG-292).
+- Before FG-292 `git_sha` ran git in the current directory, so a run started in a subfolder
+  checked only that folder for changes, and one started outside the repo named the commit of
+  whatever checkout held the cwd, or crashed, not `FORGE_ROOT`'s. It now checks the whole
+  checkout from its top, with the append-only logs excluded by top-anchored pathspecs, and
+  raises `GitError` outside one (FG-292).
 - The scores and generations files hold the contract types only, so the executor's error message
   for a failed prediction is not stored. FG-204 classifies from the live result in the runner;
   FG-205's failure examples can show the class, or a later story can store the message (FG-202).
@@ -526,6 +540,9 @@ Work discovered along the way that is not a plan story.
   marker only when the run's manifest names HEAD's commit without `-dirty`. Each attempt first
   removes HEAD's marker and a pass removes the others, so a marker means the last smoke on that
   commit passed. FG-303 checks for `.smoke-ok-<HEAD sha>` (FG-207).
+- A smoke with `PHASE` below 8, as `make gate PHASE=N` runs it, skips later phases' smoke tests,
+  so it passes without a marker and says so; run `make smoke` for one. The smoke prints its
+  report before the scratch folder goes, so a gate's demo can paste it (FG-292).
 - The tiny model's 256-token replies hold no SQL, so on the smoke run every sample is `no_sql`,
   and with `--retry 1` each is asked again and fails the same way. The smoke proves the wiring of
   that path; I4's fake-backend run covers results of every other kind (FG-207).
