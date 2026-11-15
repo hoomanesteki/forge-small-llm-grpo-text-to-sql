@@ -4,6 +4,8 @@ The layout is the run store's (plan section 3.9), under ``runs/<run_id>/``:
 ``manifest.json``, ``config.yaml``, ``eval/<split>-generations.jsonl`` and
 ``eval/<split>-scores.jsonl``, plus ``error.txt`` when the last attempt failed. The
 manifest's ``outputs`` lists whichever of these exist, as paths inside the folder.
+Reports of a finished run (``forge.eval.report``) add ``eval/<split>-report.md`` and its
+chart, which the finished manifest doesn't list.
 
 ``start`` writes the manifest with status ``running`` before any work, and ``finish``
 writes it again at the end: ``finished``, or ``failed`` with the traceback in
@@ -100,6 +102,14 @@ class RunPaths:
     @property
     def error(self) -> Path:
         return self.root / "error.txt"
+
+    @property
+    def report(self) -> Path:
+        return self.root / "eval" / f"{self.split}-report.md"
+
+    @property
+    def chart(self) -> Path:
+        return self.root / "eval" / f"{self.split}-hardness.png"
 
     def outputs(self) -> dict[str, str]:
         """The run's files that exist, by logical name, as paths inside the run folder."""
