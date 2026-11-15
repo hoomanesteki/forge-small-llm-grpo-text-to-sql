@@ -90,44 +90,64 @@ def _store(
     data_dir: Path | None = None,
     samples: int = 1,
     reply: str = REPLY,
+    first_tries: Mapping[str, Outcome] | None = None,
+    retry: int | None = None,
 ) -> Path:
-    """Store a run's manifest, generations and scores as the eval runner does."""
+    """Store a run's manifest, generations and scores as the eval runner does.
+
+    ``first_tries`` gives how the first reply went for each sample that was retried; the
+    run's retry option is 1 when there are any, unless ``retry`` says otherwise.
+    """
     examples = {e.id: e for e in split_examples(load_raw(data_dir))[split]}
+    firsts = first_tries or {}
     options = EvalConfig(
-        model=model, backend="fake", split=split, n=samples, temperature=0.7 if samples > 1 else 0
+        model=model,
+        backend="fake",
+        split=split,
+        n=samples,
+        temperature=0.7 if samples > 1 else 0,
+        retry=(1 if firsts else 0) if retry is None else retry,
     )
     config: dict[str, Any] = json.loads(canonical_json(options.manifest_config()))
-    generations, scores = [], []
+
+    def generation(example_id: str, sample: int, sql: str | None) -> Generation:
+        return Generation(
+            example_id=example_id,
+            model_ref=model,
+            sample_idx=sample,
+            text=reply if sql is None else f"```sql\n{sql}\n```",
+            sql=sql,
+            tokens_in=50,
+            tokens_out=12,
+            latency_ms=3.0,
+        )
+
+    generations, scores, stored_firsts = [], [], []
     for example_id, outcome in outcomes.items():
         example = examples[example_id]
         sql = example.gold_sql if outcome.sql == GOLD else outcome.sql
+        first = firsts.get(example_id)
         for sample in range(samples):
-            generations.append(
-                Generation(
-                    example_id=example_id,
-                    model_ref=model,
-                    sample_idx=sample,
-                    text=reply if sql is None else f"```sql\n{sql}\n```",
-                    sql=sql,
-                    tokens_in=50,
-                    tokens_out=12,
-                    latency_ms=3.0,
-                )
+            generations.append(generation(example_id, sample, sql))
+            score = Score(
+                example_id=example_id,
+                sample_idx=sample,
+                hardness=example.hardness,
+                valid=outcome.valid,
+                ex_fast=outcome.fast,
+                ex_official=outcome.official,
+                error_class=outcome.error_class,
             )
-            scores.append(
-                Score(
-                    example_id=example_id,
-                    sample_idx=sample,
-                    hardness=example.hardness,
-                    valid=outcome.valid,
-                    ex_fast=outcome.fast,
-                    ex_official=outcome.official,
-                    error_class=outcome.error_class,
-                )
-            )
+            if first is not None:
+                score = score.model_copy(update={"attempts": 2, "first_try_ex": first.official})
+                stored_firsts.append(generation(example_id, sample, first.sql))
+            scores.append(score)
     root = runs / run_id
     (root / "eval").mkdir(parents=True)
-    for name, items in (("generations", generations), ("scores", scores)):
+    files = [("generations", generations), ("scores", scores)]
+    if stored_firsts:
+        files.append(("first-tries", stored_firsts))
+    for name, items in files:
         lines = "".join(item.model_dump_json() + "\n" for item in items)
         (root / "eval" / f"{split}-{name}.jsonl").write_text(lines, encoding="utf-8")
     manifest = RunManifest.model_validate(
@@ -515,3 +535,108 @@ def test_chart_is_the_same_bytes_each_time(runs: Path) -> None:
     assert write_run_report("mixed", runs_root=runs, now=LATER).chart.read_bytes() == first
     _store(runs, "other", dict.fromkeys(VAL, RIGHT))
     assert write_run_report("other", runs_root=runs, now=AT).chart.read_bytes() != first
+
+
+# SQLite can't parse it, but official EX drops DISTINCT first and runs count(*).
+FIRST_DISTINCT = Outcome(False, False, True, "syntax", "SELECT count(DISTINCT *) FROM Aircraft")
+RETRY = "once, with the error, for a query that fails to run"
+
+
+@pytest.mark.phase(2)
+def test_report_shows_ex_with_and_without_retry(runs: Path) -> None:
+    # Four samples failed to run and were asked again: two were fixed, one failed again,
+    # and one lost the official match its first query had. 00015 ran and wasn't retried.
+    final = {**dict.fromkeys(VAL, RIGHT), VAL[0]: VALUE, VAL[3]: SYNTAX, VAL[5]: WHERE}
+    firsts = {VAL[0]: FIRST_DISTINCT, VAL[1]: SYNTAX, VAL[2]: SCHEMA, VAL[3]: NO_SQL}
+    root = _store(runs, "retried", final, first_tries=firsts)
+    text = write_run_report("retried", runs_root=runs, now=AT).report.read_text()
+
+    with_retry = _scores(root)
+    without = [
+        Score(
+            example_id=s.example_id,
+            hardness=s.hardness,
+            valid=False,
+            ex_fast=False,
+            ex_official=firsts[s.example_id].official,
+        )
+        if s.example_id in firsts
+        else s
+        for s in with_retry
+    ]
+    before, after = (
+        summarize(without, clusters=_clusters()),
+        summarize(with_retry, clusters=_clusters()),
+    )
+    assert before.ex_official is not None and after.ex_official is not None
+    assert (before.ex_official.hits, after.ex_official.hits) == (16, 17)
+    change = compare(without, with_retry, clusters=_clusters()).delta
+    assert change.value == pytest.approx(0.05)
+
+    assert f"\n| Retry | {RETRY} |\n" in text
+    retry = _section(text, "Retry")
+    assert f"\n| valid SQL | {_ci(before.valid)} | {_ci(after.valid)} | |\n" in retry
+    assert f"\n| fast EX | {_ci(before.ex_fast)} | {_ci(after.ex_fast)} | |\n" in retry
+    official = f"| official EX | {_ci(before.ex_official)} | {_ci(after.ex_official)} |"
+    assert f"\n{official} {_change(change)} |\n" in retry
+    for row in (
+        "| retried: the first query failed to run | 4 |",
+        "| the second query ran | 3 |",
+        "| right on retry, by official EX | 2 |",
+        "| right on the first reply, by official EX | 1 |",
+    ):
+        assert f"\n{row}\n" in retry
+    # The rest of the report is about the replies scored, the second ones where retried.
+    assert f"| official EX | 17 | 20 | {_ci(after.ex_official)} |" in text
+
+    failures = _section(text, "Example failures")
+    assert (
+        "Gold query:\n\n```sql\nSELECT name ,  distance FROM Aircraft\n```\n\n"
+        "The first reply has no SQL query.\n\n"
+        "Predicted query on retry:\n\n```sql\nSELEC count(*) FROM Aircraft\n```\n"
+    ) in failures
+    assert (
+        "The first reply's query failed to run:\n\n"
+        "```sql\nSELECT count(DISTINCT *) FROM Aircraft\n```\n\n"
+        "Predicted query on retry:\n\n```sql\nSELECT count(*) FROM Aircraft WHERE aid = 3\n```\n"
+    ) in failures
+    # 00015 ran, so it has one reply.
+    assert (
+        "Predicted query:\n\n```sql\nSELECT aid FROM Aircraft WHERE distance > 9\n```" in failures
+    )
+
+    # A run that retries nothing has no section, and one without retry says so.
+    _store(runs, "base", dict.fromkeys(VAL, RIGHT))
+    _store(runs, "calm", dict.fromkeys(VAL, RIGHT), retry=1)
+    calm = write_run_report("calm", runs_root=runs, now=AT).report.read_text()
+    assert f"\n| Retry | {RETRY} |\n" in calm and "\n## Retry\n" not in calm
+    base = write_run_report("base", runs_root=runs, now=AT).report.read_text()
+    assert "\n| Retry | none |\n" in base and "\n## Retry\n" not in base
+
+    # A compare report pairs the runs without retry too.
+    compared = write_compare_report("base", "retried", runs_root=runs, now=AT).read_text()
+    assert f"\n| Retry | none | {RETRY} |\n" in compared
+    base_scores = _scores(runs / "base")
+    first_change = compare(base_scores, without, clusters=_clusters()).delta
+    rates = f"{_ci(_official(runs / 'base'))} | {_ci(before.ex_official)}"
+    assert f"\n| official EX without retry | {rates} | {_change(first_change)} |\n" in compared
+    assert "gets a change, with retry and without it: each sample of run b" in compared
+    plain = write_compare_report("base", "calm", runs_root=runs, now=AT).read_text()
+    assert "without retry" not in plain
+    assert [check.diff for check in rebuild("retried", runs_root=runs)] == [(), ()]
+
+
+@pytest.mark.phase(2)
+def test_report_refuses_retries_the_run_cant_have(runs: Path) -> None:
+    firsts = {VAL[0]: SYNTAX}
+    _store(runs, "no-retry", dict.fromkeys(VAL, RIGHT), first_tries=firsts, retry=0)
+    with pytest.raises(RunCorrupt, match="took 2 replies, but the run never retries"):
+        load_run("no-retry", runs_root=runs)
+    unjudged = _store(runs, "unjudged", dict.fromkeys(VAL, RIGHT), first_tries=firsts)
+    _edit_first_score(unjudged, first_try_ex=None)
+    with pytest.raises(RunCorrupt, match="00010 sample 0 has no official verdict on its first try"):
+        load_run("unjudged", runs_root=runs)
+    stray = _store(runs, "stray", dict.fromkeys(VAL, RIGHT), first_tries={VAL[1]: SYNTAX})
+    _edit_first_score(stray, first_try_ex=False)
+    with pytest.raises(RunCorrupt, match="00010 sample 0 has a first try's verdict, but took one"):
+        load_run("stray", runs_root=runs)

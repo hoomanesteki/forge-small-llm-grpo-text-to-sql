@@ -19,6 +19,13 @@ only official EX finds has no class and counts as ``unclassified``. The report s
 a hash of their ids so they spread over databases and every rendering picks the same
 ones. The executor's error message isn't stored, so a failure shows its class.
 
+A run that retried failed queries (``forge.eval.retry``) shows EX with and without
+retry, the change between them with its paired interval, and how the retried samples
+did. Without retry, each sample keeps its first reply (``without_retry``), so official
+EX judges the first reply's query, which is stored as its first try (ADR-0015). A
+compare report adds official EX without retry when either run retried, and each failure
+shown that was retried shows both of its queries.
+
 A dev run's report shows the model's answers on dev, which belongs to the look the run
 logged (ADR-0004): it needs the run's row in ``docs/dev-usage.md`` and adds none.
 
@@ -50,10 +57,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
-from forge.core.types import Example, GenParams, Hardness, Score, Split
+from forge.core.types import Example, Generation, GenParams, Hardness, Score, Split
 from forge.data.manifest import data_manifest_hash
 from forge.data.spider import load_raw, resolve_data_dir
 from forge.data.splits import split_examples
@@ -69,6 +77,7 @@ from forge.eval.metrics import (
     gold_clusters,
     summarize,
 )
+from forge.eval.retry import without_retry
 from forge.eval.run_files import (
     RunCorrupt,
     StoredRun,
@@ -127,6 +136,7 @@ class RunOptions(BaseModel, frozen=True):
     limit: int | None
     prompt_version: str
     generation: GenParams
+    retry: Literal[0, 1]
 
 
 @dataclass(frozen=True)
@@ -277,6 +287,7 @@ def render_run(run: ReportRun, *, generated: datetime) -> str:
         *_checker_disagreement(run.stored.scores),
         _method(run),
         "",
+        *_retry_section(run),
         "## By hardness",
         "",
         f"| hardness | questions | fast EX [{LEVEL} interval] | official EX [{LEVEL} interval] |",
@@ -332,6 +343,10 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
     if out.absolute() == compare_path(b, a.run_id).absolute():
         written += f" and checked against them by `forge report rebuild {b.run_id}`"
     samples = b.options.generation.n
+    retried = _retried(a) or _retried(b)
+    changed = "Only official EX, the reported rate, gets a change"
+    if retried:
+        changed += ", with retry and without it"
     lines = [
         title,
         "",
@@ -361,8 +376,9 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
         f"| valid SQL | {_rate(a.summary.valid)} | {_rate(b.summary.valid)} | |",
         f"| fast EX | {_rate(a.summary.ex_fast)} | {_rate(b.summary.ex_fast)} | |",
         f"| official EX | {_rate(a.official)} | {_rate(b.official)} | {_change(overall.delta)} |",
+        *([_without_retry_row(a, b)] if retried else []),
         "",
-        "Only official EX, the reported rate, gets a change: each sample of run b against",
+        f"{changed}: each sample of run b against",
         f"the same one of run a. {_method(a)}",
         "",
         "## McNemar's test",
@@ -501,7 +517,7 @@ def _load(run_id: str, data: _Data, runs_root: Path) -> ReportRun:
     questions = {example.id: example for example in data.splits[options.split]}
     examples: dict[str, Example] = {}
     for score in stored.scores:
-        _check_score(run_id, score)
+        _check_score(run_id, score, options.retry)
         if score.example_id not in questions:
             raise RunCorrupt(f"run {run_id} scored {score.example_id}, which {options.split} lacks")
         examples[score.example_id] = questions[score.example_id]
@@ -519,11 +535,22 @@ def _check_dev_use(run_id: str) -> None:
         )
 
 
-def _check_score(run_id: str, score: Score) -> None:
+def _check_score(run_id: str, score: Score, retry: int) -> None:
     """Refuse a score a finished run can't hold, since the report would misread it."""
     sample = f"run {run_id}'s {score.example_id} sample {score.sample_idx}"
     if score.ex_official is None:
         raise RunCorrupt(f"{sample} has no official verdict, though the run finished")
+    if score.attempts < 1:
+        raise RunCorrupt(f"{sample} took {score.attempts} replies, where every score takes one")
+    if score.attempts > 1 + retry:
+        raise RunCorrupt(
+            f"{sample} took {score.attempts} replies, but the run "
+            f"{'retries once' if retry else 'never retries'}"
+        )
+    if score.attempts > 1 and score.first_try_ex is None:
+        raise RunCorrupt(f"{sample} has no official verdict on its first try, though it finished")
+    if score.attempts == 1 and score.first_try_ex is not None:
+        raise RunCorrupt(f"{sample} has a first try's verdict, but took one reply")
     if score.error_class is not None and score.error_class not in ERROR_CLASSES:
         raise RunCorrupt(f"{sample} has the unknown error class {score.error_class!r}")
     # A run classifies each miss of fast EX and nothing else (forge.eval.scoring).
@@ -596,6 +623,10 @@ def _header(run: ReportRun, page: Path, *, shared: bool = True) -> list[tuple[st
         ("Prompt version", _code(options.prompt_version)),
         *([("Split", _split(run))] if shared else []),
         ("Generation", _generation(options.generation)),
+        (
+            "Retry",
+            "once, with the error, for a query that fails to run" if options.retry else "none",
+        ),
         ("Git commit", f"`{manifest.git_sha}`"),
         *([("Data manifest hash", f"`{manifest.data_manifest_hash}`")] if shared else []),
         ("Manifest", _link(run.stored.paths.manifest, page)),
@@ -622,6 +653,57 @@ def _checker_disagreement(scores: Sequence[Score]) -> list[str]:
         f"EX matches {only_fast:,}, and only official EX {only_official:,}.",
         "",
     ]
+
+
+def _retried(run: ReportRun) -> bool:
+    return any(score.attempts > 1 for score in run.stored.scores)
+
+
+def _retry_section(run: ReportRun) -> list[str]:
+    """EX with and without retry, when the run retried a sample; nothing otherwise."""
+    if not _retried(run):
+        return []
+    scores = run.stored.scores
+    first = [without_retry(score) for score in scores]
+    before = summarize(first, clusters=run.clusters)
+    change = compare(first, scores, clusters=run.clusters)
+    retried = [score for score in scores if score.attempts > 1]
+    return [
+        "## Retry",
+        "",
+        "The run asked once more, with the error, for each query that failed to run, and",
+        "scored its sample on the second reply. Without retry, every sample keeps its first",
+        "reply: a retried one is then neither valid nor a fast match, and official EX",
+        "judges its first query. The change pairs each sample with itself.",
+        "",
+        f"| | without retry [{LEVEL} interval] | with retry [{LEVEL} interval] "
+        f"| change in points [{LEVEL} interval] |",
+        "|---|---:|---:|---:|",
+        f"| valid SQL | {_rate(before.valid)} | {_rate(run.summary.valid)} | |",
+        f"| fast EX | {_rate(before.ex_fast)} | {_rate(run.summary.ex_fast)} | |",
+        f"| official EX | {_rate(_official(before.ex_official))} | {_rate(run.official)} "
+        f"| {_change(change.delta)} |",
+        "",
+        "| | samples |",
+        "|---|---:|",
+        f"| retried: the first query failed to run | {len(retried):,} |",
+        f"| the second query ran | {sum(score.valid for score in retried):,} |",
+        f"| right on retry, by official EX | {sum(s.ex_official is True for s in retried):,} |",
+        f"| right on the first reply, by official EX | "
+        f"{sum(s.first_try_ex is True for s in retried):,} |",
+        "",
+    ]
+
+
+def _without_retry_row(a: ReportRun, b: ReportRun) -> str:
+    """The compare table's row for official EX on each run's first replies alone."""
+    first_a = [without_retry(score) for score in a.stored.scores]
+    first_b = [without_retry(score) for score in b.stored.scores]
+    rate_a = _official(summarize(first_a, clusters=a.clusters).ex_official)
+    rate_b = _official(summarize(first_b, clusters=b.clusters).ex_official)
+    change = compare(first_a, first_b, clusters=a.clusters)
+    rates = f"{_rate(rate_a)} | {_rate(rate_b)}"
+    return f"| official EX without retry | {rates} | {_change(change.delta)} |"
 
 
 def _mcnemar(pvalue: float | None) -> str:
@@ -707,14 +789,30 @@ def _failure(run: ReportRun, score: Score) -> list[str]:
         *_block("sql", example.gold_sql),
         "",
     ]
+    reply, query = "The reply", "Predicted query"
+    if score.attempts > 1:
+        lines += [*_first_try(run.stored.first_tries[key(score)]), ""]
+        reply, query = "The reply on retry", "Predicted query on retry"
     if generation.sql is None:
         text, cut = _cut(generation.text)
-        lines += [f"The reply has no SQL query{'. Its start' if cut else ''}:", ""]
+        lines += [f"{reply} has no SQL query{'. Its start' if cut else ''}:", ""]
         lines += _block("text", text)
     else:
         text, cut = _cut(generation.sql)
-        lines += [f"Predicted query{', cut short' if cut else ''}:", "", *_block("sql", text)]
+        lines += [f"{query}{', cut short' if cut else ''}:", "", *_block("sql", text)]
     return [*lines, "", f"Error: {_error(score)}"]
+
+
+def _first_try(first: Generation) -> list[str]:
+    """A retried sample's first reply: the query that failed to run, or that it had none."""
+    if first.sql is None:
+        return ["The first reply has no SQL query."]
+    text, cut = _cut(first.sql)
+    return [
+        f"The first reply's query failed to run{'. Its start' if cut else ''}:",
+        "",
+        *_block("sql", text),
+    ]
 
 
 def _error(score: Score) -> str:
