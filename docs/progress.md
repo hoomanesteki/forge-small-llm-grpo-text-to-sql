@@ -35,7 +35,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-203 | Metrics with confidence intervals and paired tests | 5 | done |  |  | `summarize`, `compare` and `pass_at_k` in `forge.eval.metrics`; 95% percentile bootstrap, 1,000 resamples, `default_rng(0)` for each interval, drawing whole questions or `gold_clusters`; exact McNemar from statsmodels, with no p-value for several samples a question; official EX when every score has a verdict, else fast |
 | FG-204 | Error taxonomy | 3 | done |  |  | `classify` in `forge.eval.taxonomy`: no_sql, syntax and schema_link from the error kind, then sqlglot shapes compare tables, joins, select lists, aggregates, WHERE, GROUP BY to LIMIT and last literals; names resolve to tables against each database's columns, a double-quoted name no table has is a string, and a nested filter query counts in its condition; `forge eval run` stores the class of each wrong prediction |
 | FG-205 | Report generator | 3 | done |  |  | `forge report run`, `compare` and `rebuild` (`forge.eval.report`) from a finished run's stored files (`read_run`) and its split's questions in data with the manifest's hash; official EX leads, with fast EX and the valid rate beside it, 95% intervals over gold clusters, a by-hardness table and PNG, the error classes of official EX failures, and 5 failures from each of the 3 most common classes; compare gives the paired change, McNemar's table and p, and changes by hardness and class; rebuild renders the run's reports again and diffs them, the `Generated:` line aside |
-| FG-206 | Execution-guided retry | 3 | todo |  |  |  |
+| FG-206 | Execution-guided retry | 3 | done |  |  | `--retry 1` asks once more, with the executor's error, for each query that fails to run (never one that ran), in the same `SandboxPool`, and scores the second reply; `Score` gains `attempts` and `first_try_ex` (ADR-0015); first replies kept in `eval/<split>-first-tries.jsonl` and judged in the one official batch; each retry drawn with its own seed; reports show EX with and without retry and the paired change |
 | FG-207 | CPU smoke pipeline in CI | 3 | todo |  |  |  |
 
 ## Phase 3: Free-GPU ops and baselines (v0.3.0)
@@ -500,3 +500,20 @@ Work discovered along the way that is not a plan story.
   citation: 1.0, 2018 and 4.0), and the `Generated:` line the time. Question lines and code
   blocks quote the data and the generations, and cluster counts come from `gold_clusters` over
   the scored questions (FG-205).
+- Official EX can match a first query the executor rejects: the evaluator drops `DISTINCT`
+  and turns `> =` into `>=` before running, so `SELECT count(DISTINCT *) FROM Aircraft`, a
+  syntax error to SQLite, matches `SELECT count(*) FROM Aircraft`. EX without retry therefore
+  judges each retried sample's first query in the official batch instead of counting it a miss,
+  and retry can lose a sample official EX had (ADR-0015, FG-206).
+- FG-508 plans a `--retry 1` dev run "using the same generations plus one retry turn (counted
+  within the same dev use)". `forge eval run --retry 1` generates its first replies again and
+  calls `load_dev`, which logs another look, so FG-508 needs a way to retry a stored run's
+  failures from its generations without a second look (FG-206).
+- A retried sample's tokens and latency are split between its first try and its generation, so
+  FG-705's cost and latency table has to add both for a retry run. FG-304's Hub store must carry
+  `eval/<split>-first-tries.jsonl` with the other outputs; the manifest lists it as
+  `first_tries` (FG-206).
+- A retry is drawn with a seed derived from the run's seed and the sample index, and a backend
+  seeds each reply by its example id and its index among the prompt's replies, so FG-306's vLLM
+  backend has to seed requests the same way (`sample_seed`) for retries to stay independent of
+  first replies and of each other (FG-206).

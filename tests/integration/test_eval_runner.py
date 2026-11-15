@@ -543,3 +543,9 @@ def test_retry_through_the_cli(
     assert sorted(pred or "" for _, pred, _ in items) == sorted(
         [*(e.gold_sql for e in val), first_replies[val[2].id]]
     )
+
+    reported = cli_runner.invoke(cli.app, ["report", "run", "retry"])
+    assert reported.exit_code == 0, reported.output
+    report = (runs / "retry" / "eval" / "val-report.md").read_text()
+    assert "\n## Retry\n" in report
+    assert "\n| retried: the first query failed to run | 2 |\n" in report
