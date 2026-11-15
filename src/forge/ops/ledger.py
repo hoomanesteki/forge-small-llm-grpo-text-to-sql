@@ -2,7 +2,9 @@
 
 Free GPU quota is the project's real budget, so every session is written down.
 Only Kaggle hours count against the weekly quota; Colab and Modal hours still count
-toward the project's GPU total, and Modal is where cash can be spent.
+toward the project's GPU total, and Modal is where cash can be spent. Laptop sessions,
+on its CPU or on Apple silicon's GPU (``local-mps``, ADR-0016), spend neither budget
+and count toward neither.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from forge.ops.logfile import locked_append
 from forge.ops.paths import ledger_path
 
 COLUMNS = ("date", "platform", "gpu", "hours", "run_id", "purpose", "cost_usd")
-PLATFORMS = frozenset({"local-cpu", "kaggle", "colab", "modal"})
+PLATFORMS = frozenset({"local-cpu", "local-mps", "kaggle", "colab", "modal"})
 GPU_PLATFORMS = frozenset({"kaggle", "colab", "modal"})
 QUOTA_PLATFORMS = frozenset({"kaggle"})
 # Characters that would break a markdown table row.

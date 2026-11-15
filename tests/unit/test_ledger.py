@@ -2,10 +2,22 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
-from forge.ops.ledger import HEADER, LedgerRow, append, has_run, read_rows, summary
+from forge.ops.ledger import (
+    GPU_PLATFORMS,
+    HEADER,
+    PLATFORMS,
+    QUOTA_PLATFORMS,
+    LedgerRow,
+    append,
+    has_run,
+    read_rows,
+    summary,
+)
+from forge.ops.manifest import Platform
 
 TODAY = date(2026, 11, 14)
 
@@ -115,3 +127,28 @@ def test_no_repo_root_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         ledger_path()
     monkeypatch.setenv("FORGE_LEDGER", str(tmp_path / "ledger.md"))
     assert ledger_path() == tmp_path / "ledger.md"
+
+
+@pytest.mark.phase(2)
+def test_local_mps_counts_in_neither_quota_nor_gpu_total(
+    ledger: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A pilot on the laptop's GPU is written down, but spends no free GPU budget (ADR-0016).
+    monkeypatch.setenv("FORGE_WEEKLY_GPU_HOURS", "30")
+    append(LedgerRow(TODAY, "kaggle", "T4", 1.5, "run-a", "eval"), ledger)
+    append(LedgerRow(TODAY, "local-mps", "Apple M4", 0.25, "run-b", "pilot on val"), ledger)
+
+    assert [(r.platform, r.gpu) for r in read_rows(ledger)][1] == ("local-mps", "Apple M4")
+    s = summary(path=ledger, today=TODAY)
+    assert s.quota_hours_window == pytest.approx(1.5)
+    assert s.gpu_hours_total == pytest.approx(1.5)
+    assert s.sessions == 1
+    assert s.cash_total == 0.0
+
+
+@pytest.mark.phase(2)
+def test_ledger_takes_every_manifest_platform() -> None:
+    # A run's manifest platform must be one a ledger row can name.
+    assert frozenset(get_args(Platform)) == PLATFORMS
+    assert QUOTA_PLATFORMS <= GPU_PLATFORMS < PLATFORMS
+    assert not {"local-cpu", "local-mps"} & GPU_PLATFORMS

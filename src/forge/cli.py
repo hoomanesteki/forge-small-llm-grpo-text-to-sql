@@ -680,7 +680,7 @@ def _report_git_sha() -> str:
 
 @ledger_app.command("add")
 def ledger_add(
-    platform: str = typer.Option(..., help="kaggle, colab or modal"),
+    platform: str = typer.Option(..., help="kaggle, colab, modal, local-mps or local-cpu"),
     hours: float = typer.Option(..., help="wall-clock GPU hours"),
     run_id: str = typer.Option(..., "--run-id"),
     purpose: str = typer.Option(...),
