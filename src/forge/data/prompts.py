@@ -17,7 +17,7 @@ Each step is logged at INFO on ``forge.data.prompts``.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -150,20 +150,25 @@ def names_table(question: str, table: str) -> bool:
     return name in text or name.replace("_", " ") in text
 
 
+def count_chat_tokens(tokenizer: ChatTokenizer, messages: Sequence[Mapping[str, str]]) -> int:
+    """A chat's tokens as TRL's GRPO trainer encodes it, assistant turn opened."""
+    encoded = tokenizer.apply_chat_template(
+        [dict(message) for message in messages],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        # Qwen3 models run without thinking (plan section 3.7), which puts an empty
+        # think block in every prompt. Templates without the flag ignore it.
+        enable_thinking=False,
+    )
+    return len(encoded["input_ids"])
+
+
 def chat_token_counter(tokenizer: ChatTokenizer) -> TokenCounter:
-    """Count a prompt's tokens as TRL's GRPO trainer encodes it, assistant turn opened."""
+    """Count a prompt's tokens as ``count_chat_tokens`` does."""
 
     def count(prompt: Prompt) -> int:
-        encoded = tokenizer.apply_chat_template(
-            [dict(message) for message in prompt.messages],
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            # Qwen3 models run without thinking (plan section 3.7), which puts an empty
-            # think block in every prompt. Templates without the flag ignore it.
-            enable_thinking=False,
-        )
-        return len(encoded["input_ids"])
+        return count_chat_tokens(tokenizer, prompt.messages)
 
     return count
 
