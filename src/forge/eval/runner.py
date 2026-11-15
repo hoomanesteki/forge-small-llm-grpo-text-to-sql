@@ -62,7 +62,7 @@ from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
 from forge.ops.manifest import build_manifest
-from forge.ops.paths import cache_dir, runs_dir
+from forge.ops.paths import cache_dir, repo_root, runs_dir
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
 
@@ -158,6 +158,7 @@ def run_eval(
         platform=config.platform,
         adapter_ref=config.adapter,
         allow_dirty=allow_dirty,
+        repo=repo_root(),
         data_dir=root,
     )
     paths = RunPaths((runs_root or runs_dir()) / fresh.run_id, config.split)

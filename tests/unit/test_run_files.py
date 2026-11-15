@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fcntl
+import shutil
+import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +16,7 @@ import yaml
 from forge.core.types import Generation, RunManifest, Score
 from forge.eval.run_files import (
     LOCK_FILE,
+    MANIFEST_FILE,
     RunConflict,
     RunCorrupt,
     RunFiles,
@@ -25,9 +28,15 @@ from forge.eval.run_files import (
     read_run,
     start,
 )
-from forge.ops.manifest import config_hash
+from forge.ops.manifest import DirtyTreeError, config_hash, git_sha
 
+ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = {(f"q{i}", 0) for i in range(4)}
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+    return done.stdout.strip()
 
 
 def _manifest(**changes: Any) -> RunManifest:
@@ -275,6 +284,39 @@ def test_hold_keeps_a_second_process_off_the_run(tmp_path: Path) -> None:
             pass
     with hold(paths):
         pass
+
+
+@pytest.mark.phase(2)
+def test_run_lock_never_dirties_the_tree(tmp_path: Path) -> None:
+    # A checkout with the repo's ignore rules and a committed run, as in docs/runs.
+    repo = tmp_path / "repo"
+    committed = repo / "docs" / "runs" / "r1"
+    (committed / "eval").mkdir(parents=True)
+    (committed / MANIFEST_FILE).write_text("{}\n")
+    shutil.copy2(ROOT / ".gitignore", repo / ".gitignore")
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Test"],
+        ["add", "."],
+        ["commit", "-q", "-m", "init"],
+    ):
+        _git(repo, *args)
+    head = git_sha(repo)
+
+    # Reports hold the run folder they write in, and the lock stays after the hold.
+    for root in (committed, repo / "runs" / "r2"):
+        with hold(RunPaths(root, "val")):
+            assert git_sha(repo) == head
+        assert (root / LOCK_FILE).is_file()
+        assert git_sha(repo) == head
+    ignored = _git(repo, "check-ignore", "docs/runs/r1/.lock", "runs/r2/.lock")
+    assert ignored.splitlines() == ["docs/runs/r1/.lock", "runs/r2/.lock"]
+
+    # Only the lock: a new file in a committed run still makes the tree dirty.
+    (committed / "eval" / "val-report.md").write_text("# Run r1\n")
+    with pytest.raises(DirtyTreeError):
+        git_sha(repo)
 
 
 def _finished(tmp_path: Path, *, retried: bool = False) -> RunPaths:

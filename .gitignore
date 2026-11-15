@@ -224,6 +224,9 @@ __marimo__/
 /data
 /runs
 /cache
+# The lock a run folder keeps after a run or report (forge.eval.run_files.hold) is never
+# part of the run, so writing a committed run's report leaves the tree clean.
+docs/runs/**/.lock
 *.gguf
 .env
 .env.*

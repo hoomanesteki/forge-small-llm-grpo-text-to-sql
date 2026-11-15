@@ -409,7 +409,7 @@ def eval_run(
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
     from forge.eval.runner import WORKERS, run_eval
     from forge.ops.dev_usage import DevBudgetExceeded
-    from forge.ops.manifest import DirtyTreeError
+    from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound
     from forge.sql.sandbox import SandboxError
 
@@ -445,6 +445,7 @@ def eval_run(
     except (
         DevBudgetExceeded,
         DirtyTreeError,
+        GitError,
         ImportError,
         NotAvailable,
         OSError,
@@ -709,14 +710,12 @@ def report_rebuild(
 
 def _report_git_sha() -> str:
     """The commit a report came from, marked dirty when the tree has changes."""
-    import subprocess
-
-    from forge.ops.manifest import git_sha
+    from forge.ops.manifest import GitError, git_sha
     from forge.ops.paths import RepoRootNotFound, repo_root
 
     try:
         return git_sha(repo_root(), allow_dirty=True)
-    except (OSError, RepoRootNotFound, subprocess.CalledProcessError):
+    except (GitError, RepoRootNotFound):
         # A wheel installed outside a checkout (a Kaggle kernel) has no history to name.
         return "unknown (not run from a git checkout)"
 
