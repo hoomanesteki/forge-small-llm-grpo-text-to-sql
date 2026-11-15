@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 
 from forge.core.hashing import canonical_json, sha256_hex
-from forge.core.types import Example
+from forge.core.types import Example, RunManifest
 
 
 @pytest.mark.phase(0)
@@ -52,3 +52,26 @@ def test_canonical_json_stable() -> None:
     )
     shuffled = dict(reversed(list(example.model_dump().items())))
     assert canonical_json(example) == canonical_json(shuffled)
+
+
+@pytest.mark.phase(1)
+def test_model_hashes_like_its_own_dump() -> None:
+    manifest = RunManifest(
+        run_id="2026-11-14-qwen3-4b-eval-a1b2c3d",
+        kind="eval",
+        git_sha="a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        config={"data": Path("data/spider"), "on": date(2026, 11, 14)},
+        config_hash="0" * 64,
+        data_manifest_hash="1" * 64,
+        model_ref="Qwen/Qwen3-4B",
+        platform="local-cpu",
+        seed=0,
+        started_at=datetime(2026, 11, 14, 9, 30, tzinfo=UTC),
+    )
+
+    encoded = canonical_json(manifest)
+    assert encoded == canonical_json(manifest.model_dump())
+    assert canonical_json({"run": manifest}) == canonical_json({"run": manifest.model_dump()})
+    # A datetime reads as isoformat gives it wherever it sits, never with pydantic's "Z".
+    assert b'"started_at":"2026-11-14T09:30:00+00:00"' in encoded
+    assert b'"config":{"data":"data/spider","on":"2026-11-14"}' in encoded

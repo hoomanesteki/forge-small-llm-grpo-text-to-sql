@@ -7,6 +7,7 @@ a ``-dirty`` suffix, so a gate check that the SHA is on dev fails loudly.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,19 +68,23 @@ def build_manifest(
     now: datetime | None = None,
 ) -> RunManifest:
     """Describe a run starting now. Pass ``run_id`` only to keep an id, as a resumed run does."""
-    if now is not None and now.tzinfo is None:
-        # Kaggle runs in UTC and laptops don't, so a naive time can't be compared.
+    # Kaggle runs in UTC and laptops don't, so a naive time can't be compared. A tzinfo
+    # without an offset is naive too: astimezone would read it in the machine's zone.
+    if now is not None and now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     started_at = now or datetime.now(UTC)
     sha = git_sha(repo, allow_dirty=allow_dirty)
     if run_id is None:
         run_id = make_run_id(kind, model_ref, sha, on=started_at.astimezone(UTC).date())
+    # The manifest keeps the config as hashed, in a copy of its own, so editing the
+    # caller's nested dicts later can't change it or break its config_hash.
+    snapshot: dict[str, Any] = json.loads(canonical_json(config))
     return RunManifest(
         run_id=run_id,
         kind=kind,
         git_sha=sha,
-        config=config,
-        config_hash=config_hash(config),
+        config=snapshot,
+        config_hash=config_hash(snapshot),
         data_manifest_hash=data_manifest_hash(),
         model_ref=model_ref,
         adapter_ref=adapter_ref,
