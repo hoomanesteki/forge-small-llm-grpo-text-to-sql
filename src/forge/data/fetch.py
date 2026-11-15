@@ -127,8 +127,11 @@ def download(source_name: SourceName, download_dir: Path) -> Path:
     return target
 
 
-def _download_failed(source_name: str, exc: BaseException) -> FetchError:
-    return FetchError(f"downloading the {source_name} zip failed: {exc}. {_RETRY_HINT}")
+def _download_failed(source_name: str, exc: BaseException, stale: Path | None = None) -> FetchError:
+    # Messages that end in a full stop would otherwise print two before the hint.
+    reason = str(exc).removesuffix(".")
+    found = f" The zip already at {stale} fails the sha256 check." if stale else ""
+    return FetchError(f"downloading the {source_name} zip failed: {reason}.{found} {_RETRY_HINT}")
 
 
 def _download_hub(
@@ -138,6 +141,7 @@ def _download_hub(
     import httpx2
     from huggingface_hub import hf_hub_download
 
+    stale = download_dir / source.path if force else None
     try:
         hf_hub_download(
             repo_id=repo_id,
@@ -153,7 +157,12 @@ def _download_hub(
     # zips on Xet, and hf_xet, which moves their bytes, reports a failed transfer as a bare
     # RuntimeError. FetchError is a RuntimeError too, but nothing in this call raises one.
     except (OSError, RuntimeError, httpx2.HTTPError) as exc:
-        raise _download_failed(source_name, exc) from exc
+        raise _download_failed(source_name, exc, stale) from exc
+    # A forced download that can't reach the Hub, offline mode included, raises a bare
+    # ValueError ("Force download failed due to the above error.") whose cause is the real
+    # error; a token reply without the Xet headers raises one with no cause.
+    except ValueError as exc:
+        raise _download_failed(source_name, exc.__cause__ or exc, stale) from exc
 
 
 def _download_url(source_name: str, url: str, target: Path) -> None:

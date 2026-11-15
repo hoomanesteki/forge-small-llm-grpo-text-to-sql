@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError, OfflineModeIsEnabled
 from typer.testing import CliRunner
 
 from forge import cli
@@ -441,6 +441,13 @@ def _raise(exc: BaseException) -> Callable[..., Any]:
                 "error: error sending request for url (http://127.0.0.1:9/v2/reconstructions/0)"
             ),
         ),
+        # A token reply without hf_xet's headers: a bare ValueError, whose message ends in
+        # a full stop of its own.
+        (
+            "mirror",
+            "huggingface_hub.hf_hub_download",
+            ValueError("Xet headers have not been correctly set by the server."),
+        ),
         ("gdrive", "urllib.request.urlopen", urllib.error.URLError("timed out")),
         # A body cut short; not an OSError either.
         ("gdrive", "urllib.request.urlopen", http.client.IncompleteRead(b"PK\x03\x04", 10)),
@@ -465,9 +472,59 @@ def test_fetch_cli_reports_download_failures(
     assert isinstance(result.exception, SystemExit), result.exception
     assert result.exit_code == 1
     assert result.stdout == ""
-    assert result.stderr.startswith(f"error: downloading the {source} zip failed: ")
-    assert "Try another --source, or download the zip by hand and pass --from-zip" in result.stderr
+    reason = str(exc).removesuffix(".")
+    assert result.stderr.startswith(f"error: downloading the {source} zip failed: {reason}. ")
+    assert result.stderr.endswith(
+        ". Try another --source, or download the zip by hand and pass --from-zip\n"
+    )
+    assert ".." not in result.stderr
     assert not (tmp_path / "spider").exists()
+
+
+@pytest.mark.phase(1)
+@pytest.mark.parametrize(
+    ("source", "error"),
+    [
+        ("hf", OfflineModeIsEnabled("Cannot reach the Hub: offline mode is enabled.")),
+        ("mirror", httpx2.ConnectError("[Errno 61] Connection refused")),
+        ("hf", _hub_status_error()),
+    ],
+)
+def test_fetch_cli_reports_a_failed_forced_download(
+    tmp_path: Path,
+    pin: Callable[[str, bytes], None],
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    error: BaseException,
+) -> None:
+    # A zip that fails the sha256 check is where the download goes, so the Hub client is
+    # told to download again by force. If it then can't reach the Hub, it raises a bare
+    # ValueError ("Force download failed due to the above error.") whose cause is the real
+    # error. The client is the real one; only its metadata call fails, offline.
+    pin(source, _spider_zip("spider"))
+    download_dir = fetch_mod.default_download_dir()
+    stale = download_dir / fetch_mod.SOURCES[source].path
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"not the pinned zip")
+    monkeypatch.setattr("huggingface_hub.file_download.get_hf_file_metadata", _raise(error))
+    monkeypatch.setenv("FORGE_DATA_DIR", str(tmp_path / "spider"))
+
+    with pytest.raises(FetchError) as raised:
+        fetch_mod.download(source, download_dir)
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert raised.value.__cause__.__cause__ is error
+
+    result = CliRunner().invoke(cli.app, ["data", "fetch", "--source", source])
+
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert result.exit_code == 1
+    reason = str(error).removesuffix(".")
+    assert result.stderr == (
+        f"error: downloading the {source} zip failed: {reason}. The zip already at {stale} "
+        "fails the sha256 check. Try another --source, or download the zip by hand and pass "
+        "--from-zip\n"
+    )
+    assert stale.read_bytes() == b"not the pinned zip"
 
 
 @pytest.mark.phase(1)
