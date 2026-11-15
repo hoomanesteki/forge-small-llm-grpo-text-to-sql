@@ -67,7 +67,7 @@ from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
 from forge.ops.hub import RunNotFound, RunStore, hub_store
-from forge.ops.manifest import CODE_SHA_ENV, build_manifest
+from forge.ops.manifest import CODE_SHA_ENV, accelerator, build_manifest
 from forge.ops.paths import RepoRootNotFound, cache_dir, repo_root, runs_dir
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
@@ -167,6 +167,7 @@ def run_eval(
         run_id=config.run_id,
         platform=config.platform,
         adapter_ref=config.adapter,
+        gpu=accelerator(config.platform),
         allow_dirty=allow_dirty,
         repo=_code_root(),
         data_dir=root,

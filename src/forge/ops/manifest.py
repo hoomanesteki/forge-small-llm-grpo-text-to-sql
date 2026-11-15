@@ -7,6 +7,10 @@ a ``-dirty`` suffix, so a gate check that the SHA is on dev fails loudly.
 A Kaggle kernel runs the wheel from the code dataset and has no checkout to ask, so
 there ``code_sha`` takes the commit the dataset was built from, which the kernel's entry
 script passes in ``FORGE_CODE_SHA``. Inside a checkout the variable is never read.
+
+``accelerator`` names the GPU a run has, for its manifest's ``gpu``, and ``close`` writes
+how a run ended: its status, its end time and, on a platform with a GPU, its wall-clock
+hours as its GPU hours (``forge.ops.ledger.run_hours``).
 """
 
 from __future__ import annotations
@@ -24,10 +28,15 @@ from forge.core.hashing import canonical_json, sha256_hex
 from forge.core.ids import RunKind, make_run_id
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
+from forge.ops.ledger import GPU_RUN_PLATFORMS, run_hours
 from forge.ops.paths import RepoRootNotFound, dev_usage_path, ledger_path, repo_root
 
 # Mirrors RunManifest.platform; a unit test keeps the two in step.
 Platform = Literal["local-cpu", "local-mps", "kaggle", "colab", "modal"]
+# The statuses a run can end with: every RunManifest status but running.
+EndStatus = Literal["stopped_time_guard", "finished", "failed"]
+# Apple silicon names its chip here, such as "Apple M4".
+_CHIP_COMMAND = ("sysctl", "-n", "machdep.cpu.brand_string")
 
 # Set by kaggle/entry.py from the code dataset's GIT_SHA (forge.ops.kaggle).
 CODE_SHA_ENV = "FORGE_CODE_SHA"
@@ -253,3 +262,54 @@ def build_manifest(
         seed=seed,
         started_at=started_at,
     )
+
+
+def accelerator(platform: Platform) -> str | None:
+    """The GPU a run on ``platform`` has, by the name its manifest and ledger row give it.
+
+    On a hosted platform that is CUDA's name for device 0 (a Kaggle T4 is ``Tesla T4``),
+    or None when there is no CUDA device. On ``local-mps`` it is the chip, or ``mps`` when
+    the machine won't say which. A ``local-cpu`` run has none.
+    """
+    if platform == "local-cpu":
+        return None
+    if platform == "local-mps":
+        return _apple_chip()
+    return _cuda_device()
+
+
+def _apple_chip() -> str:
+    try:
+        done = subprocess.run(
+            _CHIP_COMMAND, capture_output=True, text=True, check=False, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):  # no sysctl, or it hung
+        return "mps"
+    name = done.stdout.strip()
+    return name if done.returncode == 0 and name else "mps"
+
+
+def _cuda_device() -> str | None:
+    try:
+        import torch
+    except ImportError:  # without torch nothing here can use a CUDA device
+        return None
+    if not torch.cuda.is_available():
+        return None
+    return str(torch.cuda.get_device_name(0))
+
+
+def close(manifest: RunManifest, status: EndStatus, *, now: datetime | None = None) -> RunManifest:
+    """``manifest`` as its run ended at ``now`` (by default now), with ``status``.
+
+    A run on a platform with a GPU (``GPU_RUN_PLATFORMS``, ``local-mps`` among them)
+    counts its wall-clock time from ``started_at`` as its GPU hours; a ``local-cpu`` run
+    counts none. A resumed run keeps its first start, so its hours run from there.
+    """
+    if now is not None and now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    ended_at = now or datetime.now(UTC)
+    hours = (
+        run_hours(manifest.started_at, ended_at) if manifest.platform in GPU_RUN_PLATFORMS else 0.0
+    )
+    return manifest.model_copy(update={"status": status, "ended_at": ended_at, "gpu_hours": hours})
