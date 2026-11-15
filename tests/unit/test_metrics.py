@@ -1,4 +1,4 @@
-"""Scores in aggregate: rates with bootstrap intervals."""
+"""Scores in aggregate: rates with bootstrap intervals and paired comparisons."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import random
 import pytest
 
 from forge.core.types import Hardness, Score
-from forge.eval.metrics import Rate, summarize
+from forge.eval.metrics import Rate, compare, ex_metric, summarize
 
 
 def _score(
@@ -28,6 +28,20 @@ def _score(
         ex_fast=fast,
         ex_official=official,
     )
+
+
+def _runs(*, both: int, only_a: int, only_b: int, neither: int) -> tuple[list[Score], list[Score]]:
+    """Two runs over the same questions whose official verdicts make the given table."""
+    outcomes = (
+        [(True, True)] * both
+        + [(True, False)] * only_a
+        + [(False, True)] * only_b
+        + [(False, False)] * neither
+    )
+    # Fast EX says the opposite throughout, so counting the wrong one can't go unseen.
+    a = [_score(q, fast=not right, official=right) for q, (right, _) in enumerate(outcomes)]
+    b = [_score(q, fast=not right, official=right) for q, (_, right) in enumerate(outcomes)]
+    return a, b
 
 
 @pytest.mark.phase(2)
@@ -96,6 +110,11 @@ def test_bootstrap_ci_contains_estimate() -> None:
     random.Random(0).shuffle(shuffled)
     assert summarize(shuffled).ex_fast == rate
 
+    a, b = _runs(both=20, only_a=3, only_b=9, neither=8)
+    delta = compare(a, b).delta
+    assert delta.value == pytest.approx(6 / 40)
+    assert delta.low <= delta.value <= delta.high
+
 
 @pytest.mark.phase(2)
 def test_bootstrap_resamples_whole_questions() -> None:
@@ -107,6 +126,89 @@ def test_bootstrap_resamples_whole_questions() -> None:
     assert (two.by_hardness["hard"].n, two.by_hardness["hard"].questions) == (60, 30)
     assert two.ex_fast == one.ex_fast.model_copy(update={"hits": 20})
     assert one.ex_fast.low < one.ex_fast.value < one.ex_fast.high
+
+
+@pytest.mark.phase(2)
+def test_mcnemar_known_table() -> None:
+    a, b = _runs(both=5, only_a=1, only_b=9, neither=5)
+    # With no difference between the runs each of the 10 discordant pairs favors b with
+    # chance 1/2, so the two-sided exact p is twice the chance of at most 1 favoring a.
+    reference = 2 * sum(math.comb(10, i) for i in range(2)) / 2**10
+    assert reference == 0.021484375
+
+    result = compare(a, b)
+    assert result.metric == "ex_official"
+    table = result.mcnemar
+    assert (table.both, table.only_a, table.only_b, table.neither) == (5, 1, 9, 5)
+    assert table.pvalue == pytest.approx(reference, rel=1e-12)
+    # Two-sided: swapping the runs mirrors the table and keeps p.
+    swapped = compare(b, a).mcnemar
+    assert (swapped.only_a, swapped.only_b) == (9, 1)
+    assert swapped.pvalue == pytest.approx(reference, rel=1e-12)
+
+    # 0 against 5 gives 2 / 2**5; an even split can't reject anything.
+    one_sided = compare(*_runs(both=3, only_a=0, only_b=5, neither=2)).mcnemar
+    assert one_sided.pvalue == pytest.approx(2 / 2**5, rel=1e-12)
+    assert compare(*_runs(both=4, only_a=3, only_b=3, neither=0)).mcnemar.pvalue == 1.0
+
+
+@pytest.mark.phase(2)
+def test_compare_pairs_samples() -> None:
+    # b fixes 3 of a's 30 misses and breaks nothing, so no resample can favor a.
+    a, b = _runs(both=30, only_a=0, only_b=3, neither=27)
+    result = compare(a, b)
+    assert (result.n, result.questions) == (60, 60)
+    assert (result.ex_a, result.ex_b) == (30 / 60, 33 / 60)
+    assert result.delta.value == pytest.approx(3 / 60)
+    assert 0.0 <= result.delta.low <= result.delta.value <= result.delta.high
+    # Pairing sees what two separate intervals can't: the change is far tighter than either.
+    alone = summarize(a).ex_official
+    assert alone is not None
+    assert result.delta.high - result.delta.low < (alone.high - alone.low) / 2
+
+    same = compare(a, list(reversed(a)))
+    assert same.delta.model_dump() == {"value": 0.0, "low": 0.0, "high": 0.0}
+    assert same.mcnemar.pvalue == 1.0
+
+    # Several samples per question: the change keeps its interval, but McNemar's test,
+    # which needs independent pairs, has no p-value.
+    twice_a = [*a, *(score.model_copy(update={"sample_idx": 1}) for score in a)]
+    twice_b = [*b, *(score.model_copy(update={"sample_idx": 1}) for score in b)]
+    sampled = compare(twice_a, twice_b)
+    assert (sampled.n, sampled.questions, sampled.mcnemar.only_b) == (120, 60, 6)
+    assert sampled.mcnemar.pvalue is None
+    assert sampled.delta == result.delta
+
+
+@pytest.mark.phase(2)
+def test_compare_refuses_mismatched_samples() -> None:
+    a = [_score(q, fast=True) for q in range(5)]
+    b = [_score(q, fast=True) for q in range(1, 7)]
+    with pytest.raises(
+        ValueError,
+        match=r"1 only in run a \(spider-dev-00000 sample 0\); 2 only in run b "
+        r"\(spider-dev-00005 sample 0, spider-dev-00006 sample 0\)",
+    ):
+        compare(a, b)
+    # The same questions with other samples don't pair either.
+    with pytest.raises(ValueError, match="5 only in run a"):
+        compare(a, [score.model_copy(update={"sample_idx": 1}) for score in a])
+    with pytest.raises(ValueError, match="spider-dev-00001 sample 0 is scored twice"):
+        compare(a, [*a, a[1]])
+
+
+@pytest.mark.phase(2)
+def test_official_ex_counts_when_every_score_has_it() -> None:
+    a = [_score(q, fast=q == 0, official=q != 0) for q in range(4)]
+    b = [_score(q, fast=True, official=True) for q in range(4)]
+    assert ex_metric(a) == "ex_official"
+    assert compare(a, b).ex_a == 3 / 4
+
+    # Without a verdict for every score, of either run, fast EX counts instead.
+    b[2] = b[2].model_copy(update={"ex_official": None})
+    assert ex_metric(b) == "ex_fast"
+    result = compare(a, b)
+    assert (result.metric, result.ex_a) == ("ex_fast", 1 / 4)
 
 
 @pytest.mark.phase(2)
