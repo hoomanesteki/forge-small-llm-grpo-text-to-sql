@@ -261,7 +261,7 @@ class SqliteExecutor:
         max_rows: int = DEFAULT_MAX_ROWS,
     ) -> ExecResult:
         """Run one statement; a missing database raises ``DataNotFound``."""
-        _check_limits(timeout_ms, max_rows)
+        check_run_args(timeout_ms, max_rows)
         conn = self._connection(db_id)
         start = time.perf_counter()
         statements = statement_count(sql)
@@ -349,7 +349,7 @@ class SqliteExecutor:
         script again in each worker, so a script must call this under
         ``if __name__ == "__main__":``.
         """
-        _check_limits(timeout_ms, max_rows)
+        check_run_args(timeout_ms, max_rows)
         if workers < 1:
             raise ValueError(f"workers must be at least 1, got {workers}")
         if workers == 1:
@@ -421,7 +421,8 @@ def _fetch(cursor: sqlite3.Cursor, width: int, limit: int) -> list[tuple[Any, ..
     return rows
 
 
-def _check_limits(timeout_ms: int, max_rows: int) -> None:
+def check_run_args(timeout_ms: int, max_rows: int) -> None:
+    """Raise ``ValueError`` for a timeout or row cap that ``run`` can't honor."""
     if timeout_ms <= 0:
         raise ValueError(f"timeout_ms must be positive, got {timeout_ms}")
     if max_rows < 0:
