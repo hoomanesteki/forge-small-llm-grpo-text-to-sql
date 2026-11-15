@@ -123,6 +123,18 @@ def test_writes_denied(
         "BEGIN",
         "SAVEPOINT s",
         "SELECT load_extension('evil')",
+        # SQLite resolves names before it asks the authorizer, so these fail on the
+        # missing name first; they are still writes.
+        "DELETE FROM forge_missing",
+        "INSERT INTO forge_missing VALUES (1)",
+        "UPDATE head SET forge_missing = 1",
+        "ALTER TABLE head DROP COLUMN forge_missing",
+        "DROP INDEX forge_missing",
+        "WITH s AS (SELECT 1) DELETE FROM forge_missing",
+        "DELETE FROM head WHERE name = 'unclosed",
+        # Statements that read but are not queries.
+        "EXPLAIN SELECT * FROM head",
+        "EXPLAIN QUERY PLAN SELECT * FROM head",
     ]
 
     for statement in statements:

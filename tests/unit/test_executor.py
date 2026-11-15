@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from forge.sql.executor import SqliteExecutor, classify_error, statement_count
+from forge.sql.executor import (
+    SqliteExecutor,
+    classify_error,
+    statement_count,
+    statement_keyword,
+    strip_leading,
+)
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "forge"
 
@@ -44,6 +50,18 @@ STATEMENT_COUNTS = {
     "SELECT 1;\nDROP TABLE t;": 2,
     "SELECT 1; x": 2,
     "SELECT 1; SELECT 2; SELECT 3": 3,
+    # SQLite skips a vertical tab only inside a run of whitespace that starts with one of
+    # the other five, and the check after the first statement never skips it.
+    " \v": 0,
+    "\t\v\v\nSELECT 1": 1,
+    " \v/* x */;SELECT 1;": 1,
+    "; \vSELECT 1": 1,
+    "SELECT 1 \v": 1,
+    "SELECT 1 -- c\n\v;": 1,
+    "\v": 1,
+    "SELECT 1;\v": 2,
+    "SELECT 1; \v": 2,
+    "SELECT 1;\n\v": 2,
 }
 
 
@@ -68,6 +86,66 @@ def test_statement_count_agrees_with_sqlite3() -> None:
             except sqlite3.OperationalError:
                 refused = False  # unclosed quotes and unknown names: a single bad statement
             assert refused == (count > 1), sql
+
+
+# The keyword that decides what a statement does: None when the first word is no statement
+# keyword, which SQLite then reports as a syntax error.
+STATEMENT_KEYWORDS: dict[str, str | None] = {
+    "SELECT 1": "SELECT",
+    "  select 1": "SELECT",
+    "SELECT*FROM t": "SELECT",
+    ";; /* c */ -- d\n VALUES (1)": "VALUES",
+    "WITH s AS (SELECT 1) SELECT * FROM s": "SELECT",
+    "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) SELECT x FROM r": "SELECT",
+    'WITH "delete" AS (SELECT 1) SELECT 2': "SELECT",
+    "WITH s AS (SELECT 1) VALUES (2)": "VALUES",
+    "with s(a, b) as not materialized (select 1, 2) delete from t": "DELETE",
+    "WITH s AS (SELECT 1), u AS (SELECT 2) INSERT INTO t SELECT * FROM u": "INSERT",
+    "WITH s AS (SELECT 1)UPDATE t SET a = 1": "UPDATE",
+    "WITH s AS (SELECT (1)) REPLACE INTO t VALUES (1)": "REPLACE",
+    "DELETE FROM nowhere": "DELETE",
+    "Drop Table t": "DROP",
+    "ALTER TABLE t DROP COLUMN nowhere": "ALTER",
+    "ATTACH DATABASE CASE WHEN 1 > = 1 THEN 'x' END AS e": "ATTACH",
+    "explain select 1": "EXPLAIN",
+    "PRAGMA user_version": "PRAGMA",
+    "VACUUM INTO 'x'": "VACUUM",
+    "END": "END",
+    "SELEC * FROM t": None,
+    "SELECT1": None,
+    "DISTINCT DELETE FROM t": None,
+    "(SELECT 1)": None,
+    "'SELECT'": None,
+    '"DELETE" FROM t': None,
+    "éSELECT 1": None,
+    "\x00DROP TABLE t": None,
+    "\vDROP TABLE t": None,
+    "WITH s AS (SELECT 1)": None,
+    "": None,
+    "-- DELETE FROM t": None,
+}
+
+
+@pytest.mark.phase(1)
+@pytest.mark.parametrize(("sql", "keyword"), STATEMENT_KEYWORDS.items())
+def test_statement_keyword(sql: str, keyword: str | None) -> None:
+    assert statement_keyword(sql) == keyword
+
+
+@pytest.mark.phase(1)
+def test_strip_leading() -> None:
+    # What SQLite skips before the first statement, and nothing else.
+    cases = {
+        "SELECT 1": "SELECT 1",
+        "; SELECT 1;": "SELECT 1;",
+        " ;\n-- note\n/* c */ ;  SELECT 1 -- done": "SELECT 1 -- done",
+        " \v; SELECT 1": "SELECT 1",
+        "\vSELECT 1": "\vSELECT 1",
+        "  ; ": "",
+        "": "",
+    }
+    for sql, stripped in cases.items():
+        assert strip_leading(sql) == stripped, sql
 
 
 @pytest.mark.phase(1)
