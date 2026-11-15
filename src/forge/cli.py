@@ -350,7 +350,11 @@ def eval_run(
         str | None, typer.Option(help="LoRA adapter to load on the model, Hub id or directory.")
     ] = None,
     backend: Annotated[
-        BackendName, typer.Option(help="hf runs transformers; fake answers without a model.")
+        BackendName,
+        typer.Option(
+            help="hf runs transformers; vllm runs vLLM on a kernel job's GPU (forge kaggle run); "
+            "fake answers without a model."
+        ),
     ] = "hf",
     device: Annotated[
         DeviceName,

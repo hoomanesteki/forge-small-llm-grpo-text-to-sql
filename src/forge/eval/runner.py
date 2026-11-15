@@ -81,6 +81,8 @@ log = logging.getLogger(__name__)
 
 BATCH_SIZE = 32
 WORKERS = min(4, os.cpu_count() or 1)
+# The backends that load a model, which a run builds from its config unless given one.
+MODEL_BACKENDS = ("hf", "vllm")
 
 
 @dataclass(frozen=True)
@@ -263,9 +265,9 @@ def _evaluate(
 ) -> tuple[int, RunFiles, float, bool]:
     """Score the run's pending questions: how many it asks, its files, the seconds spent
     generating, and whether the deadline stopped it."""
-    if backend is None and config.backend == "hf":
+    if backend is None and config.backend in MODEL_BACKENDS:
         # Loaded before dev, so a model that fails to load spends no look at dev.
-        backend, count_tokens = _hf_backend(config)
+        backend, count_tokens = model_backend(config)
     loaded = _load_split(config, manifest.run_id, root)
     kept = [e for e in loaded if e.id not in FAILING_GOLD_IDS]
     # By id, train_others would come first, and its gold results are all empty, 0 or NULL.
@@ -337,12 +339,21 @@ def _evaluate(
     return len(chosen), files, timed.seconds, stopped
 
 
-def _hf_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
-    # Imported here: torch and transformers take seconds to load, and only this needs them.
-    from forge.infer.hf_backend import HfBackend
+def model_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
+    """The backend of ``config``, one in ``MODEL_BACKENDS``, with its model loaded, and the
+    counter that measures prompts with that model's tokenizer."""
+    # Imported here: torch, transformers and vLLM take seconds to load, and only this needs them.
+    if config.backend == "hf":
+        from forge.infer.hf_backend import HfBackend
 
-    hf = HfBackend(config.model, adapter_ref=config.adapter, device=config.device)
-    return hf, chat_token_counter(hf.tokenizer)
+        hf = HfBackend(config.model, adapter_ref=config.adapter, device=config.device)
+        return hf, chat_token_counter(hf.tokenizer)
+    if config.backend == "vllm":
+        from forge.infer.vllm_backend import VllmBackend
+
+        vllm = VllmBackend(config.model, adapter_ref=config.adapter)
+        return vllm, chat_token_counter(vllm.tokenizer)
+    raise ValueError(f"backend {config.backend} loads no model of its own")
 
 
 def _schemas(examples: Sequence[Example], root: Path) -> dict[str, Columns]:

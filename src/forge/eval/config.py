@@ -6,10 +6,13 @@ written. ``manifest_config`` is what a run's manifest records and hashes: every 
 that can change a score, the sandbox and official-EX bounds among them (ADR-0008), so a
 resumed run has to match it exactly. That includes the device, since greedy decoding on
 another device can pick another token where two are nearly tied; the manifest's platform
-follows it (ADR-0016). ``read_config_file`` reads the options a file in ``configs/eval/``
-sets, which ``forge eval run --config`` takes as its defaults. A file may also hold an
-``ops`` section saying how a job is run rather than what it computes, such as the GPU
-hours ``forge kaggle run`` budgets for it; ``read_config_sections`` returns it apart.
+follows it (ADR-0016). The hf backend runs on the laptop, and vllm only in a kernel job,
+whose host is the platform; its device stays the default, as for the fake backend, since
+the option says where hf runs. ``read_config_file`` reads the options a file in
+``configs/eval/`` sets, which ``forge eval run --config`` takes as its defaults. A file may
+also hold an ``ops`` section saying how a job is run rather than what it computes, such as
+the GPU hours ``forge kaggle run`` budgets for it; ``read_config_sections`` returns it
+apart.
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ HOSTS: tuple[Host, ...] = get_args(Host)
 # always with SELECT 1. Tests build other fakes with FakeBackend(fn).
 FAKE_MODELS = ("gold", "select-1")
 # Backends that later stories build, with the story that brings each.
-LATER_BACKENDS: Mapping[str, str] = {"vllm": "FG-306", "llamacpp": "FG-702"}
+LATER_BACKENDS: Mapping[str, str] = {"llamacpp": "FG-702"}
 
 PRED_TIMEOUT_MS = DEFAULT_TIMEOUT_MS
 # Spider's gold queries run in milliseconds, so 10 s is ample for an item, where the
@@ -197,6 +200,12 @@ def check_config(config: EvalConfig) -> None:
             raise ValueError(f"backend hf runs on the CPU or MPS; a job on {config.host} uses vllm")
     elif config.allow_over_budget:
         raise ValueError("allow_over_budget is for a kernel job: only those spend GPU budget")
+    elif config.backend == "vllm":
+        # On the laptop the manifest would call a GPU run local-cpu (ADR-0016).
+        raise ValueError(
+            "backend vllm runs on a CUDA GPU, which Forge uses in kernel jobs only: run it "
+            "with forge kaggle run --job eval"
+        )
     check_version(config.prompt_version)
     if config.limit is not None and config.limit < 1:
         raise ValueError(f"limit must be at least 1, got {config.limit}")

@@ -17,7 +17,9 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
 - secrets: ``HF_TOKEN`` and ``WANDB_API_KEY`` from Kaggle Secrets (or Colab's) when they
   are attached. No value is ever printed or written, and the job goes on without them.
 - preflight: the job on ``PREFLIGHT_EXAMPLES`` examples through the same path, in a run
-  of its own under ``preflight/``, so a broken job fails in minutes.
+  of its own under ``preflight/``, so a broken job fails in minutes. The job then runs on
+  the model the preflight loaded: a vLLM engine holds most of the GPU's memory while it
+  lives, so a second one might not fit beside it, and loading once saves GPU time.
 - job: the job itself, its files in ``<work>/runs/<run_id>/``. On a resume, the earlier
   attempt's files come from its kernel's output, mounted under the input folder.
 - upload: that folder to the Hub run store (``forge.ops.hub``, which tries again on
@@ -88,6 +90,8 @@ class Kernel:
     secrets: list[str] = field(default_factory=list)  # values, only to keep them out of text
     wheel: Path | None = None
     requirements: Path | None = None
+    # The eval job's model backend and token counter, loaded once for the preflight and the job.
+    model: tuple[Any, Any] | None = None
 
     @property
     def work(self) -> Path:
@@ -283,10 +287,11 @@ def _restore(kernel: Kernel) -> None:
 
 
 def eval_job(kernel: Kernel, preflight: bool) -> str:
-    """``forge eval run`` with the job's options, as the runner runs it on a laptop."""
-    from forge.eval.config import EvalConfig
+    """``forge eval run`` with the job's options, as the runner runs it on a laptop, on the
+    model the kernel loaded for an earlier run, if any."""
+    from forge.eval.config import EvalConfig, check_config
     from forge.eval.report import write_run_report
-    from forge.eval.runner import run_eval
+    from forge.eval.runner import MODEL_BACKENDS, model_backend, run_eval
 
     options = dict(kernel.args.options)
     runs_root = kernel.work / ("preflight" if preflight else "runs")
@@ -296,7 +301,17 @@ def eval_job(kernel: Kernel, preflight: bool) -> str:
     else:
         options["run_id"] = kernel.args.run_id
     config = EvalConfig(**options, host=kernel.args.host)
-    run = run_eval(config, runs_root=runs_root, progress=_progress)
+    if config.backend in MODEL_BACKENDS and kernel.model is None:
+        check_config(config)  # before a model loads for options no run takes
+        kernel.model = model_backend(config)
+    backend, count_tokens = kernel.model or (None, None)
+    run = run_eval(
+        config,
+        runs_root=runs_root,
+        progress=_progress,
+        backend=backend,
+        count_tokens=count_tokens,
+    )
     if not preflight:
         write_run_report(kernel.args.run_id, runs_root=runs_root)
     return run.manifest.status

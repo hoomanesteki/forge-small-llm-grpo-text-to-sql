@@ -45,10 +45,10 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 |---|---|---|---|---|---|---|
 | FG-301 | Spike: Kaggle, Unsloth and vLLM on a T4 | 3 | blocked: needs Kaggle account (phone verified) and API token |  |  | Built on CPU: the kernel metadata template and `check_kernel_metadata`, the self-contained spike `kaggle/spike/throughput.py` (env, secrets, downloads, installs, vLLM fp16 and GRPO benches, session-limit probe) and its bundler, candidate pins in `kaggle/requirements-gpu.txt`, `docs/spikes/kaggle-gpu.md` (research with sources; nothing measured), ADR-0005, ADR-0006 (proposed). Pending: the GPU session, its ledger row and the section 3.8 budget update (`docs/runs/pending.yaml`) |
 | FG-302 | Code and data packaging as Kaggle datasets | 3 | blocked: the real publish needs a Kaggle account, an API token and `FORGE_KAGGLE_USER` |  |  | Built and tested with the CLI mocked: `KaggleClient` runs kaggle as argument lists, `forge kaggle publish-code` (wheel at a clean HEAD, pinned `requirements-gpu.txt`, `GIT_SHA`; `version -m <sha> -r zip`, or `create` the first time) and `publish-data` (the 170 verified Spider files and `spider.sha256` as `<owner>/forge-spider`, CC BY-SA 4.0 attribution and citation, uploaded once). Both private, never `-u`. Pending: one real publish of each, output for the PR (`docs/runs/pending.yaml`). No `publish-wheels`: FG-301 hasn't measured install times |
-| FG-303 | Kaggle job runner CLI | 5 | blocked: the real 50-question eval job needs a phone-verified Kaggle account with an API token and `FORGE_KAGGLE_USER`, both datasets published, and the vllm backend (FG-306) |  |  | Built and tested with the kaggle CLI mocked: `forge kaggle run` (smoke marker and clean tree, config checked as the kernel will, code dataset pinned by version with HEAD's `GIT_SHA` or published, ledger and `kaggle quota` budget with `--allow-over-budget` in the eval run's config, confirm, T4 push with a timeout of the estimate and half again, `runs/<run_id>/kernels.json`, `--resume`, `--job spike`, `--emit-notebook`), `status`, `logs`, `wait` and `output`; `kaggle/entry.py` (env, code, install, data, secrets, preflight, job, upload; `status.json` always); `ops` section in eval configs; `code_sha` from `FORGE_CODE_SHA` outside a checkout; Python 3.13 in CI. Pending: the real job (`docs/runs/pending.yaml`) |
+| FG-303 | Kaggle job runner CLI | 5 | blocked: the real 50-question eval job needs a phone-verified Kaggle account with an API token and `FORGE_KAGGLE_USER`, and both datasets published |  |  | Built and tested with the kaggle CLI mocked: `forge kaggle run` (smoke marker and clean tree, config checked as the kernel will, code dataset pinned by version with HEAD's `GIT_SHA` or published, ledger and `kaggle quota` budget with `--allow-over-budget` in the eval run's config, confirm, T4 push with a timeout of the estimate and half again, `runs/<run_id>/kernels.json`, `--resume`, `--job spike`, `--emit-notebook`), `status`, `logs`, `wait` and `output`; `kaggle/entry.py` (env, code, install, data, secrets, preflight, job, upload; `status.json` always); `ops` section in eval configs; `code_sha` from `FORGE_CODE_SHA` outside a checkout; Python 3.13 in CI. Pending: the real job (`docs/runs/pending.yaml`) |
 | FG-304 | Hub run store and resume | 5 | done |  |  | `forge.ops.hub`: `RunStore` (plan 3.5's methods plus `put_folder`, `runs` and `prune_checkpoints`), `LocalRunStore` and `HubRunStore` on the private model repo through huggingface_hub 2.4 (`upload_file`, `upload_folder`, `list_repo_files`, `hf_hub_download`, `snapshot_download`, `delete_files`), each call tried 3 more times, 2, 4 and 8 s apart, on network errors; `latest_checkpoint` by step number; retention keeps the latest 2 `step-NNNNNN` and `best/`; `forge runs list|show|pull|push`, `pull --store kaggle` being `forge kaggle output`; `forge eval run --store hub` fetches an earlier attempt to resume and stores the run when it ends; the kernel's upload stage goes through the store. Tested with the Hub client faked; no real Hub call yet, as the account doesn't exist (FG-303's pending job makes the first) |
 | FG-305 | Time guard and automatic ledger rows | 3 | done |  |  | `forge.ops.timeguard.Deadline` times steps on a monotonic clock and stops before one that might pass the deadline; `TimeGuardCallback` saves, stops, pushes `checkpoints/step-NNNNNN`, marks the stored manifest `stopped_time_guard` and prunes (tiny model on CPU, fake clock); `run_eval(deadline=)` stops between batches and resumes; manifests name their GPU (CUDA name, Apple chip) and count wall-clock GPU hours; `forge runs pull` adds one ledger row a run id under the append's lock; I7 on `docs/runs`, `runs/` and the ledger |
-| FG-306 | vLLM inference backend | 3 | todo |  |  |  |
+| FG-306 | vLLM inference backend | 3 | done |  |  | `forge.infer.vllm_backend.VllmBackend`: fp16 (`dtype="half"`), `max_model_len` 2048, 85% of GPU memory, LoRA (rank up to 64) only with an adapter, by one `LoRARequest` (a folder, or a Hub snapshot at its revision), 4-bit bitsandbytes allowed and nothing else; Qwen3 templates through `LLM.chat` with thinking off, others through `render_chat` as token ids; `sampling_kwargs` maps `GenParams` with a seed per example id; vLLM imported only when a backend is made. `forge eval run --backend vllm` in kernel jobs only; the runner's `model_backend` builds hf and vllm, and the kernel loads one model for its preflight and job. `kaggle/requirements-gpu.txt` is now vllm 0.33.0, torch 2.14.0, transformers 5.20.2 and the lock's trl, peft and the rest (the spike's `trl-vllm` stack). Tested with vLLM faked; FG-307 proves it on a T4 |
 | FG-307 | GPU baselines and model choice | 3 | todo |  |  |  |
 
 ## Phase 4: Supervised fine-tuning (v0.4.0)
@@ -728,3 +728,30 @@ Work discovered along the way that is not a plan story.
   `ended_at` (FG-305).
 - The FG-291 pilot's manifest predates GPU naming (`gpu` null, `gpu_hours` 0); its ledger
   row holds the chip and hours, and the committed manifest stays as made (FG-305).
+- vllm 0.33.0 pins torch 2.14.0 and needs transformers below 5.21, so GPU jobs run
+  transformers 5.20.2 and torch 2.14.0 while CI runs 5.23.0 and 2.15.0. The transformers code
+  Forge calls in a kernel was read in the 5.20.2 source: `apply_chat_template` differs only in
+  `sanitize_control_tokens` and in dropping `None` message keys, neither of which Forge uses,
+  and the trainer callback module is the same file. CI never runs 5.20.2, so a later story
+  that calls more of transformers in a kernel has to check it the same way (FG-306).
+- Installing the GPU list replaces the image's torch 2.11.0 with 2.14.0 and its CUDA 13
+  wheels, several GB a job; FG-301's install stage shows how long it takes, and whether
+  `publish-wheels` pays (FG-306).
+- When a call passes `SamplingParams`, vLLM takes only the end token ids from a checkpoint's
+  `generation_config.json`, so no shipped temperature or top-k reaches a reply; FG-201's
+  question is answered (FG-306).
+- vLLM seeds a request's n samples with its seed, the seed plus 1 and so on, so one seed for
+  every prompt would give every question's sample i the same draws. The backend seeds each
+  prompt from the run's seed and its example id. Its random stream is vLLM's, so the same
+  seed draws other samples on hf and vllm (FG-306).
+- A vllm run's manifest config keeps `device: cpu`, the option's default, as a fake run's
+  does: the option says where hf runs, and the platform and `gpu` say where a kernel job
+  ran. Off a kernel host the backend is refused, as a GPU run there would be `local-cpu`
+  (FG-306).
+- `VllmBackend` takes `quantization="bitsandbytes"`, but no eval option sets it yet, so
+  FG-307's 4-bit reference model needs one, in the manifest config since it changes a score
+  (FG-306).
+- The runner sends vLLM 32 questions a call, and a call waits for its longest reply, so the
+  T4 idles at the end of each batch. A retry prompt near 1,536 tokens after a 256-token first
+  reply can also leave the second reply less than 256 tokens before `max_model_len` 2048.
+  FG-307 can measure both and raise the batch size or the length (FG-306).
