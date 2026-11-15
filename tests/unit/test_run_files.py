@@ -65,6 +65,15 @@ def _score(example_id: str, sample_idx: int = 0) -> Score:
     )
 
 
+def _first_try(example_id: str) -> Generation:
+    """A first reply whose query failed to run, so the sample was asked again."""
+    return _generation(example_id).model_copy(update={"text": "SELEC 1", "sql": "SELEC 1"})
+
+
+def _retried(example_id: str) -> Score:
+    return _score(example_id).model_copy(update={"attempts": 2})
+
+
 def _lines(*items: Generation | Score) -> str:
     return "".join(item.model_dump_json() + "\n" for item in items)
 
@@ -116,6 +125,73 @@ def test_outputs_that_contradict_each_other_are_refused(
         RunFiles(paths, EXPECTED)
     # Nothing was rewritten over the evidence.
     assert (paths.generations.read_text(), paths.scores.read_text()) == (generations, scores)
+
+
+@pytest.mark.phase(2)
+def test_first_tries_recover_from_a_kill_mid_write(tmp_path: Path) -> None:
+    paths = RunPaths(tmp_path / "run", "val")
+    files = RunFiles(paths, EXPECTED)
+    files.append(
+        [_generation("q0"), _generation("q1")], [_score("q0"), _retried("q1")], [_first_try("q1")]
+    )
+    assert paths.outputs()["first_tries"] == "eval/val-first-tries.jsonl"
+
+    # Killed during the next batch: q2's first try and generation were stored, no score.
+    with paths.first_tries.open("a") as handle:
+        handle.write(_lines(_first_try("q2")))
+    with paths.generations.open("a") as handle:
+        handle.write(_lines(_generation("q2")))
+
+    reopened = RunFiles(paths, EXPECTED)
+    assert reopened.done == {("q0", 0), ("q1", 0)}
+    assert reopened.first_tries == {("q1", 0): _first_try("q1")}
+    assert paths.first_tries.read_text() == _lines(_first_try("q1"))
+    assert paths.generations.read_text() == _lines(_generation("q0"), _generation("q1"))
+
+    # A batch's first tries must be its retried scores' ones, or nothing is written.
+    for score, first_tries in (
+        (_retried("q2"), []),
+        (_retried("q2"), [_first_try("q3")]),
+        (_score("q2"), [_first_try("q2")]),
+    ):
+        with pytest.raises(ValueError, match="must be its retried scores' ones"):
+            reopened.append([_generation("q2")], [score], first_tries)
+    assert paths.first_tries.read_text() == _lines(_first_try("q1"))
+    assert paths.scores.read_text() == _lines(_score("q0"), _retried("q1"))
+    reopened.append([_generation("q2")], [_retried("q2")], [_first_try("q2")])
+    assert list(RunFiles(paths, EXPECTED).first_tries) == [("q1", 0), ("q2", 0)]
+
+    # A run that retries nothing has no first tries file.
+    plain = RunPaths(tmp_path / "plain", "val")
+    RunFiles(plain, EXPECTED).append([_generation("q0")], [_score("q0")])
+    assert not plain.first_tries.exists() and "first_tries" not in plain.outputs()
+
+
+@pytest.mark.phase(2)
+@pytest.mark.parametrize(
+    ("scores", "first_tries", "message"),
+    [
+        ([_score("q0")], [_first_try("q0")], "has q0 sample 0, whose score wasn't retried"),
+        ([_retried("q0")], [], "has q0 sample 0 retried, but .* lacks its first try"),
+        ([_retried("q0")], [_first_try("q0")] * 2, "has q0 sample 0 twice"),
+    ],
+    ids=["not-retried", "missing", "twice"],
+)
+def test_first_tries_that_contradict_the_scores_are_refused(
+    tmp_path: Path, scores: list[Score], first_tries: list[Generation], message: str
+) -> None:
+    paths = RunPaths(tmp_path / "run", "val")
+    paths.scores.parent.mkdir(parents=True)
+    stored = {
+        paths.generations: _lines(*(_generation(s.example_id) for s in scores)),
+        paths.scores: _lines(*scores),
+        paths.first_tries: _lines(*first_tries),
+    }
+    for path, text in stored.items():
+        path.write_text(text)
+    with pytest.raises(RunCorrupt, match=message):
+        RunFiles(paths, EXPECTED)
+    assert {path: path.read_text() for path in stored} == stored
 
 
 @pytest.mark.phase(2)
@@ -201,13 +277,15 @@ def test_hold_keeps_a_second_process_off_the_run(tmp_path: Path) -> None:
         pass
 
 
-def _finished(tmp_path: Path) -> RunPaths:
-    """A run that finished with two questions scored, in a folder named for its id."""
+def _finished(tmp_path: Path, *, retried: bool = False) -> RunPaths:
+    """A run that finished with two questions scored, in a folder named for its id; with
+    ``retried``, q1 was asked again and its first try is stored."""
     manifest = _manifest(config_hash=config_hash({"split": "val", "limit": 5}))
     paths = RunPaths(tmp_path / manifest.run_id, "val")
     started = start(paths, manifest)
+    second = (_retried("q1"), [_first_try("q1")]) if retried else (_score("q1"), [])
     RunFiles(paths, EXPECTED).append(
-        [_generation("q0"), _generation("q1")], [_score("q0"), _score("q1")]
+        [_generation("q0"), _generation("q1")], [_score("q0"), second[0]], second[1]
     )
     finish(paths, started, None)
     return paths
@@ -226,6 +304,12 @@ def test_read_run_reads_a_finished_run_as_stored(tmp_path: Path) -> None:
     assert stored.manifest.status == "finished" and stored.paths == paths
     assert stored.scores == (_score("q0"), _score("q1"))
     assert dict(stored.generations) == {("q0", 0): _generation("q0"), ("q1", 0): _generation("q1")}
+    assert dict(stored.first_tries) == {}
+
+    retried = read_run(_finished(tmp_path / "retried", retried=True).root)
+    assert retried.scores == (_score("q0"), _retried("q1"))
+    assert dict(retried.first_tries) == {("q1", 0): _first_try("q1")}
+    assert retried.manifest.outputs["first_tries"] == "eval/val-first-tries.jsonl"
 
     moved = paths.root.rename(tmp_path / "another-name")
     with pytest.raises(RunCorrupt, match="is the manifest of run 2026-11-15-gold-eval-abc1234"):
@@ -292,3 +376,36 @@ def test_read_run_refuses_a_run_reports_cant_trust(
         read_run(paths.root)
     # Reading changed nothing.
     assert {path: path.read_bytes() for path in paths.root.rglob("*") if path.is_file()} == files
+
+
+@pytest.mark.phase(2)
+@pytest.mark.parametrize(
+    ("spoil", "message"),
+    [
+        (lambda p: p.first_tries.unlink(), "q1 sample 0 retried, but .* lacks its first try"),
+        (
+            lambda p: p.first_tries.write_text(
+                p.first_tries.read_text() + _lines(_first_try("q2"))
+            ),
+            "has q2 sample 0, which has no score",
+        ),
+        (
+            lambda p: p.first_tries.write_text(
+                p.first_tries.read_text() + _lines(_first_try("q0"))
+            ),
+            "has q0 sample 0, whose score wasn't retried",
+        ),
+        (
+            lambda p: p.first_tries.write_bytes(p.first_tries.read_bytes()[:-1]),
+            "first-tries.jsonl ends in a line cut short",
+        ),
+    ],
+    ids=["missing", "unscored", "not-retried", "cut-short"],
+)
+def test_read_run_pairs_first_tries_with_retried_scores(
+    tmp_path: Path, spoil: Callable[[RunPaths], object], message: str
+) -> None:
+    paths = _finished(tmp_path, retried=True)
+    spoil(paths)
+    with pytest.raises(RunCorrupt, match=message):
+        read_run(paths.root)

@@ -444,6 +444,7 @@ runs/<run_id>/
   checkpoints/step-000050/ # LoRA adapter + trainer state (latest 2 kept)
   eval/<split>-generations.jsonl
   eval/<split>-scores.jsonl
+  eval/<split>-first-tries.jsonl  # first replies of retried samples (--retry 1, ADR-0015)
   eval/<split>-report.md
 ```
 
