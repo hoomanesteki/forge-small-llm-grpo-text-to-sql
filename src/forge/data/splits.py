@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from forge.core.hashing import sha256_hex
 from forge.core.types import Example, Split
-from forge.data.spider import ROWLESS_DBS, load_raw
+from forge.data.spider import ROWLESS_DBS, DataNotFound, load_raw, resolve_data_dir
 from forge.ops.dev_usage import log_dev_use
 
 SPLITS: tuple[Split, ...] = get_args(Split)
@@ -121,22 +121,34 @@ def load_dev(*, reason: str, run_id: str, data_dir: Path | None = None) -> list[
     Each call is one of the project's six dev evaluations. It is logged with its reason
     in ``docs/dev-usage.md`` (``FORGE_DEV_USAGE`` overrides the path), and the seventh
     raises ``DevBudgetExceeded``. The data loads before the row is written, so a missing
-    download doesn't use up a look.
+    download, or data with no dev questions such as the fixture, doesn't use up a look.
     """
     if not reason or not reason.strip():
         raise ValueError("load_dev needs a reason: every dev evaluation is logged, six at most")
     dev = split_examples(load_raw(data_dir))["dev"]
+    if not dev:
+        raise DataNotFound(
+            f"no dev questions in {resolve_data_dir(data_dir)}; a dev evaluation needs the "
+            "full Spider download: run `forge data fetch`, or point FORGE_DATA_DIR at it"
+        )
     log_dev_use(run_id, reason)
     return dev
 
 
-def assert_train_only(examples: Iterable[Example]) -> None:
+def assert_train_only(examples: Sequence[Example]) -> None:
     """Raise ``SplitLeak`` unless every example is a train example from a train database.
 
     Training code calls this on what it is about to train on. The database check, against
     the committed manifests, also catches val and dev questions that never went through
-    the split, such as ``load_raw()``'s, which labels val's questions train.
+    the split, such as ``load_raw()``'s, which labels val's questions train. It takes a
+    sequence, such as a list: checking a one-shot iterator would use it up, and training
+    would then get nothing.
     """
+    if not isinstance(examples, Sequence):
+        raise TypeError(
+            "assert_train_only needs a sequence such as a list, not a "
+            f"{type(examples).__name__}: checking an iterator would use it up"
+        )
     held_out = _held_out_databases()
     leaks = [e.id for e in examples if e.split != "train" or e.db_id in held_out]
     if leaks:

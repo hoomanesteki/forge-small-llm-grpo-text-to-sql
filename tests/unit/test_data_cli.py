@@ -189,6 +189,28 @@ def test_prompt_stats_cli_on_the_fixture(
 
 
 @pytest.mark.phase(1)
+def test_prompt_stats_cli_on_dev_is_not_a_dev_use(
+    with_dev: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_DATA_DIR", str(with_dev))
+    monkeypatch.setattr(prompts, "load_tokenizer", lambda name: WordTokenizer())
+    args = ["data", "prompt-stats", "--tokenizer", "org/model", "--split", "dev"]
+
+    result = CliRunner().invoke(cli.app, args)
+
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert lines[:2] == [f"data: {with_dev}", cli.NOT_A_DEV_USE]
+    assert ["prompts", "10"] in _cells(result.stdout)
+    assert not dev_log.exists()
+
+    # Other splits need no such note.
+    val = CliRunner().invoke(cli.app, [*args[:-1], "val"])
+    assert val.exit_code == 0, val.output
+    assert cli.NOT_A_DEV_USE not in val.stdout
+
+
+@pytest.mark.phase(1)
 def test_prompt_stats_cli_errors(spider_mini: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def offline(name: str) -> WordTokenizer:
         raise OSError(f"We couldn't connect to 'https://huggingface.co' to load {name}")

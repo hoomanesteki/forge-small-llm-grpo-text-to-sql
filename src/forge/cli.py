@@ -63,6 +63,12 @@ PromptVersionName = Literal["p1", "p2"]
 # The agreement check mutates training-side gold queries only (plan FG-108).
 AgreementSplitName = Literal["train", "val"]
 
+# Printed by the commands that read dev without a model, so nobody logs them as dev uses
+# or holds back from running them.
+NOT_A_DEV_USE = (
+    "note: no model output on dev, so this is not one of the six dev evaluations (ADR-0004)"
+)
+
 
 @data_app.command("fetch")
 def data_fetch(
@@ -220,7 +226,7 @@ def data_prompt_stats(
 ) -> None:
     """Prompt token lengths, and what the overflow policy does past 1,536 tokens.
 
-    It reads questions and schemas only, so it is not a dev evaluation.
+    It reads questions and schemas only, so --split dev is not a dev evaluation.
     """
     from forge.data.prompts import (
         MAX_PROMPT_TOKENS,
@@ -248,6 +254,8 @@ def data_prompt_stats(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"data: {data_dir}")
+    if split == "dev":
+        typer.echo(NOT_A_DEV_USE)
     typer.echo(f"split {split}, prompt {prompt_version}, tokenizer {tokenizer}\n")
     typer.echo(render_prompt_stats(prompt_stats(fitted, max_tokens=MAX_PROMPT_TOKENS)))
 
@@ -299,7 +307,7 @@ def eval_gold(
 ) -> None:
     """Score each gold query against itself with both checkers; exit 1 unless both give 100%.
 
-    The known failing golds are skipped. It runs no model, so a dev check is not one of
+    The known failing golds are skipped. It runs no model, so --split dev is not one of
     the six dev evaluations.
     """
     from forge.data.spider import FAILING_GOLD_IDS, DataNotFound, load_raw, resolve_data_dir
@@ -323,6 +331,8 @@ def eval_gold(
     databases = len({example.db_id for example in kept})
     skipped = len(examples) - len(kept)
     typer.echo(f"data: {data_dir}")
+    if split == "dev":
+        typer.echo(NOT_A_DEV_USE)
     typer.echo(
         f"split {split}: {len(kept)} gold queries over {databases} "
         f"database{'' if databases == 1 else 's'}"
