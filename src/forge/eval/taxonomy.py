@@ -23,8 +23,10 @@ the two queries as sqlglot reads them, once each is in one form:
 - Names are case-insensitive, and a column is known by the table it reads, so ``T1.name``,
   ``aircraft.name`` and a bare ``name`` that only ``aircraft`` has in its scope are one
   column. That takes the database's columns, which the caller passes.
-- Aliases are dropped, and a select alias used in WHERE, GROUP BY, HAVING or ORDER BY
-  stands for the expression it names.
+- Aliases are dropped, those of derived tables and common table expressions too, and a
+  select alias used in WHERE, GROUP BY, HAVING or ORDER BY stands for the expression it
+  names. Where a table in scope also has a column by that name, the column wins in WHERE,
+  GROUP BY and HAVING, and the alias in a whole ORDER BY term, as SQLite reads them.
 - A double-quoted name that no table in its scope has is a string, as SQLite reads it,
   so Spider's ``"Boeing 737-800"`` is the value ``'Boeing 737-800'``.
 - Order doesn't count where it can't change the rows: the conditions that AND or OR
@@ -44,7 +46,8 @@ whose gold query sqlglot can't read, though sqlglot reads every Spider training 
 
 Known limits: a comma join with its condition in WHERE is not the same join as
 ``JOIN ... ON``, and both sides of a self-join resolve to one table, so a query that
-swaps them can come out ``other``.
+swaps them can come out ``other``. So can one that swaps two derived tables, or common
+table expressions, that have columns of one name.
 """
 
 from __future__ import annotations
@@ -82,6 +85,9 @@ _Sources = Mapping[str, str | None]
 
 # What an aggregate call in a select list shows as when the projection is compared.
 _AGGREGATE = "AGG"
+# Stands in for the qualifier of a derived table's or a CTE's column until select aliases
+# are expanded, then goes. No table name can be it.
+_DERIVED = "(derived)"
 
 
 class _Shape(NamedTuple):
@@ -149,6 +155,7 @@ def _canonical(sql: str, known: _Known) -> exp.Query | None:
     query = statements[0]
     _resolve_names(query, known)
     _expand_alias_refs(query)
+    _drop_derived_qualifiers(query)
     _normalize(query)
     return query
 
@@ -209,8 +216,10 @@ def _signature(query: exp.Query, masked: bool) -> str:
 
 
 def _resolve_names(query: exp.Query, known: _Known) -> None:
-    """Qualify each column with the table it reads, and turn each double-quoted name that
-    no table in its scope has into the string SQLite reads it as."""
+    """Qualify each column with the table it reads, or with ``_DERIVED`` where a derived
+    table or a CTE's name qualifies it, leave a bare ORDER BY alias for the alias, and turn
+    each double-quoted name that no table in its scope has into the string SQLite reads it
+    as."""
     ctes = _cte_names(query)
     scopes: dict[int, _Sources] = {}
 
@@ -227,16 +236,30 @@ def _resolve_names(query: exp.Query, known: _Known) -> None:
         chain = [sources(scope) for scope in _outward(select)]
         if column.table:
             qualifier = column.table.lower()
-            table = next((found[qualifier] for found in chain if qualifier in found), None)
-            if table is not None:
-                column.set("table", exp.to_identifier(table))
+            scope = next((found for found in chain if qualifier in found), None)
+            if scope is not None:
+                column.set("table", exp.to_identifier(scope[qualifier] or _DERIVED))
             continue
         name = column.name.lower()
+        if _is_order_by_alias(column, select):
+            # _expand_alias_refs puts the expression the alias names in its place.
+            continue
         in_scope, owner = _lookup(name, chain, known)
         if owner is not None:
             column.set("table", exp.to_identifier(owner))
         elif not in_scope and _quoted(column) and name not in _aliases(select):
             column.replace(exp.Literal.string(column.name))
+
+
+def _is_order_by_alias(column: exp.Column, select: exp.Select) -> bool:
+    """Whether ``column`` is a whole ORDER BY term of ``select`` that names one of its
+    aliases, which SQLite reads as the alias before any column by that name."""
+    term = column.parent
+    return (
+        isinstance(term, exp.Ordered)
+        and term.parent is select.args.get("order")
+        and column.name.lower() in _aliases(select)
+    )
 
 
 def _lookup(name: str, chain: Sequence[_Sources], known: _Known) -> tuple[bool, str | None]:
@@ -274,6 +297,14 @@ def _expand_alias_refs(query: exp.Query) -> None:
                 name = column.name.lower()
                 if column.parent_select is select and not column.table and name in named:
                     column.replace(named[name].copy())
+
+
+def _drop_derived_qualifiers(query: exp.Query) -> None:
+    """Drop the name of a derived table or a CTE from the columns it qualifies, once no
+    select alias can be read for one of them."""
+    for column in list(query.find_all(exp.Column)):
+        if column.table == _DERIVED:
+            column.set("table", None)
 
 
 def _normalize(query: exp.Query) -> None:
