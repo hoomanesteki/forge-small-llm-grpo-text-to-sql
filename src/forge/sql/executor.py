@@ -4,11 +4,14 @@ Every connection to a Spider database is made by ``connect_readonly`` (CONTRIBUT
 rule 9). It is read-only and immutable, so SQLite never writes, locks or journals the
 file, and its authorizer is default-deny: only ``SQLITE_SELECT``, ``SQLITE_READ``,
 ``SQLITE_FUNCTION`` and ``SQLITE_RECURSIVE`` pass, so writes, DDL, ``ATTACH``, ``VACUUM``,
-``PRAGMA`` and transactions fail as they are prepared, before anything runs.
+``PRAGMA`` and transactions fail as they are prepared, before anything runs. Its
+``LIMITS`` keep each SQLite step cheap: no string or blob over 100 kB (Spider's largest
+value is 213 bytes), LIKE and GLOB patterns of at most 1,000 characters, SQL text of at
+most 100 kB, and no attached databases, which also stops ``VACUUM INTO``.
 
 ``SqliteExecutor.run`` adds the rest and never raises for bad SQL: one statement per
-call, and only a query; a deadline checked from a progress handler; and a row cap. Each
-failure comes back as an ``ExecResult`` with an ``ErrorKind``:
+call, and only a query; a deadline; a row cap; and a byte budget for the rows it keeps.
+Each failure comes back as an ``ExecResult`` with an ``ErrorKind``:
 
 - ``denied``: there was more than one statement, the statement is not a query, or the
   authorizer refused it. Statements are counted and classified here, before SQLite sees
@@ -18,41 +21,64 @@ failure comes back as an ``ExecResult`` with an ``ErrorKind``:
   when its keyword (``statement_keyword``) is ``SELECT`` or ``VALUES``; any other
   statement keyword is denied, even when SQLite would fail first on a missing name. One
   that returns no columns is denied too.
-- ``timeout``: the deadline passed while the query ran or its rows were fetched.
+- ``timeout``: the deadline passed while the query ran or its rows were fetched. A
+  progress handler checks it every ``PROGRESS_STEPS`` VM steps, and a watchdog thread
+  interrupts SQLite at the deadline, for steps so slow that few of them fit in the
+  timeout. SQLite only stops between rows, so the work inside one row (with these
+  limits, well under a second for any single call) can still run past it.
 - ``syntax``, ``no_such_table``, ``no_such_column``: from SQLite's error message.
 - ``empty_sql``: nothing but whitespace, comments and semicolons.
-- ``other``: any other error, such as an unknown function or a ``?`` placeholder.
+- ``other``: any other error, such as an unknown function, a ``?`` placeholder, a value
+  or SQL text over a limit, or rows whose values pass ``MAX_RESULT_BYTES``.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
-from types import TracebackType
-from typing import Protocol, Self
+from types import MappingProxyType, TracebackType
+from typing import Any, Protocol, Self
 
 from forge.core.types import ErrorKind, ExecResult
 from forge.data.spider import DATA_DIR_ENV, DataNotFound, db_path, resolve_data_dir
 
 DEFAULT_TIMEOUT_MS = 2000
 DEFAULT_MAX_ROWS = 10_000
-# SQLite VM instructions between deadline checks. 1,000 take microseconds, so a query
-# stops within a millisecond of its deadline, and checking costs next to nothing.
+# SQLite VM instructions between deadline checks. 1,000 ordinary ones take microseconds,
+# and checking costs next to nothing; the watchdog in run covers steps that are slow.
 PROGRESS_STEPS = 1000
 
 ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
 )
+# The cost of LIKE, instr or replace grows with the product of their inputs' lengths, so
+# the length limit bounds the slowest single call: about 0.2 s at 100 kB, while at 1 MB
+# one instr call takes seconds. Spider's largest value is 213 bytes and its largest
+# schema row 1,191; its longest LIKE pattern is 44 characters and its longest gold query
+# 577. With no attached database allowed, ATTACH and VACUUM INTO fail on any connection.
+MAX_VALUE_BYTES = 100_000
+LIMITS: Mapping[int, int] = MappingProxyType(
+    {
+        sqlite3.SQLITE_LIMIT_LENGTH: MAX_VALUE_BYTES,
+        sqlite3.SQLITE_LIMIT_LIKE_PATTERN_LENGTH: 1_000,
+        sqlite3.SQLITE_LIMIT_SQL_LENGTH: 100_000,
+        sqlite3.SQLITE_LIMIT_ATTACHED: 0,
+    }
+)
+# Text counts its characters, a blob its bytes and any other value 8.
+MAX_RESULT_BYTES = 64 * 2**20
 
 MULTIPLE_STATEMENTS = "more than one statement; only a single statement may run"
 NOT_A_QUERY = "not a query; only statements that return rows may run"
 NOT_A_QUERY_KEYWORD = "{keyword} is not a query; only SELECT and VALUES statements may run"
 EMPTY_SQL = "no SQL"
+RESULT_TOO_BIG = f"result too big: more than {MAX_RESULT_BYTES // 2**20} MiB of values"
 
 QUERY_KEYWORDS = frozenset({"SELECT", "VALUES"})
 # Every keyword a SQLite statement can start with.
@@ -129,6 +155,8 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
     # writes Spider files while they are in use.
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
     conn.set_authorizer(_authorize)
+    for limit, value in LIMITS.items():
+        conn.setlimit(limit, value)
     # A few Spider rows are not valid UTF-8; they read with replacement characters.
     conn.text_factory = _decode
     return conn
@@ -251,14 +279,13 @@ class SqliteExecutor:
             return ExecResult(ok=False, error=error, error_kind="denied", ms=_ms(start))
 
         deadline = start + timeout_ms / 1000
-        timed_out = False
-
-        def past_deadline() -> bool:
-            nonlocal timed_out
-            timed_out = time.perf_counter() >= deadline
-            return timed_out  # true aborts the statement with "interrupted"
-
-        conn.set_progress_handler(past_deadline, PROGRESS_STEPS)
+        # Both abort the statement with SQLITE_INTERRUPT. The progress handler runs every
+        # PROGRESS_STEPS steps, which slow steps can stretch far past the deadline, so the
+        # watchdog interrupts at the deadline itself. SQLite drops an interrupt that comes
+        # before the statement starts, and then the progress handler still stops it.
+        conn.set_progress_handler(lambda: time.perf_counter() >= deadline, PROGRESS_STEPS)
+        watchdog = threading.Timer(timeout_ms / 1000, conn.interrupt)
+        watchdog.start()
         cursor: sqlite3.Cursor | None = None
         try:
             cursor = conn.execute(sql)
@@ -266,11 +293,14 @@ class SqliteExecutor:
                 # SQLite runs DROP ... IF EXISTS on a missing object as a no-op without
                 # asking the authorizer; reported as ok, it would pass for an empty result.
                 return ExecResult(ok=False, error=NOT_A_QUERY, error_kind="denied", ms=_ms(start))
-            rows = cursor.fetchmany(max_rows + 1)
             columns = [column[0] for column in cursor.description]
+            rows = _fetch(cursor, len(columns), max_rows + 1)
+            if rows is None:
+                return ExecResult(ok=False, error=RESULT_TOO_BIG, error_kind="other", ms=_ms(start))
         except (sqlite3.Error, sqlite3.Warning) as exc:
-            # Python 3.11's sqlite3 raises Warning, not Error, for a second statement.
-            if timed_out:
+            # Python 3.11's sqlite3 raises Warning, not Error, for a second statement, and
+            # errors sqlite3 raises before calling SQLite carry no error code.
+            if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
                 return ExecResult(
                     ok=False,
                     error=f"timed out after {timeout_ms} ms",
@@ -285,6 +315,10 @@ class SqliteExecutor:
             # has no UTF-8 encoding.
             return ExecResult(ok=False, error=str(exc), error_kind="other", ms=_ms(start))
         finally:
+            # Joined, so a late interrupt can't land on the next query; one that already
+            # fired is cleared when SQLite starts the next statement.
+            watchdog.cancel()
+            watchdog.join()
             if cursor is not None:
                 cursor.close()
             conn.set_progress_handler(None, 0)
@@ -306,8 +340,9 @@ class SqliteExecutor:
     ) -> list[ExecResult]:
         """Run ``(db_id, sql)`` pairs across ``workers`` processes; results keep their order.
 
-        One worker runs them here, on this executor's connections. More start a process
-        pool with the spawn method on every platform, because forking a process that holds
+        Each item gets its own ``timeout_ms``, enforced by ``run`` wherever it runs. One
+        worker runs them here, on this executor's connections. More start a process pool
+        with the spawn method on every platform, because forking a process that holds
         SQLite connections (or CUDA, in a trainer) is unsafe. Each worker builds its own
         executor from the data directory, so only that path and the queries go to the
         workers, and plain ``ExecResult`` values come back. Spawn imports the calling
@@ -366,6 +401,24 @@ def _authorize(
 
 def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
+
+
+def _fetch(cursor: sqlite3.Cursor, width: int, limit: int) -> list[tuple[Any, ...]] | None:
+    """Up to ``limit`` rows of ``width`` values, or ``None`` once they pass the budget."""
+    # No value is longer than MAX_VALUE_BYTES, so a batch this size holds at most a quarter
+    # of the budget, and the memory held stays bounded however big the values are.
+    batch = max(1, MAX_RESULT_BYTES // (4 * width * MAX_VALUE_BYTES))
+    rows: list[tuple[Any, ...]] = []
+    size = 0
+    while len(rows) < limit:
+        chunk = cursor.fetchmany(min(batch, limit - len(rows)))
+        if not chunk:
+            break
+        size += sum(len(v) if isinstance(v, str | bytes) else 8 for row in chunk for v in row)
+        if size > MAX_RESULT_BYTES:
+            return None
+        rows.extend(chunk)
+    return rows
 
 
 def _check_limits(timeout_ms: int, max_rows: int) -> None:
