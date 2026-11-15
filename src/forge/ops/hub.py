@@ -520,3 +520,38 @@ def hub_store(env: Mapping[str, str] | None = None) -> HubRunStore:
     return HubRunStore(
         values.get("FORGE_RUN_STORE", DEFAULT_RUN_STORE), token=values.get("HF_TOKEN") or None
     )
+
+
+def open_store(name: str) -> RunStore:
+    """The store a command's ``--store`` names: ``hub``, or ``local`` for ``runs/``
+    (``FORGE_RUNS_DIR``)."""
+    from forge.ops.paths import runs_dir
+
+    if name == "hub":
+        return hub_store()
+    if name == "local":
+        return LocalRunStore(runs_dir())
+    raise ValueError(f"a run store is hub or local, not {name!r}")
+
+
+def describe(manifest: RunManifest, latest: str | None) -> list[str]:
+    """What ``forge runs show`` prints of a run: its manifest, and its latest checkpoint."""
+    ended = manifest.ended_at.isoformat() if manifest.ended_at else "not yet"
+    lines = [
+        f"run {manifest.run_id}: {manifest.kind}, {manifest.status}",
+        f"model {manifest.model_ref}"
+        + (f", adapter {manifest.adapter_ref}" if manifest.adapter_ref else ""),
+        f"platform {manifest.platform}"
+        + (f" on {manifest.gpu}" if manifest.gpu else "")
+        + f", {manifest.gpu_hours:.2f} GPU h, ${manifest.cost_usd:.2f}",
+        f"commit {manifest.git_sha}, seed {manifest.seed}",
+        f"config hash {manifest.config_hash}, data manifest hash {manifest.data_manifest_hash}",
+        f"started {manifest.started_at.isoformat()}, ended {ended}",
+    ]
+    if manifest.parent_run:
+        lines.append(f"parent run {manifest.parent_run}")
+    if manifest.outputs:
+        lines.append("outputs:")
+        lines += [f"  {name}: {path}" for name, path in sorted(manifest.outputs.items())]
+    lines.append(f"latest checkpoint: {latest or 'none'}")
+    return lines
