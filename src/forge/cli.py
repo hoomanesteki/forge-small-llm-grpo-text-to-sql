@@ -760,7 +760,8 @@ def ledger_summary(days: int = typer.Option(7, help="quota window in days")) -> 
 
 
 kaggle_app = typer.Typer(
-    help="Kaggle: the private code and data datasets that GPU jobs mount.", no_args_is_help=True
+    help="Kaggle: GPU jobs, and the private code and data datasets they mount.",
+    no_args_is_help=True,
 )
 app.add_typer(kaggle_app, name="kaggle")
 
@@ -841,6 +842,252 @@ def kaggle_publish_data() -> None:
     typer.echo(f"bundle {root / DATA_BUNDLE}: the files of {data_dir}, each matching spider.sha256")
     typer.echo(f"created {published.ref}")
     typer.echo(published.output)
+
+
+KaggleJobName = Literal["eval", "sft", "grpo", "spike"]
+
+
+def _kaggle_job_errors() -> tuple[type[Exception], ...]:
+    """What a Kaggle job command can raise: a refused check, a failed kaggle call, a bad
+    config (ValueError) or one a later story builds (NotAvailable), a file that can't be
+    read (OSError), and a root that isn't a checkout (CalledProcessError)."""
+    import subprocess
+
+    from forge.eval.config import NotAvailable
+    from forge.ops.kaggle import KaggleError
+    from forge.ops.kaggle_job import JobRefused
+    from forge.ops.manifest import DirtyTreeError
+    from forge.ops.paths import RepoRootNotFound
+
+    return (
+        DirtyTreeError,
+        JobRefused,
+        KaggleError,
+        NotAvailable,
+        OSError,
+        RepoRootNotFound,
+        subprocess.CalledProcessError,
+        ValueError,
+    )
+
+
+@kaggle_app.command("run")
+def kaggle_run(
+    job: Annotated[
+        KaggleJobName,
+        typer.Option(help="eval runs forge eval run; spike, FG-301's throughput script."),
+    ],
+    config: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="configs/eval/*.yaml, or configs/spike/*.yaml for the spike; its "
+            "ops.est_gpu_hours is the job's estimate.",
+        ),
+    ],
+    run_id: Annotated[
+        str | None,
+        typer.Option("--run-id", help="Name the run; by default its date, model, job and commit."),
+    ] = None,
+    resume: Annotated[
+        bool, typer.Option("--resume", help="Carry on the run from its last kernel's output.")
+    ] = False,
+    preflight: Annotated[
+        bool | None,
+        typer.Option(
+            "--preflight/--no-preflight", help="Run the job on 5 examples first; on by default."
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Push without asking.")] = False,
+    emit_notebook: Annotated[
+        Path | None,
+        typer.Option(
+            "--emit-notebook",
+            dir_okay=False,
+            help="Write the job as a Colab notebook here, and push nothing.",
+        ),
+    ] = None,
+    allow_over_budget: Annotated[
+        bool,
+        typer.Option(
+            "--allow-over-budget",
+            help="Push past the week's GPU budget; an eval run's config records it.",
+        ),
+    ] = False,
+) -> None:
+    """Push a GPU job to Kaggle once it passes the checks every GPU job must pass.
+
+    HEAD must be clean with make smoke passed on it; the code dataset must hold HEAD,
+    which is published if it doesn't; and the config's ops.est_gpu_hours must fit what the
+    ledger and Kaggle's quota leave this week. It prints the estimate, asks unless --yes,
+    pushes the kernel on a T4 and prints the run id, which status, logs, wait and output
+    take.
+    """
+    import json
+
+    from forge.ops import kaggle_job as jobs
+    from forge.ops.doctor import DEFAULT_RUN_STORE
+    from forge.ops.dotenv import forge_env
+    from forge.ops.kaggle import KaggleClient
+    from forge.ops.ledger import summary
+    from forge.ops.paths import repo_root, runs_dir
+
+    client = KaggleClient()
+    try:
+        root = repo_root()
+        sha = jobs.head_commit(root)
+        owner = _kaggle_owner()
+        plan = jobs.plan_job(
+            job,
+            config,
+            owner=owner,
+            sha=sha,
+            runs_root=runs_dir(),
+            run_id=run_id,
+            resume=resume,
+            preflight=preflight,
+            allow_over_budget=allow_over_budget,
+        )
+        code = data = None
+        if plan.mounts_datasets:
+            code = jobs.code_version(root, owner, client, sha, say=typer.echo)
+            data = jobs.data_source(owner, client)
+            typer.echo(f"code {code} at {sha[:7]}, data {data}")
+        run_store = forge_env().get("FORGE_RUN_STORE", DEFAULT_RUN_STORE)
+        if emit_notebook is not None:
+            book = jobs.notebook(root, plan, code=code, data=data, run_store=run_store)
+            emit_notebook.write_text(json.dumps(book, indent=1) + "\n", encoding="utf-8")
+            typer.echo(f"notebook {emit_notebook}: run {plan.run_id}, nothing pushed")
+            typer.echo(
+                f"estimate {plan.est_gpu_hours:g} GPU h; log what it takes with "
+                "forge ledger add --platform colab"
+            )
+            return
+        budget = jobs.check_budget(plan.est_gpu_hours, summary(), client)
+        for line in budget.lines():
+            typer.echo(line)
+        if budget.over and not allow_over_budget:
+            raise jobs.JobRefused(
+                "the estimate is over what is left this week; pass --allow-over-budget to "
+                "push anyway, and the run records that it did"
+            )
+        typer.echo(
+            f"job {plan.job}: run {plan.run_id} as kernel {plan.kernel}, stopped after "
+            f"{plan.timeout_s / 3600:.2f} h at most"
+            + (f", carrying on {plan.kernel_sources[0]}" if plan.kernel_sources else "")
+        )
+        if not yes and not typer.confirm("Push it?"):
+            typer.echo("nothing pushed")
+            raise typer.Exit(1)
+        folder = jobs.write_kernel(root, plan, code=code, data=data, run_store=run_store)
+        pushed = client.push_kernel(folder, timeout_s=plan.timeout_s, gpu=True)
+        kernel = pushed.kernel or plan.kernel
+        jobs.record_push(
+            runs_dir(), plan, kernel=kernel, version=pushed.version, code=code, budget=budget
+        )
+    except _kaggle_job_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(pushed.output)
+    typer.echo(f"run {plan.run_id}: kernel {kernel}, version {pushed.version}")
+    typer.echo(f"next: forge kaggle wait {plan.run_id}")
+
+
+def _run_kernel(run_id: str) -> tuple[str, str]:
+    """The kernel of the run's latest push and its job, from runs/<run_id>/kernels.json."""
+    from forge.ops.kaggle_job import last_kernel
+    from forge.ops.paths import runs_dir
+
+    record = last_kernel(runs_dir(), run_id)
+    return record.kernel, record.job
+
+
+RunIdArgument = Annotated[str, typer.Argument(help="The run id forge kaggle run printed.")]
+
+
+@kaggle_app.command("status")
+def kaggle_status(run_id: RunIdArgument) -> None:
+    """Print the state of the run's kernel: QUEUED, RUNNING, COMPLETE, ERROR or CANCEL_*."""
+    from forge.ops.kaggle import KaggleClient
+
+    try:
+        kernel, _ = _run_kernel(run_id)
+        status = KaggleClient().kernel_status(kernel)
+    except _kaggle_job_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{kernel}: {status.state}")
+    if status.failure:
+        typer.echo(f"failure: {status.failure}")
+
+
+@kaggle_app.command("logs")
+def kaggle_logs(run_id: RunIdArgument) -> None:
+    """Print the log of the run's kernel."""
+    from forge.ops.kaggle import KaggleClient
+
+    try:
+        kernel, _ = _run_kernel(run_id)
+        typer.echo(KaggleClient().kernel_logs(kernel))
+    except _kaggle_job_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
+@kaggle_app.command("wait")
+def kaggle_wait(
+    run_id: RunIdArgument,
+    poll: Annotated[int, typer.Option(min=5, help="Seconds between checks.")] = 60,
+) -> None:
+    """Wait until the run's kernel ends: COMPLETE, ERROR or CANCEL_*.
+
+    Exits 0 only when the job itself finished, as the status.json in the kernel's output
+    says: the entry script ends a failed job without an error, so its output is kept.
+    """
+    from forge.ops import kaggle_job as jobs
+    from forge.ops.kaggle import KaggleClient
+
+    client = KaggleClient()
+    try:
+        kernel, job = _run_kernel(run_id)
+        state = jobs.wait_for(client, kernel, poll_s=poll, say=typer.echo)
+        if state != "COMPLETE":
+            raise jobs.JobRefused(f"the kernel ended {state}; read forge kaggle logs {run_id}")
+        if job == "spike":
+            typer.echo(f"the spike ran; fetch its report with forge kaggle output {run_id}")
+            return
+        outcome = jobs.job_status(client, kernel, run_id)
+    except _kaggle_job_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    stages = outcome.get("stages", {})
+    upload = stages.get("upload", {}).get("result", "not reached")
+    typer.echo(f"job {outcome['status']} at stage {outcome['stage']}; upload: {upload}")
+    if outcome["status"] != "finished":
+        typer.echo(f"error: {outcome.get('error') or outcome['status']}", err=True)
+        raise typer.Exit(1)
+
+
+@kaggle_app.command("output")
+def kaggle_output(run_id: RunIdArgument) -> None:
+    """Download the run's kernel output into runs/<run_id>/ (FORGE_RUNS_DIR).
+
+    The run's files go in that folder and the rest, the kernel's log and the preflight
+    among it, in its kernel/ folder. It is how results come back when the kernel had no
+    HF_TOKEN to upload them with.
+    """
+    from forge.ops.kaggle import KaggleClient
+    from forge.ops.kaggle_job import fetch_output
+    from forge.ops.paths import runs_dir
+
+    try:
+        kernel, _ = _run_kernel(run_id)
+        run_dir = fetch_output(KaggleClient(), kernel, run_id, runs_dir())
+    except _kaggle_job_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"run {run_id}: {run_dir}; the kernel's log and the rest in {run_dir / 'kernel'}")
 
 
 if __name__ == "__main__":

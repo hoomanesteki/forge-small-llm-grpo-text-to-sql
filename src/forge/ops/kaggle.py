@@ -15,11 +15,14 @@ A GPU job mounts two private datasets: ``<owner>/forge-code``, the wheel built a
 commit with ``requirements-gpu.txt`` and ``GIT_SHA``, and ``<owner>/forge-spider``, the
 Spider files ``spider.sha256`` lists, with that file. ``KaggleClient`` runs the kaggle CLI
 as an argument list, never through a shell, and reads what it prints as well as its exit
-code: ``datasets create`` and ``version`` report a refused upload and still exit 0.
+code: ``datasets create`` and ``version`` report a refused upload and still exit 0, and so
+does ``kernels push`` for a push error or a dataset source it could not add.
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 import shlex
@@ -179,11 +182,13 @@ def render_kernel_metadata(
     *,
     gpu: bool = True,
     dataset_sources: Sequence[str] = (),
+    kernel_sources: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The template with its ``{name}`` placeholders filled from ``values``, checked.
 
-    ``gpu=False`` makes a CPU kernel, which spends no GPU quota. Raises ``ValueError``
-    listing every problem when the result would not pass ``check_kernel_metadata``.
+    ``gpu=False`` makes a CPU kernel, which spends no GPU quota. The sources are added to
+    the template's. Raises ``ValueError`` listing every problem when the result would not
+    pass ``check_kernel_metadata``.
     """
 
     def fill(value: Any) -> Any:
@@ -194,11 +199,12 @@ def render_kernel_metadata(
         return value
 
     meta = {key: fill(value) for key, value in template.items()}
-    if dataset_sources:
-        current = meta.get("dataset_sources")
-        if not isinstance(current, list):
-            raise ValueError(f"the template's dataset_sources must be a list, got {current!r}")
-        meta["dataset_sources"] = [*current, *dataset_sources]
+    for key, extra in (("dataset_sources", dataset_sources), ("kernel_sources", kernel_sources)):
+        if extra:
+            current = meta.get(key)
+            if not isinstance(current, list):
+                raise ValueError(f"the template's {key} must be a list, got {current!r}")
+            meta[key] = [*current, *extra]
     if not gpu:
         meta["enable_gpu"] = False
         meta.pop("machine_shape", None)
@@ -277,6 +283,25 @@ _PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?==[A-Za-
 # kaggle 2.2.5 prints "Dataset creation error: ..." or "Dataset version creation error: ..."
 # on stdout and exits 0 when the server refuses an upload.
 _UPLOAD_REFUSED = re.compile(r"creation error", re.IGNORECASE)
+# kernels push exits 0 after "Kernel push error: ...", and after "The following are not
+# valid dataset sources and could not be added to the kernel", which would start a job
+# without its code or data.
+_PUSH_REFUSED = re.compile(r"Kernel push error|could not be added", re.IGNORECASE)
+_PUSHED = re.compile(r"Kernel version (\d+) successfully pushed")
+_KERNEL_URL = re.compile(r"kaggle\.com/code/([^/\s]+)/([^/\s?#]+)")
+# kernels status prints 'owner/slug has status "KernelWorkerStatus.COMPLETE"'.
+_KERNEL_STATUS = re.compile(r'has status "(?:KernelWorkerStatus\.)?([A-Z_]+)"')
+_FAILURE = re.compile(r'Failure message: "(.*)"', re.DOTALL)
+# The worker states of kagglesdk's KernelWorkerStatus, and whether each is the end.
+KERNEL_STATES = {
+    "QUEUED": False,
+    "RUNNING": False,
+    "NEW_SCRIPT": False,
+    "COMPLETE": True,
+    "ERROR": True,
+    "CANCEL_REQUESTED": True,
+    "CANCEL_ACKNOWLEDGED": True,
+}
 
 # Gets a command as an argument list; returns its exit code and captured output.
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -334,6 +359,91 @@ class KaggleClient:
         if _UPLOAD_REFUSED.search(output):
             raise KaggleError(f"{_display(command)} was refused: {_tail(output)}")
         return output.strip()
+
+    def dataset_version(self, ref: str) -> DatasetVersion:
+        """Whether the dataset ``owner/slug`` is processed, and its current version number."""
+        fields = "json(status,current_version_number)"
+        command = [self.executable, "datasets", "status", ref, "--format", fields]
+        output = _check(self.run, command)
+        try:
+            data = json.loads(output)
+            return DatasetVersion(str(data["status"]), int(data["current_version_number"]))
+        except (ValueError, TypeError, KeyError) as exc:
+            raise KaggleError(f"{_display(command)} printed {_tail(output)!r}") from exc
+
+    def dataset_file(self, ref: str, name: str, folder: Path) -> Path:
+        """Download the file ``name`` of the dataset ``ref`` (``owner/slug[/version]``)."""
+        command = [self.executable, "datasets", "download", ref, "-f", name, "-p", str(folder)]
+        _check(self.run, [*command, "-o", "-q", "--unzip"])
+        path = folder / name
+        if not path.is_file():
+            raise KaggleError(f"kaggle downloaded no {name} from {ref} into {folder}")
+        return path
+
+    def push_kernel(self, folder: Path, *, timeout_s: int, gpu: bool) -> PushedKernel:
+        """Push and start the kernel ``folder`` holds; returns its id and version."""
+        accelerator = ["--accelerator", GPU_MACHINE_SHAPE] if gpu else []
+        command = [self.executable, "kernels", "push", "-p", str(folder), *accelerator]
+        output = _check(self.run, [*command, "-t", str(timeout_s)])
+        pushed = _PUSHED.search(output)
+        if _PUSH_REFUSED.search(output) or pushed is None:
+            raise KaggleError(f"{_display(command)} was refused: {_tail(output)}")
+        url = _KERNEL_URL.search(output)
+        kernel = "/".join(url.groups()) if url else None
+        return PushedKernel(kernel, int(pushed.group(1)), output.strip())
+
+    def kernel_status(self, kernel: str) -> KernelStatus:
+        """The worker state of ``kernel`` (``owner/slug[/version]``), as kagglesdk names it."""
+        command = [self.executable, "kernels", "status", kernel]
+        output = _check(self.run, command)
+        state = _KERNEL_STATUS.search(output)
+        if state is None or state.group(1) not in KERNEL_STATES:
+            raise KaggleError(f"{_display(command)} printed {_tail(output)!r}")
+        failure = _FAILURE.search(output)
+        return KernelStatus(state.group(1), failure.group(1).strip() if failure else None)
+
+    def kernel_logs(self, kernel: str) -> str:
+        return _check(self.run, [self.executable, "kernels", "logs", kernel])
+
+    def kernel_output(self, kernel: str, folder: Path, pattern: str | None = None) -> None:
+        """Download the files ``kernel`` wrote, and its log, into ``folder``."""
+        command = [self.executable, "kernels", "output", kernel, "-p", str(folder), "-o", "-q"]
+        _check(self.run, [*command, *(["--file-pattern", pattern] if pattern else [])])
+
+    def gpu_hours_left(self) -> float:
+        """The GPU hours left this week by ``kaggle quota -v``; raises when it can't say."""
+        command = [self.executable, "quota", "-v"]
+        output = _check(self.run, command)
+        for row in csv.DictReader(io.StringIO(output)):
+            if row.get("resource") == "GPU":
+                try:
+                    return float(row["remaining"].removesuffix("h"))
+                except (AttributeError, ValueError) as exc:
+                    raise KaggleError(f"{_display(command)} printed {_tail(output)!r}") from exc
+        raise KaggleError(f"{_display(command)} shows no GPU quota: {_tail(output)}")
+
+
+@dataclass(frozen=True)
+class DatasetVersion:
+    status: str  # "ready" once Kaggle has processed the upload
+    number: int
+
+
+@dataclass(frozen=True)
+class PushedKernel:
+    kernel: str | None  # owner/slug from the URL the CLI printed, when it printed one
+    version: int
+    output: str
+
+
+@dataclass(frozen=True)
+class KernelStatus:
+    state: str  # a KERNEL_STATES key
+    failure: str | None = None
+
+    @property
+    def done(self) -> bool:
+        return KERNEL_STATES[self.state]
 
 
 def kaggle_owner(env: Mapping[str, str], home: Path) -> str:
