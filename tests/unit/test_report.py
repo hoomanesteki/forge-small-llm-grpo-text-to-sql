@@ -22,7 +22,7 @@ from typing import Any, NamedTuple
 
 import matplotlib
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw, PngImagePlugin
 
 import forge.eval.report as report_module
 from forge.core.hashing import canonical_json
@@ -532,10 +532,56 @@ def test_compare_report_out_can_name_its_default_path(runs: Path, tmp_path: Path
         link / "tuned" / "eval" / "compare-base.md",
     ):
         default.unlink()
-        assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == out
+        assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == default
         assert default.read_text() == text
         assert [(c.path, c.diff) for c in rebuild("tuned", runs_root=runs)][2:] == [(default, ())]
     assert root / "eval" / "compare-base.md" == default
+
+    # An out that is a symlink to that file writes the file itself, and the link stays.
+    out = tmp_path / "elsewhere" / "my-compare.md"
+    out.parent.mkdir()
+    out.symlink_to(default)
+    assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=LATER) == default
+    assert out.is_symlink()
+    assert out.resolve() == default.resolve()
+    later = default.read_text()
+    assert "\nGenerated: 2026-12-01 18:45:12 UTC\n" in later
+    assert later.replace("2026-12-01 18:45:12", "2026-11-15 09:30:00") == text
+    assert [(c.path, c.diff) for c in rebuild("tuned", runs_root=runs)][2:] == [(default, ())]
+    assert sorted(path.name for path in out.parent.iterdir()) == ["my-compare.md"]
+
+
+def _ignores_case(folder: Path) -> bool:
+    probe = folder / "case-probe"
+    probe.touch()
+    try:
+        return (folder / "CASE-PROBE").exists()
+    finally:
+        probe.unlink()
+
+
+@pytest.mark.phase(2)
+def test_compare_report_out_in_other_letter_case_is_its_default_path(
+    runs: Path, tmp_path: Path
+) -> None:
+    if not _ignores_case(tmp_path):
+        pytest.skip(f"{tmp_path} is on a file system that tells letter case apart")
+    _store(runs, "base", dict.fromkeys(VAL, RIGHT))
+    _store(runs, "tuned", MIXED, model="tuned")
+    write_run_report("tuned", runs_root=runs, now=AT)
+    default = write_compare_report("base", "tuned", runs_root=runs, now=AT)
+    text = default.read_text()
+    # Where the file system ignores case, this out is the default file, so it says rebuild
+    # checks it and is rendered as rebuild renders it.
+    out = runs / "TUNED" / "eval" / "Compare-Base.md"
+    assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == default
+    assert default.read_text() == text
+    # The file keeps its name, so rebuild still finds the compare report of run base.
+    assert sorted(path.name for path in default.parent.glob("*.md")) == [
+        "compare-base.md",
+        "val-report.md",
+    ]
+    assert [(c.path, c.diff) for c in rebuild("tuned", runs_root=runs)][2:] == [(default, ())]
 
 
 @pytest.mark.phase(2)
@@ -699,20 +745,30 @@ def test_rebuild_skips_a_chart_drawn_elsewhere(runs: Path, monkeypatch: pytest.M
     assert rebuild("mixed", runs_root=runs)[1] == Check(chart, ())
 
     # A chart that names no renderer, like those drawn before charts named theirs, is
-    # compared, and differs from its rebuild.
+    # compared, and differs from its rebuild. So does one whose Software text isn't a
+    # renderer's, as when an image editor saved a change to it.
     bare = _without_text(drawn)
     with Image.open(io.BytesIO(bare)) as image:
         assert image.text == {}
-    chart.write_bytes(bare)
-    assert rebuild("mixed", runs_root=runs)[1] == Check(
-        chart,
-        (
-            f"--- {chart}",
-            "+++ rebuilt from the stored files",
-            f"stored: {len(bare):,} bytes, sha256 {hashlib.sha256(bare).hexdigest()}",
-            f"rebuilt: {len(drawn):,} bytes, sha256 {hashlib.sha256(drawn).hexdigest()}",
-        ),
-    )
+        edited = image.copy()
+    ImageDraw.Draw(edited).rectangle((100, 100, 300, 250), fill="red")
+    info = PngImagePlugin.PngInfo()
+    info.add_text("Software", "GIMP 2.10.38")
+    saved = io.BytesIO()
+    edited.save(saved, format="PNG", pnginfo=info)
+    for stored in (bare, saved.getvalue()):
+        chart.write_bytes(stored)
+        assert rebuild("mixed", runs_root=runs)[1] == Check(
+            chart,
+            (
+                f"--- {chart}",
+                "+++ rebuilt from the stored files",
+                f"stored: {len(stored):,} bytes, sha256 {hashlib.sha256(stored).hexdigest()}",
+                f"rebuilt: {len(drawn):,} bytes, sha256 {hashlib.sha256(drawn).hexdigest()}",
+            ),
+        )
+    with Image.open(io.BytesIO(saved.getvalue())) as image:
+        assert image.text == {"Software": "GIMP 2.10.38"}
 
 
 # SQLite can't parse it, but official EX drops DISTINCT first and runs count(*).

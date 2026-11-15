@@ -63,10 +63,14 @@ def test_pilot_run_is_committed_whole() -> None:
 def test_pilot_report_rebuilds_and_traces_to_its_files() -> None:
     data = resolve_data_dir()
     checks = rebuild(PILOT_RUN, runs_root=RUNS, data_dir=data)
-    # The report and its chart, both as the stored files render them.
-    assert [(check.path.name, check.diff) for check in checks] == [
-        ("val-report.md", ()),
-        ("val-hardness.png", ()),
-    ]
-    report = (RUNS / PILOT_RUN / "eval" / "val-report.md").read_text(encoding="utf-8")
-    assert untraced(report, RUNS / PILOT_RUN, data_dir=data) == []
+    assert [check.path.name for check in checks] == ["val-report.md", "val-hardness.png"]
+    report, chart = checks
+    # The report as the stored files render it, with each of its numbers traced to them.
+    assert (report.diff, report.skipped) == ((), None)
+    assert untraced(report.path.read_text(encoding="utf-8"), RUNS / PILOT_RUN, data_dir=data) == []
+    # The chart too, where this machine draws as the one that drew it did. Elsewhere, or
+    # after a release of what draws it changes, its bytes can't be compared, and the test
+    # says so instead of passing.
+    if chart.skipped is not None:
+        pytest.skip(f"the pilot's chart wasn't compared: {chart.skipped}")
+    assert chart.diff == ()
