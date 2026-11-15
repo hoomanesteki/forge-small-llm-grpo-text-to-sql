@@ -47,6 +47,26 @@ A GPU job runs the code and reads the data from two private Kaggle datasets, bot
 Both datasets are private: Forge never passes `-u`, and each `dataset-metadata.json` says
 `"isPrivate": true`, so `kaggle datasets metadata --update` keeps them private too.
 
+## GPU stack
+
+A kernel installs `kaggle/requirements-gpu.txt` over Kaggle's image, after the wheel. vLLM
+decides most of it (FG-306), and none of it has run on a T4 yet (FG-301 measures it):
+
+| Package | Version | Why this one |
+|---|---|---|
+| vllm | 0.33.0 | The newest release, and the newest TRL 1.18 accepts (`<0.34`) |
+| torch | 2.14.0 | vllm 0.33.0 pins it; its wheel is built for CUDA 13.0, the image's CUDA. It replaces the image's 2.11.0 |
+| transformers | 5.20.2 | The newest below 5.21, which vllm 0.33.0 needs; CI runs 5.23.0 |
+| trl | 1.18.0 | uv.lock's; it takes transformers 4.56.2 or later |
+| peft | 0.21.3 | uv.lock's |
+
+accelerate 1.15.0, datasets 5.2.0, huggingface-hub 2.4.0 and bitsandbytes 0.50.2 complete
+the list, all uv.lock's versions but bitsandbytes, which the lock doesn't have. The
+transformers calls Forge makes in a kernel (`apply_chat_template` and `get_chat_template`
+for prompts, the trainer callback classes for the time guard) were checked against the
+5.20.2 source and do the same for Forge's arguments. A test keeps the file the same as the
+spike's `trl-vllm` stack.
+
 ## Kaggle jobs
 
 Every GPU job goes through `forge kaggle run`, on a clean commit that passed `make smoke`:

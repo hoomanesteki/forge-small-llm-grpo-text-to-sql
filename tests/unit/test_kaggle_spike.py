@@ -466,18 +466,32 @@ def _requirement_lines(path: Path) -> list[str]:
     return lines
 
 
+def _pins(requirements: tuple[str, ...]) -> dict[str, str]:
+    return dict(requirement.split("==") for requirement in requirements)
+
+
 @pytest.mark.phase(3)
-def test_requirements_file_is_the_trl_stack() -> None:
-    # FG-302 ships kaggle/requirements-gpu.txt; the spike installs and times the same pins.
-    assert tuple(_requirement_lines(ROOT / "kaggle" / "requirements-gpu.txt")) == (
-        spike.STACKS["trl"].requirements
-    )
-    # And they are the versions uv.lock gives CI, where the lock has the package.
+def test_requirements_file_is_the_trl_vllm_stack() -> None:
+    # FG-302 ships kaggle/requirements-gpu.txt and FG-306 adds vLLM to it; the spike
+    # installs and times the same pins.
+    gpu = spike.STACKS["trl-vllm"].requirements
+    assert tuple(_requirement_lines(ROOT / "kaggle" / "requirements-gpu.txt")) == gpu
     lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
-    for requirement in spike.STACKS["trl"].requirements:
-        name, version = requirement.split("==")
+
+    def locked(name: str, version: str) -> bool:
+        return f'\nname = "{name}"\nversion = "{version}"\n' in lock
+
+    # vllm 0.33.0 pins torch 2.14.0 and needs transformers>=5.16.1,<5.21, below the lock's.
+    pins = _pins(gpu)
+    assert (pins["vllm"], pins["torch"], pins["transformers"]) == ("0.33.0", "2.14.0", "5.20.2")
+    # Every other pin is the version uv.lock gives CI, where the lock has the package.
+    for name, version in pins.items():
+        if name not in ("torch", "transformers") and f'\nname = "{name}"\n' in lock:
+            assert locked(name, version), (name, version)
+    # The trl stack, the training stack without vLLM, keeps the lock's versions throughout.
+    for name, version in _pins(spike.STACKS["trl"].requirements).items():
         if f'\nname = "{name}"\n' in lock:
-            assert f'\nname = "{name}"\nversion = "{version}"\n' in lock, requirement
+            assert locked(name, version), (name, version)
 
 
 @pytest.mark.phase(3)
