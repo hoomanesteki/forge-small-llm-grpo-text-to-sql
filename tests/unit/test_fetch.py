@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
+import http.client
 import io
 import re
+import urllib.error
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 from typer.testing import CliRunner
 
 from forge import cli
@@ -19,6 +24,7 @@ from forge.data import fetch as fetch_mod
 from forge.data import spider
 from forge.data.fetch import FetchError, extract, fetch
 from forge.data.spider import ChecksumMismatch
+from tests.conftest import SPIDER_MINI
 
 # What a pinned zip holds that Forge keeps, keyed by path inside the Spider folder.
 WANTED = {
@@ -65,6 +71,13 @@ def _spider_zip(folder: str, files: dict[str, bytes] | None = None) -> bytes:
 
 def _files_under(root: Path) -> dict[str, bytes]:
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.fixture(autouse=True)
+def repo_root_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The repo root for these tests, so a download can never land in the real data/."""
+    monkeypatch.setenv("FORGE_ROOT", str(tmp_path))
+    return tmp_path
 
 
 @pytest.fixture
@@ -137,13 +150,66 @@ def test_stale_files_are_extracted_again(
     data_dir = tmp_path / "spider"
     fetch(data_dir, zip_path=zip_path)
 
-    (data_dir / "database" / "beta" / "beta.sqlite").write_bytes(b"tampered")
+    # A missing file is put back without asking.
     (data_dir / "dev.json").unlink()
     assert fetch(data_dir, zip_path=zip_path).zip_path == zip_path
     assert _files_under(data_dir) == WANTED
 
+    # A file that is there but differs is only replaced with --force.
+    (data_dir / "database" / "beta" / "beta.sqlite").write_bytes(b"tampered")
+    (data_dir / "dev.json").unlink()
+    with pytest.raises(FetchError, match=r"1 file\(s\) in .* differ .*database/beta/beta\.sqlite"):
+        fetch(data_dir, zip_path=zip_path)
+    assert (data_dir / "database" / "beta" / "beta.sqlite").read_bytes() == b"tampered"
+    assert not (data_dir / "dev.json").exists()
+    assert fetch(data_dir, zip_path=zip_path, force=True).zip_path == zip_path
+    assert _files_under(data_dir) == WANTED
+
     # --force extracts even when everything already matches.
     assert fetch(data_dir, zip_path=zip_path, force=True).zip_path == zip_path
+    assert _files_under(data_dir) == WANTED
+
+
+@pytest.mark.phase(1)
+def test_fetch_leaves_the_fixture_alone(spider_mini: Path, no_network: None) -> None:
+    # FORGE_DATA_DIR still pointing at the fixture after a test run: its files differ from
+    # the full download's, so fetch must neither download next to it nor extract over it.
+    before = _files_under(SPIDER_MINI)
+
+    result = CliRunner().invoke(cli.app, ["data", "fetch"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert f"file(s) in {SPIDER_MINI} differ from spider.sha256" in result.stderr
+    assert "train_spider.json" in result.stderr
+    assert "--force" in result.stderr
+    assert _files_under(SPIDER_MINI) == before
+    assert not (SPIDER_MINI.parent / "download").exists()
+
+
+@pytest.mark.phase(1)
+def test_download_lands_in_the_repo_data_dir(
+    tmp_path: Path, pin: Callable[[str, bytes], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _spider_zip("spider")
+    pin("hf", data)
+
+    def fake_hf_hub_download(**kwargs: Any) -> str:
+        target = Path(kwargs["local_dir"]) / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return str(target)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_hf_hub_download)
+    repo = tmp_path / "repo"
+    monkeypatch.setenv("FORGE_ROOT", str(repo))
+    data_dir = tmp_path / "elsewhere" / "spider"
+
+    result = fetch(data_dir)
+
+    # data/ is git-ignored; a folder next to FORGE_DATA_DIR may not be.
+    assert result.zip_path == repo / "data" / "download" / "data" / "spider.zip"
+    assert sorted(p.name for p in data_dir.parent.iterdir()) == ["spider"]
     assert _files_under(data_dir) == WANTED
 
 
@@ -342,3 +408,80 @@ def test_fetch_cli_extracts_once_and_names_bad_files(
     assert failed.stdout == ""
     assert "error: 1 file(s) in" in failed.stderr
     assert "dev.json: sha256" in failed.stderr
+
+
+def _hub_status_error() -> HfHubHTTPError:
+    request = httpx2.Request("GET", "https://huggingface.co/datasets/xlangai/spider")
+    return HfHubHTTPError("503 Server Error", response=httpx2.Response(503, request=request))
+
+
+def _raise(exc: BaseException) -> Callable[..., Any]:
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise exc
+
+    return fail
+
+
+@pytest.mark.phase(1)
+@pytest.mark.parametrize(
+    ("source", "target", "exc"),
+    [
+        # Offline: no connection and nothing in the Hub cache.
+        ("hf", "huggingface_hub.hf_hub_download", LocalEntryNotFoundError("cannot reach the Hub")),
+        ("hf", "huggingface_hub.hf_hub_download", _hub_status_error()),
+        # Still failing after the Hub client's own retries; not an OSError.
+        ("mirror", "huggingface_hub.hf_hub_download", httpx2.ConnectError("connection reset")),
+        ("gdrive", "urllib.request.urlopen", urllib.error.URLError("timed out")),
+        # A body cut short; not an OSError either.
+        ("gdrive", "urllib.request.urlopen", http.client.IncompleteRead(b"PK\x03\x04", 10)),
+        ("hf", "huggingface_hub.hf_hub_download", OSError(errno.ENOSPC, "No space left on device")),
+    ],
+)
+def test_fetch_cli_reports_download_failures(
+    tmp_path: Path,
+    pin: Callable[[str, bytes], None],
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    target: str,
+    exc: BaseException,
+) -> None:
+    pin(source, _spider_zip("spider"))
+    monkeypatch.setattr(target, _raise(exc))
+    monkeypatch.setenv("FORGE_DATA_DIR", str(tmp_path / "spider"))
+
+    result = CliRunner().invoke(cli.app, ["data", "fetch", "--source", source])
+
+    # A clean exit with the hint, not a traceback.
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.startswith(f"error: downloading the {source} zip failed: ")
+    assert "Try another --source, or download the zip by hand and pass --from-zip" in result.stderr
+    assert not (tmp_path / "spider").exists()
+
+
+@pytest.mark.phase(1)
+def test_fetch_cli_reports_a_full_disk(
+    tmp_path: Path,
+    pin: Callable[[str, bytes], None],
+    no_network: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _spider_zip("spider")
+    pin("hf", data)
+    zip_path = tmp_path / "spider.zip"
+    zip_path.write_bytes(data)
+    data_dir = tmp_path / "spider"
+    monkeypatch.setenv("FORGE_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(
+        fetch_mod.shutil, "copyfileobj", _raise(OSError(errno.ENOSPC, "No space left on device"))
+    )
+
+    result = CliRunner().invoke(cli.app, ["data", "fetch", "--from-zip", str(zip_path)])
+
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert result.exit_code == 1
+    assert result.stderr.startswith(f"error: extracting {zip_path} into {data_dir} failed: ")
+    assert "No space left on device" in result.stderr
+    # The file being written is removed, so no torn copy is left behind.
+    assert [p for p in data_dir.rglob("*") if p.is_file()] == []

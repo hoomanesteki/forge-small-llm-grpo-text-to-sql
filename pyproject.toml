@@ -7,6 +7,9 @@ license = { text = "MIT" }
 authors = [{ name = "Hooman Esteki" }]
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    # huggingface-hub's HTTP client: forge data fetch catches its transport errors, which
+    # are not OSErrors.
+    "httpx2>=2.0",
     "huggingface-hub>=0.24",
     "kaggle>=1.6",
     "matplotlib>=3.8",

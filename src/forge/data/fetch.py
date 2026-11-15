@@ -5,10 +5,15 @@ Each source serves a zip with a known sha256, and every extracted file must then
 used. Only the files listed there are extracted: Spider's four JSON files and
 ``database/<db>/<db>.sqlite``. README, schema dumps, CSVs, ``test_database/``,
 ``.DS_Store`` and ``__MACOSX/`` stay in the zip.
+
+Fetch fills in missing files, but replaces a file that is there and differs only with
+``force``: the directory may hold other data, such as the committed fixture subset.
+Zips are downloaded to ``data/download`` in the repo, which git ignores.
 """
 
 from __future__ import annotations
 
+import http.client
 import os
 import shutil
 import tempfile
@@ -20,6 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 from forge.data.spider import check_files, file_sha256, load_checksums, verify_files
+from forge.ops.paths import repo_root
 
 SourceName = Literal["hf", "mirror", "gdrive"]
 
@@ -29,6 +35,7 @@ ZIP_FOLDERS = ("spider", "spider_data")
 
 _CHUNK = 1 << 20
 _TIMEOUT_S = 60
+_RETRY_HINT = "Try another --source, or download the zip by hand and pass --from-zip"
 
 
 class FetchError(RuntimeError):
@@ -93,6 +100,11 @@ def verify_zip(zip_path: Path) -> None:
         )
 
 
+def default_download_dir() -> Path:
+    """``data/download`` in the repo, wherever the data directory is: git ignores it."""
+    return repo_root() / "data" / "download"
+
+
 def download(source_name: SourceName, download_dir: Path) -> Path:
     """The source's zip under ``download_dir``, downloaded only if no valid copy is there."""
     source = SOURCES[source_name]
@@ -100,20 +112,9 @@ def download(source_name: SourceName, download_dir: Path) -> Path:
     if target.is_file() and file_sha256(target) == source.sha256:
         return target
     if source.repo_id is not None:
-        # Imported here: --from-zip and an already valid copy never need the Hub client.
-        from huggingface_hub import hf_hub_download
-
-        hf_hub_download(
-            repo_id=source.repo_id,
-            filename=source.path,
-            repo_type="dataset",
-            revision=source.revision,
-            local_dir=download_dir,
-            # A copy that failed the check above must not be reused from the local cache.
-            force_download=target.exists(),
-        )
+        _download_hub(source_name, source.repo_id, source, download_dir, force=target.exists())
     elif source.url is not None:
-        _download_url(source.url, target)
+        _download_url(source_name, source.url, target)
     else:
         raise FetchError(f"source {source_name} has neither a repo nor a url")
     actual = file_sha256(target)
@@ -121,19 +122,48 @@ def download(source_name: SourceName, download_dir: Path) -> Path:
         target.unlink()
         raise FetchError(
             f"{source_name} served a file with sha256 {actual}, expected {source.sha256}; "
-            "it was deleted. Try another --source, or download the zip by hand and pass "
-            "--from-zip"
+            f"it was deleted. {_RETRY_HINT}"
         )
     return target
 
 
-def _download_url(url: str, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
+def _download_failed(source_name: str, exc: BaseException) -> FetchError:
+    return FetchError(f"downloading the {source_name} zip failed: {exc}. {_RETRY_HINT}")
+
+
+def _download_hub(
+    source_name: str, repo_id: str, source: ZipSource, download_dir: Path, *, force: bool
+) -> None:
+    # Imported here: --from-zip and an already valid copy never need the Hub client.
+    import httpx2
+    from huggingface_hub import hf_hub_download
+
+    try:
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=source.path,
+            repo_type="dataset",
+            revision=source.revision,
+            local_dir=download_dir,
+            # A copy that failed the sha256 check must not be reused from the local cache.
+            force_download=force,
+        )
+    # The Hub's own errors (offline, HTTP status) are OSErrors; a connection that still
+    # fails after the client's retries raises a bare httpx2 error.
+    except (OSError, httpx2.HTTPError) as exc:
+        raise _download_failed(source_name, exc) from exc
+
+
+def _download_url(source_name: str, url: str, target: Path) -> None:
     partial = target.with_name(target.name + ".part")
     try:
+        target.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(url, timeout=_TIMEOUT_S) as response, partial.open("wb") as out:
             shutil.copyfileobj(response, out, _CHUNK)
         os.replace(partial, target)
+    # URLError and timeouts are OSErrors; a body cut short raises IncompleteRead.
+    except (OSError, http.client.HTTPException) as exc:
+        raise _download_failed(source_name, exc) from exc
     finally:
         partial.unlink(missing_ok=True)
 
@@ -164,14 +194,18 @@ def extract(zip_path: Path, dest: Path, wanted: Iterable[str]) -> list[str]:
     escaping = [rel for rel, target in targets.items() if not target.is_relative_to(root)]
     if escaping:
         raise FetchError(f"refusing to extract outside {dest}: {', '.join(escaping)}")
-    with zipfile.ZipFile(zip_path) as archive:
-        members = _spider_members(archive, zip_path)
-        missing = [rel for rel in targets if rel not in members]
-        if missing:
-            raise FetchError(f"{zip_path} lacks {len(missing)} file(s): {', '.join(missing)}")
-        for rel, target in targets.items():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _extract_member(archive, members[rel], target)
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            members = _spider_members(archive, zip_path)
+            missing = [rel for rel in targets if rel not in members]
+            if missing:
+                raise FetchError(f"{zip_path} lacks {len(missing)} file(s): {', '.join(missing)}")
+            for rel, target in targets.items():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _extract_member(archive, members[rel], target)
+    # A full disk or a read error, or a member whose CRC32 fails.
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise FetchError(f"extracting {zip_path} into {dest} failed: {exc}") from exc
     return list(targets)
 
 
@@ -198,15 +232,27 @@ def fetch(
 ) -> FetchResult:
     """Put every file listed in ``spider.sha256`` into ``data_dir`` and verify it.
 
-    A no-op when they all match already, unless ``force``. The zip comes from ``zip_path``
-    or is downloaded into ``download_dir`` (default: ``download/`` next to
-    ``data_dir``), reusing a valid copy already there.
+    A no-op when they all match already, unless ``force``. Missing files are filled in,
+    but a file that is there and differs is replaced only with ``force``. The zip comes
+    from ``zip_path`` or is downloaded into ``download_dir`` (default:
+    ``default_download_dir()``), reusing a valid copy already there.
     """
     expected = load_checksums()
-    if not force and not check_files(data_dir, expected):
-        return FetchResult(data_dir, len(expected), None)
+    if not force:
+        problems = check_files(data_dir, expected)
+        if not problems:
+            return FetchResult(data_dir, len(expected), None)
+        differing = sorted(rel for rel in problems if (data_dir / rel).exists())
+        if differing:
+            shown = ", ".join(differing[:5]) + (", ..." if len(differing) > 5 else "")
+            raise FetchError(
+                f"{len(differing)} file(s) in {data_dir} differ from spider.sha256 ({shown}). "
+                "Fetch only adds missing files: pass --force to replace these, or if this is "
+                "other data, such as the tests/fixtures/spider_mini subset, point "
+                "FORGE_DATA_DIR at the Spider download instead"
+            )
     if zip_path is None:
-        zip_path = download(source, download_dir or data_dir.parent / "download")
+        zip_path = download(source, download_dir or default_download_dir())
     else:
         verify_zip(zip_path)
     extract(zip_path, data_dir, expected)

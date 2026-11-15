@@ -447,6 +447,7 @@ name = "forge"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx2" },
     { name = "huggingface-hub" },
     { name = "kaggle" },
     { name = "matplotlib" },
@@ -494,6 +495,7 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'cpu'", specifier = ">=1.0" },
     { name = "datasets", marker = "extra == 'cpu'", specifier = ">=3.0" },
     { name = "gradio", marker = "extra == 'demo'", specifier = ">=5.0" },
+    { name = "httpx2", specifier = ">=2.0" },
     { name = "huggingface-hub", specifier = ">=0.24" },
     { name = "kaggle", specifier = ">=1.6" },
     { name = "llama-cpp-python", marker = "extra == 'demo'", specifier = ">=0.3" },

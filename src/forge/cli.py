@@ -75,10 +75,18 @@ def data_fetch(
         typer.Option(help="Download from the pinned Hub dataset, its mirror, or Google Drive."),
     ] = "hf",
     force: Annotated[
-        bool, typer.Option("--force", help="Extract again even if every file verifies.")
+        bool,
+        typer.Option(
+            "--force",
+            help="Extract every file again, replacing any that differ from spider.sha256.",
+        ),
     ] = False,
 ) -> None:
-    """Get Spider into FORGE_DATA_DIR (default data/spider) and verify every file."""
+    """Get Spider into FORGE_DATA_DIR (default data/spider) and verify every file.
+
+    The zip is kept in data/download. Files that are there but differ are only replaced
+    with --force.
+    """
     from forge.data.fetch import FetchError, fetch
     from forge.data.spider import resolve_data_dir
     from forge.ops.paths import RepoRootNotFound
@@ -86,7 +94,8 @@ def data_fetch(
     try:
         data_dir = resolve_data_dir()
         result = fetch(data_dir, zip_path=from_zip, source=source, force=force)
-    except (FetchError, RepoRootNotFound, ValueError) as exc:
+    # Downloads and extraction raise FetchError; OSError is reading files that are there.
+    except (FetchError, OSError, RepoRootNotFound, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     if result.zip_path is None:
