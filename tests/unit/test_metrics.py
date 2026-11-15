@@ -9,8 +9,19 @@ from fractions import Fraction
 
 import pytest
 
-from forge.core.types import Hardness, Score
-from forge.eval.metrics import Rate, compare, ex_metric, pass_at_k, summarize
+from forge.core.types import Example, Hardness, Score
+from forge.eval.metrics import Rate, compare, ex_metric, gold_clusters, pass_at_k, summarize
+
+
+def _example(question: int, db_id: str, gold_sql: str) -> Example:
+    return Example(
+        id=f"spider-dev-{question:05d}",
+        db_id=db_id,
+        question=f"Question {question}?",
+        gold_sql=gold_sql,
+        hardness="easy",
+        split="dev",
+    )
 
 
 def _score(
@@ -128,6 +139,57 @@ def test_bootstrap_resamples_whole_questions() -> None:
     assert (two.by_hardness["hard"].n, two.by_hardness["hard"].questions) == (60, 30)
     assert two.ex_fast == one.ex_fast.model_copy(update={"hits": 20})
     assert one.ex_fast.low < one.ex_fast.value < one.ex_fast.high
+
+
+@pytest.mark.phase(2)
+def test_gold_clusters_join_questions_with_one_gold_query() -> None:
+    examples = [
+        _example(3, "concert_singer", "SELECT count(*) FROM singer"),
+        _example(1, "concert_singer", "SELECT count(*) FROM singer"),
+        _example(2, "concert_singer", "SELECT name FROM singer"),
+        # The same text on another database is another query.
+        _example(4, "singer", "SELECT count(*) FROM singer"),
+    ]
+    assert gold_clusters(examples) == {
+        "spider-dev-00001": "spider-dev-00001",
+        "spider-dev-00002": "spider-dev-00002",
+        "spider-dev-00003": "spider-dev-00001",
+        "spider-dev-00004": "spider-dev-00004",
+    }
+
+
+@pytest.mark.phase(2)
+def test_clusters_resample_together() -> None:
+    # 30 questions, each asked again in other words as question 100 + q and answered alike.
+    single = [_score(q, fast=q % 3 == 0) for q in range(30)]
+    twins = [*single, *(_score(100 + q, fast=q % 3 == 0) for q in range(30))]
+    clusters = gold_clusters(
+        _example(offset + q, "concert_singer", f"SELECT {q}")
+        for q in range(30)
+        for offset in (0, 100)
+    )
+    together = summarize(twins, clusters=clusters)
+    # A pair is one draw: 30 pairs give the interval of 30 questions, not of 60.
+    assert together.ex_fast == summarize(single).ex_fast.model_copy(update={"hits": 20})
+    assert together.by_hardness["easy"].ex_fast == together.ex_fast
+    apart = summarize(twins).ex_fast
+    assert apart.high - apart.low < together.ex_fast.high - together.ex_fast.low
+
+    # b also gets the questions a misses where q % 5 == 1, in both wordings.
+    gained = {q for q in range(30) if q % 5 == 1 and q % 3 != 0}
+    single_b = [_score(q, fast=q % 3 == 0 or q in gained) for q in range(30)]
+    twins_b = [*single_b, *(_score(100 + q, fast=q % 3 == 0 or q in gained) for q in range(30))]
+    paired = compare(twins, twins_b, clusters=clusters)
+    assert paired.delta == compare(single, single_b).delta
+    # McNemar's test counts each question whatever the clusters.
+    assert paired.mcnemar == compare(twins, twins_b).mcnemar
+
+    with pytest.raises(ValueError, match="no cluster for 1 of the scored questions"):
+        summarize([*twins, _score(130, fast=True)], clusters=clusters)
+    with pytest.raises(ValueError, match="such as spider-dev-00130"):
+        compare(
+            [*twins, _score(130, fast=True)], [*twins_b, _score(130, fast=True)], clusters=clusters
+        )
 
 
 @pytest.mark.phase(2)

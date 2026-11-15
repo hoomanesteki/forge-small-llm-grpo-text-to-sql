@@ -32,7 +32,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 |---|---|---|---|---|---|---|
 | FG-201 | Inference backend protocol and CPU backend | 3 | done |  |  | `InferenceBackend`, `FakeBackend` and `render_chat` (thinking off where the template reads the flag); `HfBackend` decodes from `GenParams` alone in left-padded batches, seeds each sample by example and index, loads PEFT adapters; tiny model pinned in `configs/models.yaml` |
 | FG-202 | Eval runner | 5 | done |  |  | `forge eval run` with the fake (gold, select-1) and hf backends; prompts fitted as in training; predictions in one `SandboxPool` a run; gold cached per split as JSON lines; official EX in one batch at the end, 10 s an item, a 2 s timeout no match (ADR-0008); a batch's generations then scores appended and flushed; a killed run resumes without duplicates; manifest running, then finished or failed with `error.txt` |
-| FG-203 | Metrics with confidence intervals and paired tests | 5 | todo |  |  |  |
+| FG-203 | Metrics with confidence intervals and paired tests | 5 | done |  |  | `summarize`, `compare` and `pass_at_k` in `forge.eval.metrics`; 95% percentile bootstrap, 1,000 resamples, `default_rng(0)` for each interval, drawing whole questions or `gold_clusters`; exact McNemar from statsmodels, with no p-value for several samples a question; official EX when every score has a verdict, else fast |
 | FG-204 | Error taxonomy | 3 | todo |  |  |  |
 | FG-205 | Report generator | 3 | todo |  |  |  |
 | FG-206 | Execution-guided retry | 3 | todo |  |  |  |
@@ -445,3 +445,15 @@ Work discovered along the way that is not a plan story.
   FG-205's failure examples can show the class, or a later story can store the message (FG-202).
 - `forge eval run` records `platform: local-cpu`, `build_manifest`'s default, whatever the device;
   FG-303 should set `kaggle` for runs there (FG-202).
+- Spider asks most questions twice in other words with one gold query, so `summarize` and
+  `compare` take `clusters`, and `gold_clusters` puts each such pair in one (val: 872 questions
+  in 456 clusters). FG-205 should pass them for val and dev, or the intervals come out too
+  narrow. McNemar's p-value still takes each question as an independent pair (FG-203).
+- `compare` gives McNemar's table but no p-value when a question has several samples, which
+  are not independent pairs; the change in EX keeps its interval (FG-203).
+- Each interval reseeds `default_rng(0)`, so it depends only on the scores it covers, and
+  FG-207's I4 can recompute any interval in a report by summarizing the same scores. A test
+  pins one interval, so a numpy release that changes the stream fails it before reports
+  drift (FG-203).
+- statsmodels takes about a second to import, since it brings in pandas and scipy, so
+  `forge.eval.metrics` imports it inside `compare` only (FG-203).

@@ -6,7 +6,8 @@ depends only on the scores it covers, so a report rebuilt from stored scores get
 same numbers, and the intervals over one set of questions share their resamples.
 
 A resample draws whole questions, since the samples of one question are not
-independent.
+independent. Nor are the questions Spider asks twice in other words, which share a gold
+query: given ``clusters`` (``gold_clusters``), a resample draws whole clusters instead.
 
 ``compare`` and ``pass_at_k`` count a sample as right by official EX when every score
 has an official verdict, and by fast EX otherwise (``ex_metric``). Reported numbers are
@@ -23,11 +24,15 @@ from typing import Literal, get_args
 import numpy as np
 from pydantic import BaseModel
 
-from forge.core.types import Hardness, Score
+from forge.core.types import Example, Hardness, Score
 from forge.eval.run_files import Key, key
 
 Metric = Literal["ex_fast", "ex_official"]
 Outcome = Literal["valid", "ex_fast", "ex_official"]
+# Example id to the name of its cluster; questions with one name are drawn together.
+Clusters = Mapping[str, str]
+# A question's share of a ratio: its example id, numerator and denominator.
+Part = tuple[str, int, int]
 
 LEVELS: tuple[Hardness, ...] = get_args(Hardness)
 RESAMPLES = 1000
@@ -79,8 +84,8 @@ class McNemar(BaseModel, frozen=True):
     only_a: int  # right in a, wrong in b
     only_b: int  # wrong in a, right in b
     neither: int  # wrong in both
-    # Two-sided, with each question an independent pair. None when a question has
-    # several samples, which are not independent.
+    # Two-sided, with each question an independent pair; clusters widen only the delta's
+    # interval. None when a question has several samples, which are not independent.
     pvalue: float | None
 
 
@@ -96,14 +101,14 @@ class Comparison(BaseModel, frozen=True):
     mcnemar: McNemar
 
 
-def summarize(scores: Iterable[Score]) -> Summary:
+def summarize(scores: Iterable[Score], *, clusters: Clusters | None = None) -> Summary:
     """The valid rate and EX, fast and official, with EX by hardness too; each with its
     interval.
 
-    Raises ``ValueError`` for no scores, a sample scored twice, or a question scored at
-    two hardness levels.
+    Raises ``ValueError`` for no scores, a sample scored twice, a question scored at two
+    hardness levels, or a scored question that ``clusters`` leaves out.
     """
-    questions = _questions(scores)
+    questions = _questions(scores, clusters)
     official = all(score.ex_official is not None for group in questions.values() for score in group)
     levels = {
         level: {qid: group for qid, group in questions.items() if group[0].hardness == level}
@@ -112,15 +117,15 @@ def summarize(scores: Iterable[Score]) -> Summary:
     return Summary(
         n=sum(len(group) for group in questions.values()),
         questions=len(questions),
-        valid=_rate(questions, "valid"),
-        ex_fast=_rate(questions, "ex_fast"),
-        ex_official=_rate(questions, "ex_official") if official else None,
+        valid=_rate(questions, "valid", clusters),
+        ex_fast=_rate(questions, "ex_fast", clusters),
+        ex_official=_rate(questions, "ex_official", clusters) if official else None,
         by_hardness={
             level: HardnessEx(
                 n=sum(len(group) for group in groups.values()),
                 questions=len(groups),
-                ex_fast=_rate(groups, "ex_fast"),
-                ex_official=_rate(groups, "ex_official") if official else None,
+                ex_fast=_rate(groups, "ex_fast", clusters),
+                ex_official=_rate(groups, "ex_official", clusters) if official else None,
             )
             for level, groups in levels.items()
             if groups
@@ -128,13 +133,15 @@ def summarize(scores: Iterable[Score]) -> Summary:
     )
 
 
-def compare(scores_a: Iterable[Score], scores_b: Iterable[Score]) -> Comparison:
+def compare(
+    scores_a: Iterable[Score], scores_b: Iterable[Score], *, clusters: Clusters | None = None
+) -> Comparison:
     """Run b against run a, each sample paired with the same (example id, sample) in the other.
 
     Raises ``ValueError`` unless both runs scored the same samples, and for scores
     ``summarize`` refuses.
     """
-    a = _questions(scores_a)
+    a = _questions(scores_a, clusters)
     a_scores = [score for group in a.values() for score in group]
     b = {key(score): score for group in _questions(scores_b).values() for score in group}
     a_keys = {key(score) for score in a_scores}
@@ -142,17 +149,16 @@ def compare(scores_a: Iterable[Score], scores_b: Iterable[Score]) -> Comparison:
         raise ValueError(_mismatch(a_keys, set(b)))
     metric = ex_metric([*a_scores, *b.values()])
     table: Counter[tuple[bool, bool]] = Counter()
-    gains: list[int] = []
-    sizes: list[int] = []
-    for group in a.values():
+    gains: list[Part] = []
+    for example_id, group in a.items():
         pairs = [(_hit(score, metric), _hit(b[key(score)], metric)) for score in group]
         table.update(pairs)
-        gains.append(sum(int(right_b) - int(right_a) for right_a, right_b in pairs))
-        sizes.append(len(pairs))
+        gain = sum(int(right_b) - int(right_a) for right_a, right_b in pairs)
+        gains.append((example_id, gain, len(pairs)))
     n = len(a_scores)
     both, only_a = table[True, True], table[True, False]
     only_b, neither = table[False, True], table[False, False]
-    low, high = _interval(gains, sizes)
+    low, high = _interval(gains, clusters)
     return Comparison(
         metric=metric,
         n=n,
@@ -196,9 +202,21 @@ def ex_metric(scores: Iterable[Score]) -> Metric:
     return "ex_official" if all(score.ex_official is not None for score in scores) else "ex_fast"
 
 
-def _questions(scores: Iterable[Score]) -> dict[str, list[Score]]:
-    """Scores by question, in example id order, so the order they come in can't move an
-    interval."""
+def gold_clusters(examples: Iterable[Example]) -> dict[str, str]:
+    """Each example's cluster: the first example, by id, with its database and gold query.
+
+    Spider asks most questions twice in other words, and the two share a gold query.
+    """
+    first: dict[tuple[str, str], str] = {}
+    return {
+        example.id: first.setdefault((example.db_id, example.gold_sql), example.id)
+        for example in sorted(examples, key=lambda example: example.id)
+    }
+
+
+def _questions(scores: Iterable[Score], clusters: Clusters | None = None) -> dict[str, list[Score]]:
+    """Scores by question, in example id order so the order they come in can't move an
+    interval, once the scores and ``clusters`` are known to fit together."""
     groups: dict[str, list[Score]] = {}
     seen: set[Key] = set()
     for score in scores:
@@ -213,6 +231,12 @@ def _questions(scores: Iterable[Score]) -> dict[str, list[Score]]:
         group.append(score)
     if not groups:
         raise ValueError("there are no scores to aggregate")
+    if clusters is not None:
+        unplaced = sorted(groups.keys() - clusters.keys())
+        if unplaced:
+            raise ValueError(
+                f"no cluster for {len(unplaced)} of the scored questions, such as {unplaced[0]}"
+            )
     return {example_id: groups[example_id] for example_id in sorted(groups)}
 
 
@@ -224,17 +248,27 @@ def _hit(score: Score, outcome: Outcome) -> bool:
     return score.ex_official is True
 
 
-def _rate(questions: Mapping[str, Sequence[Score]], outcome: Outcome) -> Rate:
-    hits = [sum(_hit(score, outcome) for score in group) for group in questions.values()]
-    sizes = [len(group) for group in questions.values()]
-    low, high = _interval(hits, sizes)
-    return Rate(hits=sum(hits), value=sum(hits) / sum(sizes), low=low, high=high)
+def _rate(
+    questions: Mapping[str, Sequence[Score]], outcome: Outcome, clusters: Clusters | None
+) -> Rate:
+    parts = [
+        (example_id, sum(_hit(score, outcome) for score in group), len(group))
+        for example_id, group in questions.items()
+    ]
+    hits = sum(hit for _, hit, _ in parts)
+    low, high = _interval(parts, clusters)
+    return Rate(hits=hits, value=hits / sum(size for _, _, size in parts), low=low, high=high)
 
 
-def _interval(numerators: Sequence[int], denominators: Sequence[int]) -> tuple[float, float]:
-    """The bootstrap interval of the summed numerators over the summed denominators, one of
-    each a question, drawing questions with replacement."""
-    totals = np.array(list(zip(numerators, denominators, strict=True)), dtype=np.int64)
+def _interval(parts: Iterable[Part], clusters: Clusters | None) -> tuple[float, float]:
+    """The bootstrap interval of the parts' summed numerators over their summed
+    denominators, drawing questions, or their clusters, with replacement."""
+    units: dict[str, tuple[int, int]] = {}
+    for example_id, numerator, denominator in parts:
+        unit = example_id if clusters is None else clusters[example_id]
+        unit_numerator, unit_denominator = units.get(unit, (0, 0))
+        units[unit] = (unit_numerator + numerator, unit_denominator + denominator)
+    totals = np.array([units[unit] for unit in sorted(units)], dtype=np.int64)
     picks = np.random.default_rng(SEED).integers(0, len(totals), size=(RESAMPLES, len(totals)))
     drawn = totals[picks].sum(axis=1)
     low, high = np.percentile(drawn[:, 0] / drawn[:, 1], PERCENTILES)
