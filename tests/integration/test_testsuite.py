@@ -211,6 +211,28 @@ def test_gold_scores_perfect(spider_mini: Path) -> None:
 
 
 @pytest.mark.phase(1)
+def test_gold_on_dev_is_not_a_dev_use(
+    with_dev: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_DATA_DIR", str(with_dev))
+
+    result = CliRunner().invoke(cli.app, ["eval", "gold", "--split", "dev"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert lines[:3] == [
+        f"data: {with_dev}",
+        cli.NOT_A_DEV_USE,
+        "split dev: 10 gold queries over 1 database",
+    ]
+    assert _cells(result.stdout)[3:] == [
+        ["fast", "EX", "10/10", "100.00%"],
+        ["official", "EX", "10/10", "100.00%"],
+    ]
+    assert not dev_log.exists()
+
+
+@pytest.mark.phase(1)
 @pytest.mark.requires_full_data
 def test_gold_scores_perfect_on_full_val() -> None:
     scores = score(gold_mutations(load_val()), pred_timeout_ms=GOLD_TIMEOUT_MS)
