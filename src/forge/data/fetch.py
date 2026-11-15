@@ -149,8 +149,10 @@ def _download_hub(
             force_download=force,
         )
     # The Hub's own errors (offline, HTTP status) are OSErrors; a connection that still
-    # fails after the client's retries raises a bare httpx2 error.
-    except (OSError, httpx2.HTTPError) as exc:
+    # fails after the client's retries raises a bare httpx2 error. The Hub keeps both pinned
+    # zips on Xet, and hf_xet, which moves their bytes, reports a failed transfer as a bare
+    # RuntimeError. FetchError is a RuntimeError too, but nothing in this call raises one.
+    except (OSError, RuntimeError, httpx2.HTTPError) as exc:
         raise _download_failed(source_name, exc) from exc
 
 
