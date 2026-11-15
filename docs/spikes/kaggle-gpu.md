@@ -23,25 +23,29 @@ Once `uv run forge doctor` shows Kaggle auth ok, on a clean commit that passed `
 2. `uv run python scripts/kaggle_spike.py --owner <kaggle-username>`. It writes
    `build/kaggle-spike/gpu/` and `build/kaggle-spike/limit/`, each with a checked
    `kernel-metadata.json` and the spike script with its arguments written in, and prints
-   the commands below.
+   the kaggle commands for each; step 4 pushes the GPU kernel through `forge kaggle run`
+   instead.
 3. For question 2, create the GPU kernel without running it, then attach a secret:
    `kaggle kernels push -p build/kaggle-spike/gpu --no-run`, open the kernel in the
    Kaggle editor, and under Add-ons, Secrets attach `HF_TOKEN`. A read-only token is
    enough: the stage only checks that it can be read, and never records its value.
-4. Push the GPU kernel:
-   `kaggle kernels push -p build/kaggle-spike/gpu --accelerator NvidiaTeslaT4 -t 5400`.
-   The timeout is the story's 1.5 hours. The script starts no stage after 80 minutes, so
-   its report gets out before the cut.
-5. `kaggle kernels status <owner>/forge-throughput-spike` until it is `COMPLETE` or
-   `ERROR`, then
-   `kaggle kernels output <owner>/forge-throughput-spike -p build/kaggle-spike/gpu-output -o`.
-   That brings back `spike-report.json` and the log, `forge-throughput-spike.log`.
+4. Push the GPU kernel through the job runner, which checks the smoke marker, the clean
+   tree and the week's budget first (FG-303, `docs/runbook.md` "Kaggle jobs"):
+   `uv run forge kaggle run --job spike --config configs/spike/throughput.yaml`.
+   It pushes a new version of the same `<owner>/forge-throughput-spike` kernel, on a T4,
+   and prints the run id. Its timeout is the 1.5-hour estimate and half again, but the
+   script starts no stage after 80 minutes and bounds each stage by the time left, so the
+   session ends long before the cut.
+5. `uv run forge kaggle wait <run_id>` until it is `COMPLETE` or `ERROR`, then
+   `uv run forge kaggle output <run_id>`. That brings back `spike-report.json` and the
+   log, `forge-throughput-spike.log`, into `runs/<run_id>/kernel/`.
 6. Push the session-limit probe as a CPU kernel, which spends no GPU quota:
    `kaggle kernels push -p build/kaggle-spike/limit -t 900`. After 15 minutes, check its
    status, fetch its output the same way, and compare `last_beat_at` in
    `limit-probe.json` with the 900-second timeout.
 7. `kaggle quota -v` again. The difference in GPU hours used goes in the ledger:
-   `uv run forge ledger add --platform kaggle --gpu T4 --hours <h> --run-id <YYYY-MM-DD>-fg301-spike-<sha7> --purpose "FG-301 throughput spike"`.
+   `uv run forge ledger add --platform kaggle --gpu T4 --hours <h> --run-id <run_id> --purpose "FG-301 throughput spike"`,
+   with the run id step 4 printed (`<YYYY-MM-DD>-throughput-spike-<sha7>`).
    The CPU probe gets no row.
 8. Commit both JSON reports under `docs/spikes/kaggle-gpu/`, fill in every "To be
    measured" item below from them, and update ADR-0006 and the section 3.8 budget.

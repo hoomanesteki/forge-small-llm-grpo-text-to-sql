@@ -1,0 +1,9 @@
+# FG-301's throughput spike on a T4 (docs/spikes/kaggle-gpu.md, "Running the spike"):
+#
+#   uv run forge kaggle run --job spike --config configs/spike/throughput.yaml
+#
+# argv is the script's own arguments, written into it since Kaggle starts a script kernel
+# with none. Its run stage starts no stage after 80 minutes, inside the story's 1.5 hours.
+argv: [run]
+ops:
+  est_gpu_hours: 1.5
