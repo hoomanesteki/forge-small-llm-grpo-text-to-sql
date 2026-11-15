@@ -12,11 +12,12 @@ manifest doesn't list.
 
 ``start`` writes the manifest with status ``running`` before any work, and ``finish``
 writes it again at the end, with its end time and GPU hours
-(``forge.ops.manifest.close``): ``finished``, or ``failed`` with the traceback in
-``error.txt``. A run killed outright stays ``running``, and its id can be resumed: the
-same run with the same config, commit and data. A finished run, one made with other
-options, code or data, or one of another kind is refused, and ``hold`` keeps a second
-process off a run while one works on it.
+(``forge.ops.manifest.close``): ``finished``, ``stopped_time_guard`` when the time guard
+stopped it between batches, or ``failed`` with the traceback in ``error.txt``. A run
+killed outright stays ``running``. Any but a finished run can be resumed: the same run
+with the same config, commit and data. A finished run, one made with other options, code
+or data, or one of another kind is refused, and ``hold`` keeps a second process off a run
+while one works on it.
 
 ``RunFiles`` treats the scores file as the record of what is done. Each batch's first
 tries are appended before its generations, and those before its scores, every line
@@ -47,7 +48,7 @@ from pydantic import BaseModel, ValidationError
 
 from forge.core.types import Generation, RunManifest, Score, Split
 from forge.data.splits import SPLITS
-from forge.ops.manifest import close, config_hash
+from forge.ops.manifest import EndStatus, close, config_hash
 
 log = logging.getLogger(__name__)
 
@@ -207,14 +208,23 @@ def check_resumable(previous: RunManifest, fresh: RunManifest) -> None:
         )
 
 
-def finish(paths: RunPaths, manifest: RunManifest, error: BaseException | None) -> RunManifest:
-    """Write the final manifest, with the traceback beside it when the run failed."""
+def finish(
+    paths: RunPaths, manifest: RunManifest, error: BaseException | None, *, stopped: bool = False
+) -> RunManifest:
+    """Write the final manifest, with the traceback beside it when the run failed.
+
+    ``stopped`` says the time guard stopped the run before its last batch; an error
+    outranks it.
+    """
     if error is None:
         # An earlier attempt's failure no longer describes the run.
         paths.error.unlink(missing_ok=True)
     else:
         write_atomic(paths.error, "".join(traceback.format_exception(error)).encode())
-    final = close(manifest, "finished" if error is None else "failed")
+    status: EndStatus = (
+        "failed" if error is not None else "stopped_time_guard" if stopped else "finished"
+    )
+    final = close(manifest, status)
     final = final.model_copy(update={"outputs": paths.outputs()})
     _write_manifest(paths, final)
     return final
