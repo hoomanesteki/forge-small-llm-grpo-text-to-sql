@@ -10,7 +10,8 @@ import torch
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 
-from forge.core.types import Generation, GenParams, Prompt
+from forge.core.types import ExecResult, Generation, GenParams, Prompt
+from forge.eval.retry import ask_again, retry_prompt
 from forge.infer.base import render_chat
 from forge.infer.hf_backend import HfBackend
 from forge.sql.extract import extract_sql
@@ -170,3 +171,28 @@ def test_adapter_changes_the_replies(model_dir: Path, tmp_path: Path) -> None:
 
     assert [g.adapter_ref for g in adapted] == [str(tmp_path / "adapter")] * len(PROMPTS)
     assert _texts(adapted) != _texts(plain)
+
+
+@pytest.mark.phase(2)
+def test_a_retry_is_one_more_turn_of_the_chat(model_dir: Path) -> None:
+    backend = HfBackend(str(model_dir), device="cpu")
+    params = GenParams(temperature=0.7, n=2, max_new_tokens=8, seed=3)
+    firsts = backend.generate(PROMPTS[:2], params)
+    failed = ExecResult(ok=False, error="the reply has no SQL query", error_kind="empty_sql")
+    asks = [(PROMPTS[int(g.example_id[-1])], g, failed) for g in firsts]
+    seconds = ask_again(backend, asks, params)
+    assert [(g.example_id, g.sample_idx) for g in seconds] == [
+        (g.example_id, g.sample_idx) for g in firsts
+    ]
+    # The model reads the whole conversation: its first reply as its own turn, then the
+    # error, with the assistant's next turn opened.
+    rendered = render_chat(backend.tokenizer, retry_prompt(*asks[0]).messages)
+    assert rendered.endswith(
+        f"<|im_start|>assistant\n{firsts[0].text}<|im_end|>\n<|im_start|>user\n"
+        "That query failed with: the reply has no SQL query. Reply with a corrected query."
+        "<|im_end|>\n<|im_start|>assistant\n"
+    )
+    tokens = backend.tokenizer(rendered, add_special_tokens=False)["input_ids"]
+    assert seconds[0].tokens_in == len(tokens) > firsts[0].tokens_in
+    # Drawn the same way again, so a resumed run gets the same second replies.
+    assert _texts(ask_again(backend, asks, params)) == _texts(seconds)

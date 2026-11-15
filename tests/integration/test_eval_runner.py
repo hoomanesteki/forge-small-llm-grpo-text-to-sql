@@ -374,7 +374,6 @@ def test_later_options_are_refused_up_front(spider_mini: Path, runs: Path) -> No
         (["--backend", "vllm"], "the vllm backend is not available yet: it comes with FG-306"),
         (["--backend", "llamacpp"], "comes with FG-702"),
         (["--store", "hub"], "--store hub is available after FG-304"),
-        (["--retry", "1"], "--retry 1 is available after FG-206"),
         (["--n", "2"], "needs a temperature above 0"),
         (["--run-id", "../escape"], "names a folder"),
     ):
@@ -486,3 +485,67 @@ def test_wrong_predictions_get_their_error_class(spider_mini: Path, runs: Path) 
     }
     assert sorted({s.error_class for s in scores if s.error_class}) == sorted(ERROR_CLASSES)
     assert all(s.ex_fast == (s.error_class is None) for s in scores)
+
+
+@pytest.mark.phase(2)
+def test_retry_through_the_cli(
+    spider_mini: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    val = _val()
+    gold = _gold_reply(val)
+    told: list[str] = []
+    # One first query runs out its time, another doesn't parse; both are fixed on retry.
+    first_replies = {val[1].id: ENDLESS, val[2].id: "SELEC name, distance FROM Aircraft"}
+
+    def reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        if len(prompt.messages) > 2:
+            told.append(prompt.messages[-1]["content"])
+        elif prompt.example_id in first_replies:
+            return f"```sql\n{first_replies[prompt.example_id]}\n```"
+        return gold(prompt, params, sample_idx)
+
+    def fake_backend(model: str, examples: Sequence[Example]) -> FakeBackend:
+        return FakeBackend(reply, model_ref=model)
+
+    calls: list[list[tuple[str, str | None, str]]] = []
+    official = runner.official_exec_match
+
+    def spy(items: Sequence[tuple[str, str | None, str]], **kwargs: Any) -> list[bool]:
+        calls.append(list(items))
+        return official(items, **kwargs)
+
+    monkeypatch.setattr(runner, "fake_backend", fake_backend)
+    monkeypatch.setattr(runner, "official_exec_match", spy)
+    cli_runner = CliRunner()
+    args = ["eval", "run", "--backend", "fake", "--model", "gold", "--run-id", "retry"]
+    result = cli_runner.invoke(cli.app, [*args, "--retry", "1", "--allow-dirty"])
+    assert result.exit_code == 0, result.output
+    assert _summary("official EX", 20, 20) in result.stdout
+    assert (
+        "retried 2 of 20 samples whose first query failed to run; official EX without "
+        "retry 18/20  90.00%"
+    ) in result.stdout
+    # The timeout is told as the deadline, not as the time the kill took.
+    assert told == [
+        "That query failed with: timed out after 2000 ms. Reply with a corrected query.",
+        'That query failed with: near "SELEC": syntax error. Reply with a corrected query.',
+    ]
+
+    manifest, generations, scores = _stored(runs / "retry")
+    assert manifest.config["retry"] == 1 and manifest.status == "finished"
+    assert [g.sql for g in generations] == [e.gold_sql for e in val]
+    assert {s.example_id: (s.attempts, s.first_try_ex) for s in scores if s.attempts > 1} == {
+        val[1].id: (2, False),
+        val[2].id: (2, False),
+    }
+    # One official batch: every scored reply, and the first try that didn't time out.
+    (items,) = calls
+    assert sorted(pred or "" for _, pred, _ in items) == sorted(
+        [*(e.gold_sql for e in val), first_replies[val[2].id]]
+    )
+
+    reported = cli_runner.invoke(cli.app, ["report", "run", "retry"])
+    assert reported.exit_code == 0, reported.output
+    report = (runs / "retry" / "eval" / "val-report.md").read_text()
+    assert "\n## Retry\n" in report
+    assert "\n| retried: the first query failed to run | 2 |\n" in report

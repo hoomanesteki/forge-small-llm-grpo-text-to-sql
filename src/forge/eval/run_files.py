@@ -2,10 +2,13 @@
 
 The layout is the run store's (plan section 3.9), under ``runs/<run_id>/``:
 ``manifest.json``, ``config.yaml``, ``eval/<split>-generations.jsonl`` and
-``eval/<split>-scores.jsonl``, plus ``error.txt`` when the last attempt failed. The
-manifest's ``outputs`` lists whichever of these exist, as paths inside the folder.
-Reports of a finished run (``forge.eval.report``) add ``eval/<split>-report.md`` and its
-chart, which the finished manifest doesn't list.
+``eval/<split>-scores.jsonl``, plus ``error.txt`` when the last attempt failed. A run
+that retries failed queries (``forge.eval.retry``) keeps the first replies of the samples
+it retried in ``eval/<split>-first-tries.jsonl``; their generations line holds the
+second reply, the one scored (ADR-0015). The manifest's ``outputs`` lists whichever of
+these exist, as paths inside the folder. Reports of a finished run
+(``forge.eval.report``) add ``eval/<split>-report.md`` and its chart, which the finished
+manifest doesn't list.
 
 ``start`` writes the manifest with status ``running`` before any work, and ``finish``
 writes it again at the end: ``finished``, or ``failed`` with the traceback in
@@ -14,14 +17,16 @@ same run with the same config, commit and data. A finished run, one made with ot
 options, code or data, or one of another kind is refused, and ``hold`` keeps a second
 process off a run while one works on it.
 
-``RunFiles`` treats the scores file as the record of what is done. Each batch's
-generations are appended before its scores, every line flushed to disk, so a kill can
-leave generations without scores, or a last line cut short, but never a score without
-its generation. On opening, both are dropped (their questions run again) and the files
-rewritten. Anything else out of place, such as a line twice, raises ``RunCorrupt``.
+``RunFiles`` treats the scores file as the record of what is done. Each batch's first
+tries are appended before its generations, and those before its scores, every line
+flushed to disk, so a kill can leave first tries or generations without scores, or a
+last line cut short, but never a score without its generation, nor a retried score
+without its first try. On opening, those leftovers are dropped (their questions run
+again) and the files rewritten. Anything else out of place, such as a line twice or a
+first try for a score that took one reply, raises ``RunCorrupt``.
 
 ``read_run`` reads a finished run back for reports and changes nothing. A finished run
-has neither leftover, so there each is ``RunCorrupt`` too.
+has none of those leftovers, so there each is ``RunCorrupt`` too.
 """
 
 from __future__ import annotations
@@ -100,6 +105,10 @@ class RunPaths:
         return self.root / "eval" / f"{self.split}-scores.jsonl"
 
     @property
+    def first_tries(self) -> Path:
+        return self.root / "eval" / f"{self.split}-first-tries.jsonl"
+
+    @property
     def error(self) -> Path:
         return self.root / "error.txt"
 
@@ -117,6 +126,7 @@ class RunPaths:
             "config": self.config,
             "generations": self.generations,
             "scores": self.scores,
+            "first_tries": self.first_tries,
             "error": self.error,
         }
         return {
@@ -155,7 +165,7 @@ def start(paths: RunPaths, fresh: RunManifest) -> RunManifest:
             raise RunCorrupt(f"{paths.manifest} is not a run manifest: {exc}") from exc
         check_resumable(previous, fresh)
         manifest = previous.model_copy(update={"status": "running", "ended_at": None})
-    elif paths.scores.exists() or paths.generations.exists():
+    elif any(path.exists() for path in (paths.scores, paths.generations, paths.first_tries)):
         raise RunCorrupt(f"{paths.root} has outputs but no manifest to say what made them")
     else:
         manifest = fresh
@@ -216,7 +226,7 @@ def finish(paths: RunPaths, manifest: RunManifest, error: BaseException | None) 
 
 
 class RunFiles:
-    """A run's generations and scores, with what earlier attempts finished.
+    """A run's generations, scores and first tries, with what earlier attempts finished.
 
     ``expected`` holds every (example id, sample) the run asks for; a stored score for
     anything else means the files belong to another run.
@@ -227,22 +237,47 @@ class RunFiles:
         self.expected = expected
         scores = _read_lines(paths.scores, Score)
         generations = _read_lines(paths.generations, Generation)
+        first_tries = _read_lines(paths.first_tries, Generation)
         self.done = _paired(paths, generations, scores, expected)
         unscored = len(generations) - len(self.done)
         if unscored:
             log.info("dropping %d generations stored without a score; they run again", unscored)
+        self.first_tries = _first_tries(paths, first_tries, scores, whole=False)
+        if len(first_tries) > len(self.first_tries):
+            log.info(
+                "dropping %d first tries stored without a score; they run again",
+                len(first_tries) - len(self.first_tries),
+            )
         self.scores = scores
         self.generations = {key(g): g for g in generations if key(g) in self.done}
         self.resumed = len(scores)
         if paths.scores.exists() or paths.generations.exists():
             _write_lines(paths.generations, list(self.generations.values()))
             _write_lines(paths.scores, self.scores)
+        if paths.first_tries.exists():
+            _write_lines(paths.first_tries, list(self.first_tries.values()))
 
-    def append(self, generations: Sequence[Generation], scores: Sequence[Score]) -> None:
-        """Store one batch: its generations first, so a kill between the two leaves
-        generations the next attempt drops, never a score without its generation."""
+    def append(
+        self,
+        generations: Sequence[Generation],
+        scores: Sequence[Score],
+        first_tries: Sequence[Generation] = (),
+    ) -> None:
+        """Store one batch: the first tries of the samples it retried, then its
+        generations, then its scores, so a kill between them leaves what the next attempt
+        drops, never a score without its generation or a retried one without its first try.
+
+        Raises ``ValueError`` unless ``first_tries`` are those of the retried scores, in
+        order, before anything is written.
+        """
+        retried = [key(score) for score in scores if score.attempts > 1]
+        if [key(first) for first in first_tries] != retried:
+            raise ValueError("a batch's first tries must be its retried scores' ones, in order")
+        if first_tries:
+            _append_lines(self.paths.first_tries, first_tries)
         _append_lines(self.paths.generations, generations)
         _append_lines(self.paths.scores, scores)
+        self.first_tries.update((key(first), first) for first in first_tries)
         self.generations.update((key(g), g) for g in generations)
         self.scores.extend(scores)
         self.done.update(key(score) for score in scores)
@@ -262,7 +297,8 @@ class StoredRun:
     manifest: RunManifest
     paths: RunPaths
     scores: tuple[Score, ...]  # in file order
-    generations: Mapping[Key, Generation]
+    generations: Mapping[Key, Generation]  # the reply each score is for
+    first_tries: Mapping[Key, Generation]  # the first reply of each retried score
 
 
 def read_run(root: Path) -> StoredRun:
@@ -271,7 +307,8 @@ def read_run(root: Path) -> StoredRun:
     Raises ``FileNotFoundError`` when ``root`` has no manifest, ``RunUnfinished`` unless
     the run finished, ``ValueError`` for a run of another kind, and ``RunCorrupt`` for
     files that can't be read, a config that doesn't hash to the manifest's
-    ``config_hash``, or scores and generations that don't pair up one to one.
+    ``config_hash``, scores and generations that don't pair up one to one, or first tries
+    that don't pair up one to one with the retried scores.
     """
     path = root / MANIFEST_FILE
     if not path.is_file():
@@ -308,7 +345,14 @@ def read_run(root: Path) -> StoredRun:
         raise RunCorrupt(f"{paths.generations} has {_name(unscored[0])}, which has no score")
     if not scores:
         raise RunCorrupt(f"run {run} finished, but {paths.scores} holds no scores")
-    return StoredRun(manifest, paths, tuple(scores), {key(g): g for g in generations})
+    first_tries = _read_lines(paths.first_tries, Generation, whole=True)
+    return StoredRun(
+        manifest,
+        paths,
+        tuple(scores),
+        {key(g): g for g in generations},
+        _first_tries(paths, first_tries, scores, whole=True),
+    )
 
 
 def write_atomic(path: Path, data: bytes) -> None:
@@ -354,6 +398,38 @@ def _paired(
             raise RunCorrupt(f"{paths.scores} has {_name(score)}, which was never generated")
         done.add(key(score))
     return done
+
+
+def _first_tries(
+    paths: RunPaths, first_tries: Sequence[Generation], scores: Sequence[Score], *, whole: bool
+) -> dict[Key, Generation]:
+    """The first try of each retried score, once each one has one and no other score does.
+
+    The first try of a sample not scored yet is left out, as a kill leaves one, unless
+    ``whole`` says there can't be any.
+    """
+    scored = {key(score): score for score in scores}
+    kept: dict[Key, Generation] = {}
+    seen: set[Key] = set()
+    for first in first_tries:
+        if key(first) in seen:
+            raise RunCorrupt(f"{paths.first_tries} has {_name(first)} twice")
+        seen.add(key(first))
+        score = scored.get(key(first))
+        if score is None:
+            if whole:
+                raise RunCorrupt(f"{paths.first_tries} has {_name(first)}, which has no score")
+        elif score.attempts > 1:
+            kept[key(first)] = first
+        else:
+            raise RunCorrupt(f"{paths.first_tries} has {_name(first)}, whose score wasn't retried")
+    for score in scores:
+        if score.attempts > 1 and key(score) not in kept:
+            raise RunCorrupt(
+                f"{paths.scores} has {_name(score)} retried, but {paths.first_tries} lacks its "
+                "first try"
+            )
+    return kept
 
 
 def _read_lines(path: Path, model: type[M], *, whole: bool = False) -> list[M]:

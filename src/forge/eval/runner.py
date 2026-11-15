@@ -12,14 +12,19 @@ A run evaluates one model on one split:
 4. Run each predicted query in the run's ``SandboxPool``: model SQL is untrusted
    (ADR-0014), so each query has a hard deadline of ``PRED_TIMEOUT_MS`` plus the kill
    grace.
-5. Compare with the split's gold results for fast EX. Gold runs in process, once, and is
+5. With ``--retry 1``, ask once more for each sample whose query failed to run, with
+   the error (``forge.eval.retry``), and run the second reply's query in the same pool.
+   The sample is scored on the second reply, and its first is kept as its first try.
+6. Compare with the split's gold results for fast EX. Gold runs in process, once, and is
    cached (``forge.eval.gold_cache``).
-6. Official EX (``forge.eval.testsuite``) in one batch at the end, on the same pool, at
-   most ``OFFICIAL_ITEM_TIMEOUT_S`` an item. A prediction that timed out in step 4 is no
-   match without the evaluator (ADR-0008).
-7. Name the error class of each wrong prediction (``forge.eval.taxonomy``), against its
+7. Official EX (``forge.eval.testsuite``) in one batch at the end, on the same pool, at
+   most ``OFFICIAL_ITEM_TIMEOUT_S`` an item, for each scored reply and each first try
+   (``first_try_ex``). A prediction that timed out in step 4 or 5 is no match without
+   the evaluator (ADR-0008).
+8. Name the error class of each wrong prediction (``forge.eval.taxonomy``), against its
    database's columns, which are read in process like gold.
-8. Each batch's generations and scores are stored before the next batch starts.
+9. Each batch's first tries, generations and scores are stored before the next batch
+   starts.
 
 The options and their checks are ``forge.eval.config``; the run's folder, its manifest
 and how a killed run resumes are ``forge.eval.run_files``.
@@ -34,6 +39,7 @@ import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from forge.core.types import Example, ExecResult, Generation, GenParams, Prompt, RunManifest, Score
 from forge.data.prompts import TokenCounter, chat_token_counter, fit_prompt
@@ -50,6 +56,7 @@ from forge.eval.config import (
 )
 from forge.eval.gold_cache import MAX_ROWS, gold_results
 from forge.eval.mutations import Columns
+from forge.eval.retry import ask_again, retried
 from forge.eval.run_files import Key, RunFiles, RunPaths, finish, hold, key, start
 from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
@@ -74,9 +81,25 @@ class EvalRun:
     questions: int
     scores: tuple[Score, ...]
     resumed: int  # scores kept from an earlier attempt
-    # Wall time of this attempt's generate calls. Rows of one batch share its time as
-    # latency_ms, so summing the generations would count a batch once per row.
+    # Wall time of this attempt's generate calls, retries included. Rows of one batch
+    # share its time as latency_ms, so summing the generations would count a batch once
+    # per row.
     generate_s: float
+
+
+class _TimedBackend:
+    """A backend that adds up the wall time of its ``generate`` calls in ``seconds``."""
+
+    def __init__(self, backend: InferenceBackend) -> None:
+        self.backend = backend
+        self.name = backend.name
+        self.seconds = 0.0
+
+    def generate(self, prompts: Sequence[Prompt], params: GenParams) -> list[Generation]:
+        started = time.perf_counter()
+        generations = self.backend.generate(prompts, params)
+        self.seconds += time.perf_counter() - started
+        return generations
 
 
 def word_tokens(prompt: Prompt) -> int:
@@ -199,7 +222,7 @@ def _evaluate(
             len(pending),
         )
     schemas = _schemas(pending, root)
-    generate_s = 0.0
+    timed = _TimedBackend(backend)
     with SandboxPool(workers, data_dir=root, imports=(testsuite.__name__,)) as pool:
         for begin in range(0, len(pending), batch_size):
             batch = pending[begin : begin + batch_size]
@@ -207,26 +230,26 @@ def _evaluate(
                 fit_prompt(example, config.prompt_version, measure, data_dir=root).prompt
                 for example in batch
             ]
-            started = time.perf_counter()
-            replies = backend.generate(prompts, params)
-            generate_s += time.perf_counter() - started
+            replies = timed.generate(prompts, params)
             generations = _new_generations(replies, batch, params.n, files.done)
             preds = _execute(pool, generations, by_id)
-            scores = [
-                score_generation(
-                    by_id[g.example_id],
-                    g,
-                    pred,
-                    gold[g.example_id],
-                    columns=schemas[by_id[g.example_id].db_id],
+            firsts = (
+                _retry_failed(timed, pool, prompts, generations, preds, by_id, params)
+                if config.retry
+                else {}
+            )
+            scores: list[Score] = []
+            for i, (generation, pred) in enumerate(zip(generations, preds, strict=True)):
+                example = by_id[generation.example_id]
+                score = score_generation(
+                    example, generation, pred, gold[example.id], columns=schemas[example.db_id]
                 )
-                for g, pred in zip(generations, preds, strict=True)
-            ]
-            files.append(generations, scores)
+                scores.append(retried(score, firsts[i][1]) if i in firsts else score)
+            files.append(generations, scores, [first for first, _ in firsts.values()])
             if progress is not None:
                 progress(len(files.scores), len(files.expected))
         _fill_official(files, by_id, pool)
-    return len(chosen), files, generate_s
+    return len(chosen), files, timed.seconds
 
 
 def _hf_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
@@ -267,6 +290,35 @@ def _new_generations(
     return [generation for generation in generations if key(generation) not in done]
 
 
+def _retry_failed(
+    backend: InferenceBackend,
+    pool: SandboxPool,
+    prompts: Sequence[Prompt],
+    generations: list[Generation],
+    preds: list[ExecResult],
+    examples: Mapping[str, Example],
+    params: GenParams,
+) -> dict[int, tuple[Generation, ExecResult]]:
+    """Ask once more for each generation whose query failed to run, and run the second
+    replies' queries in the pool.
+
+    Each second reply and its result take the first's place in ``generations`` and
+    ``preds``; the first replies and their results are returned, by position.
+    """
+    # ok is the whole rule: a query that ran is never retried, whatever its rows.
+    failed = [i for i, pred in enumerate(preds) if not pred.ok]
+    if not failed:
+        return {}
+    asked = {prompt.example_id: prompt for prompt in prompts}
+    firsts = {i: (generations[i], preds[i]) for i in failed}
+    seconds = ask_again(
+        backend, [(asked[generations[i].example_id], *firsts[i]) for i in failed], params
+    )
+    for i, second, result in zip(failed, seconds, _execute(pool, seconds, examples), strict=True):
+        generations[i], preds[i] = second, result
+    return firsts
+
+
 def _execute(
     pool: SandboxPool, generations: Sequence[Generation], examples: Mapping[str, Example]
 ) -> list[ExecResult]:
@@ -284,18 +336,25 @@ def _execute(
 
 
 def _fill_official(files: RunFiles, examples: Mapping[str, Example], pool: SandboxPool) -> None:
-    """Official EX for every stored score that lacks it, in one batch on the run's pool."""
-    todo = [i for i, score in enumerate(files.scores) if score.ex_official is None]
+    """Official EX for every stored score that lacks it, and for each retried score's
+    first try that lacks it, in one batch on the run's pool."""
+    # (score index, the field the verdict fills, the reply it judges)
+    todo: list[tuple[int, Literal["ex_official", "first_try_ex"], Generation]] = []
+    for i, score in enumerate(files.scores):
+        if score.ex_official is None:
+            todo.append((i, "ex_official", files.generations[key(score)]))
+        if score.attempts > 1 and score.first_try_ex is None:
+            todo.append((i, "first_try_ex", files.first_tries[key(score)]))
     if not todo:
         return
     items: list[tuple[str, str | None, str]] = []
-    for i in todo:
+    for i, _, reply in todo:
         example = examples[files.scores[i].example_id]
-        items.append((example.db_id, files.generations[key(files.scores[i])].sql, example.gold_sql))
+        items.append((example.db_id, reply.sql, example.gold_sql))
     verdicts = official_exec_match(
         items, data_dir=pool.data_dir, item_timeout_s=OFFICIAL_ITEM_TIMEOUT_S, pool=pool
     )
     scores = list(files.scores)
-    for i, verdict in zip(todo, verdicts, strict=True):
-        scores[i] = scores[i].model_copy(update={"ex_official": verdict})
+    for (i, field, _), verdict in zip(todo, verdicts, strict=True):
+        scores[i] = scores[i].model_copy(update={field: verdict})
     files.replace_scores(scores)

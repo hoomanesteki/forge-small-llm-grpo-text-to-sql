@@ -337,7 +337,10 @@ def eval_run(
         float, typer.Option(min=0.0, help="0 decodes greedily; --n above 1 needs more.")
     ] = 0.0,
     retry: Annotated[
-        int, typer.Option(min=0, max=1, help="1 retries a failing query once (FG-206).")
+        int,
+        typer.Option(
+            min=0, max=1, help="1 asks once more, with the error, when a query fails to run."
+        ),
     ] = 0,
     run_id: Annotated[
         str | None,
@@ -420,6 +423,15 @@ def eval_run(
         ("official EX", sum(s.ex_official is True for s in scores)),
     ):
         typer.echo(f"{name:<11}  {hits:>5}/{len(scores)}  {hits / len(scores):.2%}")
+    if retry:
+        from forge.eval.retry import without_retry
+
+        asked = sum(s.attempts > 1 for s in scores)
+        first = sum(without_retry(s).ex_official is True for s in scores)
+        typer.echo(
+            f"retried {asked} of {len(scores)} samples whose first query failed to run; "
+            f"official EX without retry {first}/{len(scores)}  {first / len(scores):.2%}"
+        )
 
 
 @eval_app.command("gold")
