@@ -24,8 +24,10 @@ from forge.eval.config import (
     STORES,
     EvalConfig,
     NotAvailable,
+    Ops,
     check_config,
     read_config_file,
+    read_config_sections,
 )
 
 BASE = EvalConfig(model="org/model")
@@ -248,6 +250,61 @@ def test_cli_refuses_a_bad_config_file_before_anything_runs(
     gone = cli_runner.invoke(cli.app, ["eval", "run", "--config", str(tmp_path / "none.yaml")])
     assert gone.exit_code == 2 and "does not exist" in _unboxed(gone.stderr)
     assert configs == []
+
+
+@pytest.mark.phase(3)
+def test_ops_section_is_read_apart_from_the_options(tmp_path: Path) -> None:
+    path = tmp_path / "eval.yaml"
+    path.write_text("model: gold\nbackend: fake\nops:\n  est_gpu_hours: 0.25\n", encoding="utf-8")
+    options, ops = read_config_sections(path)
+    assert (options, ops) == ({"model": "gold", "backend": "fake"}, Ops(est_gpu_hours=0.25))
+    # forge eval run's reader checks the section and leaves it out.
+    assert read_config_file(path) == options
+    # A whole number of hours is a number too, and a file without the section has no ops.
+    path.write_text("model: gold\nops: {est_gpu_hours: 2}\n", encoding="utf-8")
+    assert read_config_sections(path)[1] == Ops(est_gpu_hours=2.0)
+    path.write_text("model: gold\n", encoding="utf-8")
+    assert read_config_sections(path)[1] == Ops()
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    ("ops", "message"),
+    [
+        ("ops: null", "ops must be a mapping"),
+        ("ops: [est_gpu_hours]", "ops must be a mapping"),
+        ("ops: {est_gpu_hours: 1, checkpoint_every: 50}", "sets ops.checkpoint_every, which"),
+        ("ops: {est_gpu_hours: 0}", "ops.est_gpu_hours must be a positive number, got 0"),
+        ("ops: {est_gpu_hours: -1.5}", "must be a positive number, got -1.5"),
+        ("ops: {est_gpu_hours: .inf}", "must be a positive number, got inf"),
+        ("ops: {est_gpu_hours: .nan}", "must be a positive number, got nan"),
+        ("ops: {est_gpu_hours: true}", "must be a positive number, got True"),
+        ("ops: {est_gpu_hours: '1'}", "must be a positive number, got '1'"),
+        ("ops: {est_gpu_hours: null}", "must be a positive number, got None"),
+    ],
+)
+def test_ops_section_refused_unless_it_holds_known_ops(
+    tmp_path: Path, ops: str, message: str
+) -> None:
+    path = tmp_path / "eval.yaml"
+    path.write_text(f"model: gold\n{ops}\n", encoding="utf-8")
+    for read in (read_config_sections, read_config_file):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            read(path)
+
+
+@pytest.mark.phase(3)
+def test_eval_run_takes_a_config_with_ops_and_ignores_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configs = _captured(monkeypatch)
+    path = tmp_path / "eval.yaml"
+    path.write_text(
+        "model: gold\nbackend: fake\nlimit: 3\nops:\n  est_gpu_hours: 0.5\n", encoding="utf-8"
+    )
+    result = CliRunner().invoke(cli.app, ["eval", "run", "--config", str(path)])
+    assert (result.exit_code, result.stderr) == (1, "error: stopped before any work\n")
+    assert configs == [EvalConfig(model="gold", backend="fake", limit=3)]
 
 
 def _unboxed(text: str) -> str:
