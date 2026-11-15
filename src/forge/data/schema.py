@@ -3,7 +3,8 @@
 The statements are the database's own, read from ``sqlite_master``, so column types,
 primary keys and foreign keys all come through as their authors wrote them. Comments
 are removed and whitespace collapsed (``normalize_sql``). Prompt version ``p2`` follows
-each table with up to three of its rows as ``-- sample:`` comments.
+each table with up to three of its rows as ``-- sample:`` comments, values as stored but
+with each line break shown as a space.
 
 Results are cached per (data directory, database, version), so building thousands of
 prompts reads each database once. Databases are opened with
@@ -31,19 +32,23 @@ SAMPLE_ROWS = 3
 SAMPLE_CHARS = 50
 SAMPLE_PREFIX = "-- sample: "
 
-# Statements are split into whitespace and comments (``gap``), quoted strings and names,
-# the punctuation whose spacing gets tidied, and everything else. ``bad`` is a quote or
-# block comment that never closes.
+# Statements are split into whitespace and comments (``gap``), quoted strings and names
+# (SQLite's [name] among them), the punctuation whose spacing gets tidied, and everything
+# else. ``bad`` is a quote, bracket or block comment that never closes.
 _TOKEN = re.compile(
     r"""
     (?P<gap>\s+|--[^\n]*|/\*.*?\*/)
-    |(?P<quoted>'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`)
+    |(?P<quoted>'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\])
     |(?P<punct>[(),])
-    |(?P<word>(?:[^\s(),'"`/-]|-(?!-)|/(?!\*))+)
+    |(?P<word>(?:[^\s(),'"`\[/-]|-(?!-)|/(?!\*))+)
     |(?P<bad>.)
     """,
     re.VERBOSE | re.DOTALL,
 )
+
+# Where str.splitlines() ends a line, a CR LF pair counting once. Inside a sample value
+# any of them would end its comment; every other character is kept as stored.
+_LINE_BREAK = re.compile(r"\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
 
 
 @dataclass(frozen=True)
@@ -170,8 +175,7 @@ def _literal(value: object) -> str:
     if isinstance(value, bytes):
         return "X" + _quoted(value.hex())
     if isinstance(value, str):
-        # Line breaks inside a value would end the comment it sits in.
-        return _quoted(" ".join(value.split()))
+        return _quoted(_LINE_BREAK.sub(" ", value))
     return _cut(str(value))
 
 
