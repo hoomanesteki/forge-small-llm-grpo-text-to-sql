@@ -29,8 +29,10 @@ from forge.eval.taxonomy import ERROR_CLASSES
 from forge.infer import hf_backend
 from forge.infer.base import FakeBackend
 from forge.ops.dev_usage import read_uses
+from forge.ops.hub import LocalRunStore
 from forge.ops.ledger import run_hours
 from forge.ops.manifest import accelerator
+from forge.ops.timeguard import Deadline
 from tests.fakes import WordTokenizer
 from tests.report_trace import untraced
 
@@ -397,6 +399,54 @@ def test_failed_run_is_recorded_then_resumed(spider_mini: Path, runs: Path) -> N
     # A finished run's results stand: the same id is refused, not run again.
     with pytest.raises(RunConflict, match="has finished"):
         run_eval(config, backend=FakeBackend(reply, model_ref="gold"), allow_dirty=True)
+
+
+@pytest.mark.phase(3)
+def test_time_guard_stops_between_batches_then_resumes(
+    spider_mini: Path, runs: Path, tmp_path: Path
+) -> None:
+    val = _val()
+    reply = _gold_reply(val)
+    now = [0.0]
+
+    def slow_reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        now[0] += 10.0  # each reply takes 10 s, so a batch of 4 takes 40
+        return reply(prompt, params, sample_idx)
+
+    # Two minutes: after two batches 40 s are left, which another 40 s batch could pass.
+    deadline = Deadline(2, clock=lambda: now[0])
+    store = LocalRunStore(tmp_path / "store")
+    config = EvalConfig(model="gold", backend="fake", run_id="guarded")
+    run = run_eval(
+        config,
+        backend=FakeBackend(slow_reply, model_ref="gold"),
+        allow_dirty=True,
+        workers=1,
+        batch_size=4,
+        store=store,
+        deadline=deadline,
+    )
+    assert run.manifest.status == "stopped_time_guard" and run.manifest.ended_at is not None
+    assert "error" not in run.manifest.outputs
+    manifest, generations, scores = _stored(runs / "guarded")
+    assert manifest == run.manifest
+    assert (
+        [s.example_id for s in scores]
+        == [e.id for e in val[:8]]
+        == [g.example_id for g in generations]
+    )
+    # Official EX waits for the attempt that finishes the run.
+    assert all(s.ex_fast and s.ex_official is None for s in scores)
+    # A stopped run has ended, so it goes to the store, ready to resume elsewhere.
+    assert store.get_manifest("guarded").status == "stopped_time_guard"
+
+    run = run_eval(
+        config, backend=FakeBackend(reply, model_ref="gold"), allow_dirty=True, workers=1
+    )
+    assert run.manifest.status == "finished" and run.resumed == 8
+    assert run.manifest.started_at == manifest.started_at
+    assert [s.example_id for s in run.scores] == [e.id for e in val]
+    assert all(s.ex_official is True for s in run.scores)
 
 
 @pytest.mark.phase(2)
