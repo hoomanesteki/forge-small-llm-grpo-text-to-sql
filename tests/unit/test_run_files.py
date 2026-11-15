@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,10 +19,13 @@ from forge.eval.run_files import (
     RunFiles,
     RunLocked,
     RunPaths,
+    RunUnfinished,
     finish,
     hold,
+    read_run,
     start,
 )
+from forge.ops.manifest import config_hash
 
 EXPECTED = {(f"q{i}", 0) for i in range(4)}
 
@@ -195,3 +199,96 @@ def test_hold_keeps_a_second_process_off_the_run(tmp_path: Path) -> None:
             pass
     with hold(paths):
         pass
+
+
+def _finished(tmp_path: Path) -> RunPaths:
+    """A run that finished with two questions scored, in a folder named for its id."""
+    manifest = _manifest(config_hash=config_hash({"split": "val", "limit": 5}))
+    paths = RunPaths(tmp_path / manifest.run_id, "val")
+    started = start(paths, manifest)
+    RunFiles(paths, EXPECTED).append(
+        [_generation("q0"), _generation("q1")], [_score("q0"), _score("q1")]
+    )
+    finish(paths, started, None)
+    return paths
+
+
+def _rewrite_manifest(paths: RunPaths, **changes: Any) -> None:
+    manifest = RunManifest.model_validate_json(paths.manifest.read_bytes())
+    paths.manifest.write_text(manifest.model_copy(update=changes).model_dump_json())
+
+
+@pytest.mark.phase(2)
+def test_read_run_reads_a_finished_run_as_stored(tmp_path: Path) -> None:
+    paths = _finished(tmp_path)
+    stored = read_run(paths.root)
+    assert stored.manifest == RunManifest.model_validate_json(paths.manifest.read_bytes())
+    assert stored.manifest.status == "finished" and stored.paths == paths
+    assert stored.scores == (_score("q0"), _score("q1"))
+    assert dict(stored.generations) == {("q0", 0): _generation("q0"), ("q1", 0): _generation("q1")}
+
+    moved = paths.root.rename(tmp_path / "another-name")
+    with pytest.raises(RunCorrupt, match="is the manifest of run 2026-11-15-gold-eval-abc1234"):
+        read_run(moved)
+    with pytest.raises(FileNotFoundError, match=r"has no manifest\.json"):
+        read_run(paths.root)
+
+
+@pytest.mark.phase(2)
+@pytest.mark.parametrize(
+    ("spoil", "error", "message"),
+    [
+        (
+            lambda p: p.scores.write_bytes(p.scores.read_bytes() + b'{"example_id"'),
+            RunCorrupt,
+            "ends in a line cut short",
+        ),
+        (
+            lambda p: p.generations.write_text(
+                p.generations.read_text() + _lines(_generation("q2"))
+            ),
+            RunCorrupt,
+            "q2 sample 0, which has no score",
+        ),
+        (
+            lambda p: p.scores.write_text(p.scores.read_text() + _lines(_score("q1"))),
+            RunCorrupt,
+            "has q1 sample 0 twice",
+        ),
+        (lambda p: p.generations.unlink(), RunCorrupt, "val-generations.jsonl is missing"),
+        (
+            lambda p: _rewrite_manifest(p, config={"split": "val", "limit": 6}),
+            RunCorrupt,
+            "doesn't hash to its config_hash",
+        ),
+        (
+            lambda p: _rewrite_manifest(p, config={}, config_hash=config_hash({})),
+            RunCorrupt,
+            "names no split",
+        ),
+        (lambda p: _rewrite_manifest(p, status="running"), RunUnfinished, "is still running"),
+        (lambda p: _rewrite_manifest(p, status="failed"), RunUnfinished, "error.txt says why"),
+        (lambda p: _rewrite_manifest(p, kind="grpo"), ValueError, "is a grpo run, not an eval"),
+    ],
+    ids=[
+        "cut-short",
+        "unscored",
+        "scored-twice",
+        "no-generations",
+        "edited-config",
+        "no-split",
+        "running",
+        "failed",
+        "other-kind",
+    ],
+)
+def test_read_run_refuses_a_run_reports_cant_trust(
+    tmp_path: Path, spoil: Callable[[RunPaths], object], error: type[Exception], message: str
+) -> None:
+    paths = _finished(tmp_path)
+    spoil(paths)
+    files = {path: path.read_bytes() for path in paths.root.rglob("*") if path.is_file()}
+    with pytest.raises(error, match=message):
+        read_run(paths.root)
+    # Reading changed nothing.
+    assert {path: path.read_bytes() for path in paths.root.rglob("*") if path.is_file()} == files
