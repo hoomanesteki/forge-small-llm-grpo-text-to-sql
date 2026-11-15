@@ -1,8 +1,9 @@
-"""Reports (stage 10): what a run scored, from its stored files only.
+"""Reports (stage 10): what a run scored, and how two runs differ, from stored files only.
 
 ``write_run_report`` writes ``eval/<split>-report.md`` in a run's folder, with the chart
-``eval/<split>-hardness.png`` beside it. Nothing in a report comes from a run's memory:
-``load_run`` reads
+``eval/<split>-hardness.png`` beside it. ``write_compare_report`` writes
+``eval/compare-<a>.md`` in run b's folder, or where ``out`` says. Nothing in a report
+comes from a run's memory: ``load_run`` reads
 
 - the run's manifest, scores and generations, through ``read_run``, which takes only a
   finished run whose files agree with each other and with the manifest;
@@ -27,9 +28,10 @@ committed chart changes only with its numbers.
 
 Each kind of number has one format, so FG-207's I4 check can find every number in the
 stored files: a rate as a percentage with one decimal and its 95% interval in brackets
-(``45.2% [41.8%, 48.6%]``), and counts with thousands separators. Constants (the
-interval level, resamples and seed, how many failures are shown, and Spider's citation)
-appear in prose lines only.
+(``45.2% [41.8%, 48.6%]``), a change in percentage points with its sign and interval
+(``+5.2 [+1.0, +9.4]``), counts with thousands separators, and a p-value to four
+decimals (``< 0.0001`` below that). Constants (the interval level, resamples and seed,
+how many failures are shown, and Spider's citation) appear in prose lines only.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
-from forge.core.types import Example, GenParams, Score, Split
+from forge.core.types import Example, GenParams, Hardness, Score, Split
 from forge.data.manifest import data_manifest_hash
 from forge.data.spider import load_raw, resolve_data_dir
 from forge.data.splits import split_examples
@@ -55,8 +57,10 @@ from forge.eval.metrics import (
     PERCENTILES,
     RESAMPLES,
     SEED,
+    Estimate,
     Rate,
     Summary,
+    compare,
     gold_clusters,
     summarize,
 )
@@ -79,6 +83,7 @@ TOP_CLASSES = 3
 SHOWN_CHARS = 600
 UNCLASSIFIED = "unclassified"
 GENERATED = "Generated: "
+COMPARE_PREFIX = "compare-"
 
 LEVEL = f"{PERCENTILES[1] - PERCENTILES[0]:g}%"
 SPIDER = (
@@ -180,6 +185,33 @@ def write_run_report(
     return RunReport(paths.report, paths.chart)
 
 
+def write_compare_report(
+    a: str,
+    b: str,
+    *,
+    out: Path | None = None,
+    runs_root: Path | None = None,
+    data_dir: Path | None = None,
+    now: datetime | None = None,
+) -> Path:
+    """Write run b against run a to ``out``, by default ``eval/compare-<a>.md`` in b's folder.
+
+    Raises ``ValueError`` unless both runs answered the same samples of one split.
+    """
+    data, root = _data(data_dir), runs_root or runs_dir()
+    run_a, run_b = _load(a, data, root), _load(b, data, root)
+    path = out or compare_path(run_b, a)
+    text = render_compare(run_a, run_b, out=path, generated=now or datetime.now(UTC))
+    # Run b's lock keeps a second writer of its reports from sharing the temporary file.
+    with hold(run_b.stored.paths):
+        write_atomic(path, text.encode())
+    return path
+
+
+def compare_path(b: ReportRun, a: str) -> Path:
+    return b.stored.paths.report.parent / f"{COMPARE_PREFIX}{a}.md"
+
+
 def render_run(run: ReportRun, *, generated: datetime) -> str:
     """The run's report as markdown."""
     summary = run.summary
@@ -227,6 +259,109 @@ def render_run(run: ReportRun, *, generated: datetime) -> str:
         "## Example failures",
         *_examples(run),
     ]
+    return "\n".join(lines) + "\n"
+
+
+def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime) -> str:
+    """Run b against run a as markdown, with links that work from ``out``.
+
+    Raises ``ValueError`` unless both runs answered the same samples of one split.
+    """
+    split = a.options.split
+    if b.options.split != split:
+        raise ValueError(
+            f"run {a.run_id} answered {split} and run {b.run_id} {b.options.split}; "
+            "compare runs on one split"
+        )
+    overall = compare(a.stored.scores, b.stored.scores, clusters=a.clusters)
+    levels = {
+        level: compare(
+            _at(a.stored.scores, level), _at(b.stored.scores, level), clusters=a.clusters
+        )
+        for level in a.summary.by_hardness
+    }
+    table = overall.mcnemar
+    unit = "question" if overall.n == overall.questions else "sample"
+    delta = overall.delta
+    title = (
+        f"# Official EX on {split}, run b against run a: {_points(delta.value)} points "
+        f"[{_points(delta.low)}, {_points(delta.high)}]"
+    )
+    if table.pvalue is not None:
+        title += f", McNemar {_p(table.pvalue)}"
+    written = (
+        f"Written by `forge report compare {a.run_id} {b.run_id}` from both runs' stored files"
+    )
+    samples = b.options.generation.n
+    lines = [
+        title,
+        "",
+        _generated(generated),
+        "",
+        f"{written}; don't edit it by hand.",
+        "",
+        "| | run a | run b |",
+        "|---|---|---|",
+        f"| Run | `{a.run_id}` | `{b.run_id}` |",
+        *(
+            f"| {name} | {value_a} | {value_b} |"
+            for (name, value_a), (_, value_b) in zip(
+                _header(a, out, shared=False), _header(b, out, shared=False), strict=True
+            )
+        ),
+        "",
+        f"Both runs answered the same {_count(overall.questions, 'question')} of {split}, "
+        f"{_count(samples, 'sample')} each, on data with manifest hash "
+        f"`{b.stored.manifest.data_manifest_hash}`.",
+        "",
+        "## Execution accuracy",
+        "",
+        f"| | run a [{LEVEL} interval] | run b [{LEVEL} interval] "
+        f"| change in points [{LEVEL} interval] |",
+        "|---|---:|---:|---:|",
+        f"| valid SQL | {_rate(a.summary.valid)} | {_rate(b.summary.valid)} | |",
+        f"| fast EX | {_rate(a.summary.ex_fast)} | {_rate(b.summary.ex_fast)} | |",
+        f"| official EX | {_rate(a.official)} | {_rate(b.official)} | {_change(overall.delta)} |",
+        "",
+        "Only official EX, the reported rate, gets a change: each sample of run b against",
+        f"the same one of run a. {_method(a)}",
+        "",
+        "## McNemar's test",
+        "",
+        "| official EX | run b right | run b wrong |",
+        "|---|---:|---:|",
+        f"| run a right | {table.both:,} | {table.only_a:,} |",
+        f"| run a wrong | {table.only_b:,} | {table.neither:,} |",
+        "",
+        f"The runs disagree on {table.only_a + table.only_b:,} of {_count(overall.n, unit)}: "
+        f"run b alone is right on {table.only_b:,}, run a alone on {table.only_a:,}.",
+        _mcnemar(table.pvalue),
+        "",
+        "## By hardness",
+        "",
+        f"| hardness | questions | run a | run b | change in points [{LEVEL} interval] |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for level, change in levels.items():
+        lines.append(
+            f"| {level} | {change.questions:,} | {_pct(change.ex_a)} | {_pct(change.ex_b)} "
+            f"| {_change(change.delta)} |"
+        )
+    failures_a, failures_b = _failures(a.stored.scores), _failures(b.stored.scores)
+    lines += [
+        "",
+        "## By error class",
+        "",
+        "Failures of official EX in each run, by class.",
+        "",
+        "| class | run a | run b | change |",
+        "|---|---:|---:|---:|",
+    ]
+    for name in _class_rows(failures_a, failures_b):
+        before, after = failures_a[name], failures_b[name]
+        lines.append(f"| {name} | {before:,} | {after:,} | {after - before:+,} |")
+    if failures_a[UNCLASSIFIED] or failures_b[UNCLASSIFIED]:
+        lines += ["", UNCLASSIFIED_NOTE]
     return "\n".join(lines) + "\n"
 
 
@@ -371,6 +506,10 @@ def _official(rate: Rate | None) -> Rate:
     return rate
 
 
+def _at(scores: Iterable[Score], level: Hardness) -> list[Score]:
+    return [score for score in scores if score.hardness == level]
+
+
 def _split(run: ReportRun) -> str:
     options = run.options
     limit = f" (limit {options.limit:,})" if options.limit is not None else ""
@@ -389,8 +528,9 @@ def _generation(params: GenParams) -> str:
     )
 
 
-def _header(run: ReportRun, page: Path) -> list[tuple[str, str]]:
-    """What made the run, as table rows for the markdown file at ``page``."""
+def _header(run: ReportRun, page: Path, *, shared: bool = True) -> list[tuple[str, str]]:
+    """What made the run, as table rows for the markdown file at ``page``. Without
+    ``shared``, the rows two compared runs have in common are left out."""
     manifest, options = run.stored.manifest, run.options
     adapter = _code(manifest.adapter_ref) if manifest.adapter_ref else "none"
     return [
@@ -398,10 +538,10 @@ def _header(run: ReportRun, page: Path) -> list[tuple[str, str]]:
         ("Adapter", adapter),
         ("Backend", _code(options.backend)),
         ("Prompt version", _code(options.prompt_version)),
-        ("Split", _split(run)),
+        *([("Split", _split(run))] if shared else []),
         ("Generation", _generation(options.generation)),
         ("Git commit", f"`{manifest.git_sha}`"),
-        ("Data manifest hash", f"`{manifest.data_manifest_hash}`"),
+        *([("Data manifest hash", f"`{manifest.data_manifest_hash}`")] if shared else []),
         ("Manifest", _link(run.stored.paths.manifest, page)),
     ]
 
@@ -426,6 +566,15 @@ def _checker_disagreement(scores: Sequence[Score]) -> list[str]:
         f"EX matches {only_fast:,}, and only official EX {only_official:,}.",
         "",
     ]
+
+
+def _mcnemar(pvalue: float | None) -> str:
+    if pvalue is None:
+        return (
+            "There is no p-value: each question has several samples, which are not "
+            "independent pairs. The interval of the change draws whole questions, so it holds."
+        )
+    return f"Exact two-sided McNemar test: {_p(pvalue)}."
 
 
 def _failures(scores: Iterable[Score]) -> Counter[str]:
@@ -570,3 +719,16 @@ def _pct(share: float) -> str:
 
 def _rate(rate: Rate) -> str:
     return f"{_pct(rate.value)} [{_pct(rate.low)}, {_pct(rate.high)}]"
+
+
+def _points(change: float) -> str:
+    # Adding 0.0 turns a rounded -0.0 into 0.0, so no change shows as +0.0.
+    return f"{round(100 * change, 1) + 0.0:+.1f}"
+
+
+def _change(change: Estimate) -> str:
+    return f"{_points(change.value)} [{_points(change.low)}, {_points(change.high)}]"
+
+
+def _p(pvalue: float) -> str:
+    return "p < 0.0001" if pvalue < 0.0001 else f"p = {pvalue:.4f}"

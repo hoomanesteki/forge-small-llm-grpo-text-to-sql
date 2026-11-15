@@ -564,8 +564,8 @@ def eval_agreement(
 
 def _report_errors() -> tuple[type[Exception], ...]:
     """What reading runs for a report can raise: OSError for a missing run or data
-    (DataNotFound), ValueError for a corrupt run (RunCorrupt) or one made on other data,
-    and RunLocked while another process writes a run."""
+    (DataNotFound), ValueError for a corrupt run (RunCorrupt), one made on other data or
+    runs that can't be compared, and RunLocked while another process writes a run."""
     from forge.eval.run_files import RunLocked, RunUnfinished
     from forge.ops.paths import RepoRootNotFound
 
@@ -590,6 +590,27 @@ def report_run(
         raise typer.Exit(1) from exc
     typer.echo(f"report: {written.report}")
     typer.echo(f"chart: {written.chart}")
+
+
+@report_app.command("compare")
+def report_compare(
+    a: Annotated[str, typer.Argument(help="The run compared against, such as the base model.")],
+    b: Annotated[str, typer.Argument(help="The run compared with it, on the same questions.")],
+    out: Annotated[
+        Path | None,
+        typer.Option(dir_okay=False, help="Write here, not runs/<b>/eval/compare-<a>.md."),
+    ] = None,
+) -> None:
+    """Run b against run a: the change in official EX with its interval, McNemar's test,
+    and the changes by hardness and by error class."""
+    from forge.eval.report import write_compare_report
+
+    try:
+        written = write_compare_report(a, b, out=out)
+    except _report_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"report: {written}")
 
 
 def _report_git_sha() -> str:
