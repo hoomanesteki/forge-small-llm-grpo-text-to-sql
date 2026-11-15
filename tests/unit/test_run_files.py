@@ -1,0 +1,197 @@
+"""An eval run's folder: the manifest's life, resume checks, the lock, kill-safe outputs."""
+
+from __future__ import annotations
+
+import fcntl
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+from forge.core.types import Generation, RunManifest, Score
+from forge.eval.run_files import (
+    LOCK_FILE,
+    RunConflict,
+    RunCorrupt,
+    RunFiles,
+    RunLocked,
+    RunPaths,
+    finish,
+    hold,
+    start,
+)
+
+EXPECTED = {(f"q{i}", 0) for i in range(4)}
+
+
+def _manifest(**changes: Any) -> RunManifest:
+    fields: dict[str, Any] = {
+        "run_id": "2026-11-15-gold-eval-abc1234",
+        "kind": "eval",
+        "git_sha": "a" * 40,
+        "config": {"split": "val", "limit": 5},
+        "config_hash": "c" * 64,
+        "data_manifest_hash": "d" * 64,
+        "model_ref": "gold",
+        "platform": "local-cpu",
+        "seed": 0,
+        "started_at": datetime(2026, 11, 15, 9, 0, tzinfo=UTC),
+    }
+    return RunManifest(**{**fields, **changes})
+
+
+def _generation(example_id: str, sample_idx: int = 0) -> Generation:
+    return Generation(
+        example_id=example_id,
+        model_ref="gold",
+        sample_idx=sample_idx,
+        text="```sql\nSELECT 1\n```",
+        sql="SELECT 1",
+        tokens_in=3,
+        tokens_out=3,
+        latency_ms=0.5,
+    )
+
+
+def _score(example_id: str, sample_idx: int = 0) -> Score:
+    return Score(
+        example_id=example_id, sample_idx=sample_idx, hardness="easy", valid=True, ex_fast=True
+    )
+
+
+def _lines(*items: Generation | Score) -> str:
+    return "".join(item.model_dump_json() + "\n" for item in items)
+
+
+@pytest.mark.phase(2)
+def test_outputs_recover_from_a_kill_mid_write(tmp_path: Path) -> None:
+    paths = RunPaths(tmp_path / "run", "val")
+    files = RunFiles(paths, EXPECTED)
+    assert (files.done, files.resumed) == (set(), 0)
+    assert not paths.scores.exists()
+    files.append([_generation("q0"), _generation("q1")], [_score("q0"), _score("q1")])
+
+    # Killed during the next batch: its generations were stored, its scores only begun.
+    with paths.generations.open("a") as handle:
+        handle.write(_lines(_generation("q2"), _generation("q3")))
+    with paths.scores.open("a") as handle:
+        handle.write(_score("q2").model_dump_json()[:30])
+
+    reopened = RunFiles(paths, EXPECTED)
+    assert reopened.done == {("q0", 0), ("q1", 0)} and reopened.resumed == 2
+    assert list(reopened.generations) == [("q0", 0), ("q1", 0)]
+    # The files hold just what was scored, whole lines only, before anything is added.
+    assert paths.scores.read_text() == _lines(_score("q0"), _score("q1"))
+    assert paths.generations.read_text() == _lines(_generation("q0"), _generation("q1"))
+    reopened.append([_generation("q2")], [_score("q2")])
+    assert [s.example_id for s in RunFiles(paths, EXPECTED).scores] == ["q0", "q1", "q2"]
+
+
+@pytest.mark.phase(2)
+@pytest.mark.parametrize(
+    ("generations", "scores", "message"),
+    [
+        (_lines(_generation("q0")), _lines(_score("q0"), _score("q0")), "has q0 sample 0 twice"),
+        (_lines(_generation("q0"), _generation("q0")), "", "has q0 sample 0 twice"),
+        (_lines(_generation("q0")), _lines(_score("q1")), "q1 sample 0, which was never generated"),
+        (_lines(_generation("z9")), _lines(_score("z9")), "z9 sample 0, which this run never asks"),
+        (_lines(_generation("q0", 1)), _lines(_score("q0", 1)), "q0 sample 1, which this run"),
+        (_lines(_generation("q0")), "{}\n" + _lines(_score("q0")), "line 1 is not a Score"),
+    ],
+)
+def test_outputs_that_contradict_each_other_are_refused(
+    tmp_path: Path, generations: str, scores: str, message: str
+) -> None:
+    paths = RunPaths(tmp_path / "run", "val")
+    paths.scores.parent.mkdir(parents=True)
+    paths.generations.write_text(generations)
+    paths.scores.write_text(scores)
+    with pytest.raises(RunCorrupt, match=message):
+        RunFiles(paths, EXPECTED)
+    # Nothing was rewritten over the evidence.
+    assert (paths.generations.read_text(), paths.scores.read_text()) == (generations, scores)
+
+
+@pytest.mark.phase(2)
+def test_scores_are_replaced_only_by_the_same_samples(tmp_path: Path) -> None:
+    files = RunFiles(RunPaths(tmp_path / "run", "val"), EXPECTED)
+    files.append([_generation("q0"), _generation("q1")], [_score("q0"), _score("q1")])
+    judged = [s.model_copy(update={"ex_official": True}) for s in files.scores]
+    files.replace_scores(judged)
+    assert RunFiles(files.paths, EXPECTED).scores == judged
+    with pytest.raises(ValueError, match="same samples, in order"):
+        files.replace_scores(judged[::-1])
+
+
+@pytest.mark.phase(2)
+def test_start_resumes_only_the_same_unfinished_run(tmp_path: Path) -> None:
+    paths = RunPaths(tmp_path / "run", "val")
+    fresh = _manifest()
+    started = start(paths, fresh)
+    assert started.status == "running" and started.outputs == {"config": "config.yaml"}
+    assert RunManifest.model_validate_json(paths.manifest.read_bytes()) == started
+    assert yaml.safe_load(paths.config.read_text()) == fresh.config
+
+    # A later attempt at the same run keeps the first start time.
+    later = start(paths, _manifest(started_at=datetime(2026, 11, 15, 11, 0, tzinfo=UTC)))
+    assert later.started_at == fresh.started_at and later.status == "running"
+
+    for change, message in (
+        ({"config": {"split": "val", "limit": 6}, "config_hash": "e" * 64}, r"options \(limit\)"),
+        ({"git_sha": "b" * 40}, f"made at commit {'a' * 40}, not {'b' * 40}"),
+        ({"data_manifest_hash": "f" * 64}, "made on other data"),
+    ):
+        with pytest.raises(RunConflict, match=message):
+            start(paths, _manifest(**change))
+    stored = paths.manifest.read_bytes()
+
+    paths.manifest.write_text(_manifest(kind="grpo").model_dump_json())
+    with pytest.raises(RunConflict, match="is a grpo run"):
+        start(paths, fresh)
+    paths.manifest.write_bytes(stored)
+    finish(paths, later, None)
+    with pytest.raises(RunConflict, match="has finished and its results stand"):
+        start(paths, fresh)
+
+    paths.manifest.write_text("{")
+    with pytest.raises(RunCorrupt, match="is not a run manifest"):
+        start(paths, fresh)
+    paths.manifest.unlink()
+    paths.scores.parent.mkdir(parents=True)
+    paths.scores.write_text("")
+    with pytest.raises(RunCorrupt, match="outputs but no manifest"):
+        start(paths, fresh)
+
+
+@pytest.mark.phase(2)
+def test_finish_records_a_failure_and_clears_it_on_success(tmp_path: Path) -> None:
+    paths = RunPaths(tmp_path / "run", "val")
+    manifest = start(paths, _manifest())
+    try:
+        raise RuntimeError("the backend fell over")
+    except RuntimeError as exc:
+        failed = finish(paths, manifest, exc)
+    assert failed.status == "failed" and failed.ended_at is not None
+    assert failed.outputs == {"config": "config.yaml", "error": "error.txt"}
+    text = paths.error.read_text()
+    assert text.startswith("Traceback") and text.endswith("RuntimeError: the backend fell over\n")
+    assert RunManifest.model_validate_json(paths.manifest.read_bytes()) == failed
+
+    done = finish(paths, start(paths, _manifest()), None)
+    assert done.status == "finished" and done.outputs == {"config": "config.yaml"}
+    assert not paths.error.exists()
+
+
+@pytest.mark.phase(2)
+def test_hold_keeps_a_second_process_off_the_run(tmp_path: Path) -> None:
+    paths = RunPaths(tmp_path / "run", "val")
+    with hold(paths):
+        # flock locks belong to an open file, so a second open stands for another process.
+        with (paths.root / LOCK_FILE).open("w") as other, pytest.raises(BlockingIOError):
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RunLocked, match="run is running in another process"), hold(paths):
+            pass
+    with hold(paths):
+        pass

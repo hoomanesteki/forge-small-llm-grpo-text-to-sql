@@ -66,8 +66,13 @@ def build_manifest(
     allow_dirty: bool = False,
     repo: Path | None = None,
     now: datetime | None = None,
+    data_dir: Path | None = None,
 ) -> RunManifest:
-    """Describe a run starting now. Pass ``run_id`` only to keep an id, as a resumed run does."""
+    """Describe a run starting now. Pass ``run_id`` only to keep an id, as a resumed run does.
+
+    ``data_dir`` is the data the run reads, which its data manifest hash describes; the
+    default is ``FORGE_DATA_DIR``'s, as everywhere else.
+    """
     # Kaggle runs in UTC and laptops don't, so a naive time can't be compared. A tzinfo
     # without an offset is naive too: astimezone would read it in the machine's zone.
     if now is not None and now.utcoffset() is None:
@@ -85,7 +90,7 @@ def build_manifest(
         git_sha=sha,
         config=snapshot,
         config_hash=config_hash(snapshot),
-        data_manifest_hash=data_manifest_hash(),
+        data_manifest_hash=data_manifest_hash(data_dir),
         model_ref=model_ref,
         adapter_ref=adapter_ref,
         parent_run=parent_run,
