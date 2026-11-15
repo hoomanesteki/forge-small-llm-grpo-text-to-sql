@@ -39,7 +39,6 @@ BASE = EvalConfig(model="org/model")
         ({"backend": "vllm"}, NotAvailable, "the vllm backend is not available yet"),
         ({"backend": "llamacpp"}, NotAvailable, "comes with FG-702"),
         ({"store": "hub"}, NotAvailable, "--store hub is available after FG-304"),
-        ({"retry": 1}, NotAvailable, "--retry 1 is available after FG-206"),
     ],
 )
 def test_config_refused_before_anything_runs(
@@ -56,6 +55,8 @@ def test_config_accepted() -> None:
         EvalConfig(model="gold", backend="fake", split="train", limit=3, run_id="smoke-abc1234"),
         EvalConfig(model="org/model", adapter="runs/x/best", split="dev", reason="FG-508"),
         EvalConfig(model="org/model", n=8, temperature=0.7, prompt_version="p2"),
+        EvalConfig(model="org/model", retry=1),
+        EvalConfig(model="org/model", n=4, temperature=0.7, retry=1),
     ):
         check_config(config)
 
