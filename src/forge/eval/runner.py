@@ -17,7 +17,8 @@ A run evaluates one model on one split:
 6. Official EX (``forge.eval.testsuite``) in one batch at the end, on the same pool, at
    most ``OFFICIAL_ITEM_TIMEOUT_S`` an item. A prediction that timed out in step 4 is no
    match without the evaluator (ADR-0008).
-7. The error class: a placeholder until FG-204 (``forge.eval.scoring``).
+7. Name the error class of each wrong prediction (``forge.eval.taxonomy``), against its
+   database's columns, which are read in process like gold.
 8. Each batch's generations and scores are stored before the next batch starts.
 
 The options and their checks are ``forge.eval.config``; the run's folder, its manifest
@@ -39,6 +40,7 @@ from forge.data.prompts import TokenCounter, chat_token_counter, fit_prompt
 from forge.data.spider import FAILING_GOLD_IDS, resolve_data_dir
 from forge.data.splits import load_dev, load_train, load_val
 from forge.eval import testsuite
+from forge.eval.agreement import table_columns
 from forge.eval.config import (
     FAKE_MODELS,
     OFFICIAL_ITEM_TIMEOUT_S,
@@ -47,12 +49,14 @@ from forge.eval.config import (
     check_config,
 )
 from forge.eval.gold_cache import MAX_ROWS, gold_results
+from forge.eval.mutations import Columns
 from forge.eval.run_files import Key, RunFiles, RunPaths, finish, hold, key, start
 from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
 from forge.ops.manifest import build_manifest
 from forge.ops.paths import cache_dir, runs_dir
+from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
 
 log = logging.getLogger(__name__)
@@ -194,6 +198,7 @@ def _evaluate(
             files.resumed,
             len(pending),
         )
+    schemas = _schemas(pending, root)
     generate_s = 0.0
     with SandboxPool(workers, data_dir=root, imports=(testsuite.__name__,)) as pool:
         for begin in range(0, len(pending), batch_size):
@@ -208,7 +213,13 @@ def _evaluate(
             generations = _new_generations(replies, batch, params.n, files.done)
             preds = _execute(pool, generations, by_id)
             scores = [
-                score_generation(by_id[g.example_id], g, pred, gold[g.example_id])
+                score_generation(
+                    by_id[g.example_id],
+                    g,
+                    pred,
+                    gold[g.example_id],
+                    columns=schemas[by_id[g.example_id].db_id],
+                )
                 for g, pred in zip(generations, preds, strict=True)
             ]
             files.append(generations, scores)
@@ -224,6 +235,13 @@ def _hf_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
 
     hf = HfBackend(config.model, adapter_ref=config.adapter)
     return hf, chat_token_counter(hf.tokenizer)
+
+
+def _schemas(examples: Sequence[Example], root: Path) -> dict[str, Columns]:
+    """The tables and columns of each database the examples ask about."""
+    # Schema reads are trusted SQL, so they run in process (ADR-0014).
+    with SqliteExecutor(root) as executor:
+        return {db: table_columns(executor, db) for db in sorted({e.db_id for e in examples})}
 
 
 def _load_split(config: EvalConfig, run_id: str, root: Path) -> list[Example]:

@@ -33,7 +33,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-201 | Inference backend protocol and CPU backend | 3 | done |  |  | `InferenceBackend`, `FakeBackend` and `render_chat` (thinking off where the template reads the flag); `HfBackend` decodes from `GenParams` alone in left-padded batches, seeds each sample by example and index, loads PEFT adapters; tiny model pinned in `configs/models.yaml` |
 | FG-202 | Eval runner | 5 | done |  |  | `forge eval run` with the fake (gold, select-1) and hf backends; prompts fitted as in training; predictions in one `SandboxPool` a run; gold cached per split as JSON lines; official EX in one batch at the end, 10 s an item, a 2 s timeout no match (ADR-0008); a batch's generations then scores appended and flushed; a killed run resumes without duplicates; manifest running, then finished or failed with `error.txt` |
 | FG-203 | Metrics with confidence intervals and paired tests | 5 | done |  |  | `summarize`, `compare` and `pass_at_k` in `forge.eval.metrics`; 95% percentile bootstrap, 1,000 resamples, `default_rng(0)` for each interval, drawing whole questions or `gold_clusters`; exact McNemar from statsmodels, with no p-value for several samples a question; official EX when every score has a verdict, else fast |
-| FG-204 | Error taxonomy | 3 | todo |  |  |  |
+| FG-204 | Error taxonomy | 3 | done |  |  | `classify` in `forge.eval.taxonomy`: no_sql, syntax and schema_link from the error kind, then sqlglot shapes compare tables, joins, select lists, aggregates, WHERE, GROUP BY to LIMIT and last literals; names resolve to tables against each database's columns, a double-quoted name no table has is a string, and a nested filter query counts in its condition; `forge eval run` stores the class of each wrong prediction |
 | FG-205 | Report generator | 3 | todo |  |  |  |
 | FG-206 | Execution-guided retry | 3 | todo |  |  |  |
 | FG-207 | CPU smoke pipeline in CI | 3 | todo |  |  |  |
@@ -457,3 +457,20 @@ Work discovered along the way that is not a plan story.
   drift (FG-203).
 - statsmodels takes about a second to import, since it brings in pandas and scipy, so
   `forge.eval.metrics` imports it inside `compare` only (FG-203).
+- `classify` takes the database's columns (`table_columns`) where the plan's signature has the
+  gold result: resolving a bare or a double-quoted name needs the schema, and the gold result
+  decides no class. `forge eval run` reads each database's columns once, in process (FG-204).
+- No train or val gold query double-quotes a column or table name, though 2,848 of the 8,659
+  double-quote text, such as `"France"`. So the taxonomy reads a double-quoted name that no table
+  in scope has as a string, as SQLite does, and `"France"` and `'France'` are one value (FG-204).
+- Each of the 8,656 train and val gold queries that run classifies as `other` against itself: the
+  canonical form finds no difference where there is none. On 4,000 agreement mutations of the same
+  questions (seed 0), every change landed in a class its rule allows, which
+  `tests/integration/test_taxonomy.py` checks on the fixture. A classification takes about 1 ms on
+  the laptop (FG-204).
+- A query nested in a condition counts in that condition, so a filter whose subquery is missing or
+  picks another column or aggregate is `where`. Dropping the condition that held a table's only use
+  is `wrong_tables`, since tables come first (FG-204).
+- `error_class` follows fast EX, since a score is written before the official batch runs, so a
+  prediction that only the official evaluator accepts keeps a class. FG-205's taxonomy table should
+  count the failures of the metric it reports (FG-204).
