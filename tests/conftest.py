@@ -11,9 +11,15 @@ have; they are skipped, with the reason, wherever it is absent.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+# Typer forces a rich terminal whenever GITHUB_ACTIONS is set, so CLI errors come back
+# boxed and full of ANSI codes in CI but plain everywhere else. Tests compare text, so
+# they always get the plain form. It has to be set before typer.rich_utils is imported.
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
 SPIDER_MINI = Path(__file__).resolve().parent / "fixtures" / "spider_mini"
 
