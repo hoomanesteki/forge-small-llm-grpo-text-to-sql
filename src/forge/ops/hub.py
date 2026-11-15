@@ -19,6 +19,10 @@ a checkpoint goes up as a folder; ``runs``, for ``forge runs list``; and
 store holds, or with ``replace`` makes it hold the folder's files and no others, as a run
 that ended must: an earlier attempt's ``error.txt`` would otherwise outlive it.
 
+A Hub call that fails on the network is tried again ``RETRIES`` times, after
+``BACKOFF_S`` seconds and then twice as long each time (``network_error`` says which
+failures count). Anything else, such as a missing repo or a refused token, fails at once.
+
 ``pull`` mirrors a run into a local folder as ``forge kaggle output`` does: each file or
 folder at the top of the run that the store holds replaces the local one, and what only
 the local folder holds, such as ``kernels.json``, stays. An eval run's lock file never
@@ -27,10 +31,12 @@ leaves the machine it was taken on.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
 import tempfile
+import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
@@ -41,6 +47,8 @@ from forge.core.types import RunManifest
 from forge.eval.config import check_run_id
 from forge.eval.run_files import LOCK_FILE, MANIFEST_FILE, RunCorrupt, write_atomic
 
+log = logging.getLogger(__name__)
+
 T = TypeVar("T")
 
 REPO_TYPE = "model"
@@ -48,6 +56,10 @@ RUNS = "runs"
 CHECKPOINTS = "checkpoints"
 BEST = f"{CHECKPOINTS}/best"
 KEEP_CHECKPOINTS = 2
+RETRIES = 3
+BACKOFF_S = 2.0
+# Request timeout and rate limiting: the Hub's answer may differ a moment later.
+RETRY_STATUS = frozenset({408, 429})
 # The names checkpoint_dir writes: six digits, or more without a leading zero, so no two
 # names stand for one step.
 _STEP = re.compile(r"step-(\d{6}|[1-9]\d{6,})")
@@ -55,6 +67,10 @@ _STEP = re.compile(r"step-(\d{6}|[1-9]\d{6,})")
 
 class RunNotFound(FileNotFoundError):
     """The store holds no run of that id."""
+
+
+class StoreUnavailable(OSError):
+    """A Hub call still failed on the network after every retry."""
 
 
 class RunStore(Protocol):
@@ -299,12 +315,31 @@ class HubApi(Protocol):
     ) -> object: ...
 
 
+def network_error(exc: BaseException) -> bool:
+    """Whether a Hub call that raised ``exc`` is worth trying again.
+
+    A connection the client's own retries gave up on raises an httpx2 transport error or
+    a ``ConnectionError``; the Hub answers 408, 429 or 5xx when the trouble is on its
+    side; and huggingface_hub reports a failed upload or Xet transfer as a bare
+    ``RuntimeError``. Offline mode, missing repos and files, and refused tokens are not.
+    """
+    import httpx2
+    from huggingface_hub.errors import HfHubHTTPError, OfflineModeIsEnabled
+
+    if isinstance(exc, OfflineModeIsEnabled):
+        return False
+    if isinstance(exc, HfHubHTTPError):
+        status = exc.response.status_code
+        return status >= 500 or status in RETRY_STATUS
+    return isinstance(exc, httpx2.TransportError | ConnectionError | TimeoutError | RuntimeError)
+
+
 class HubRunStore:
     """A run store in a private Hugging Face model repo: run ``<run_id>`` lives in
     ``runs/<run_id>/``.
 
     ``api`` stands in for ``HfApi(token=token)``. Without a token the client finds one as
-    it always does (``HF_TOKEN``, or a saved login).
+    it always does (``HF_TOKEN``, or a saved login). ``sleep`` waits between retries.
     """
 
     def __init__(
@@ -312,6 +347,8 @@ class HubRunStore:
         repo_id: str,
         token: str | None = None,
         api: HubApi | None = None,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if api is None:
             # Imported here: only a Hub store needs the client.
@@ -320,6 +357,7 @@ class HubRunStore:
             api = HfApi(token=token)
         self.repo_id = repo_id
         self.api = api
+        self.sleep = sleep
 
     def __str__(self) -> str:
         return self.repo_id
@@ -328,9 +366,24 @@ class HubRunStore:
         check_run_id(run_id)
         return f"{RUNS}/{run_id}/{dest}" if dest else f"{RUNS}/{run_id}"
 
-    def _call(self, method: Callable[..., T], **kwargs: Any) -> T:
-        """``method`` on this repo."""
-        return method(repo_id=self.repo_id, repo_type=REPO_TYPE, **kwargs)
+    def _call(self, method: Callable[..., T], what: str, **kwargs: Any) -> T:
+        """``method`` on this repo, tried again on network errors as the module says."""
+        attempt = 0
+        while True:
+            try:
+                return method(repo_id=self.repo_id, repo_type=REPO_TYPE, **kwargs)
+            except Exception as exc:
+                if not network_error(exc):
+                    raise
+                if attempt == RETRIES:
+                    raise StoreUnavailable(
+                        f"{what} failed {RETRIES + 1} times; the last time "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                wait = BACKOFF_S * 2**attempt
+                log.warning("%s: %s: %s; trying again in %g s", what, type(exc).__name__, exc, wait)
+                self.sleep(wait)
+                attempt += 1
 
     def put_file(self, run_id: str, local_path: str | Path, dest: str) -> str:
         """Upload the file ``local_path`` to ``dest`` in the run; returns its path in the repo."""
@@ -339,6 +392,7 @@ class HubRunStore:
             raise FileNotFoundError(f"{source} is not a file, so it can't go to run {run_id}")
         self._call(
             self.api.upload_file,
+            f"uploading {source} to {self.repo_id}/{path}",
             path_or_fileobj=str(source),
             path_in_repo=path,
             commit_message=f"Add {dest} to run {run_id}",
@@ -360,6 +414,7 @@ class HubRunStore:
             raise NotADirectoryError(f"{source} is not a folder, so it can't go to run {run_id}")
         self._call(
             self.api.upload_folder,
+            f"uploading {source} to {self.repo_id}/{path}",
             folder_path=str(source),
             path_in_repo=path,
             ignore_patterns=[LOCK_FILE],
@@ -373,6 +428,7 @@ class HubRunStore:
         path = self._path(manifest.run_id, MANIFEST_FILE)
         self._call(
             self.api.upload_file,
+            f"uploading {self.repo_id}/{path}",
             path_or_fileobj=manifest_bytes(manifest),
             path_in_repo=path,
             commit_message=f"Write the {manifest.status} manifest of run {manifest.run_id}",
@@ -387,6 +443,7 @@ class HubRunStore:
             try:
                 self._call(
                     self.api.hf_hub_download,
+                    f"downloading {self.repo_id}/{path}",
                     filename=path,
                     local_dir=folder,
                 )
@@ -398,7 +455,7 @@ class HubRunStore:
     def _files(self, run_id: str) -> list[str]:
         """Every file of the run, as a path inside its folder."""
         prefix = self._path(run_id) + "/"
-        files = self._call(self.api.list_repo_files)
+        files = self._call(self.api.list_repo_files, f"listing the files of {self.repo_id}")
         return [name.removeprefix(prefix) for name in files if name.startswith(prefix)]
 
     def _checkpoints(self, run_id: str) -> set[str]:
@@ -419,6 +476,7 @@ class HubRunStore:
         if doomed:
             self._call(
                 self.api.delete_files,
+                f"deleting old checkpoints of run {run_id} from {self.repo_id}",
                 delete_patterns=[f"{self._path(run_id, rel)}/*" for rel in doomed],
                 commit_message=f"Keep the latest {keep} checkpoints of run {run_id}",
             )
@@ -426,7 +484,7 @@ class HubRunStore:
 
     def runs(self) -> list[str]:
         """The ids of the runs in the repo, those with a manifest, sorted (by date first)."""
-        files = self._call(self.api.list_repo_files)
+        files = self._call(self.api.list_repo_files, f"listing the files of {self.repo_id}")
         return sorted(
             parts[1]
             for name in files
@@ -442,6 +500,7 @@ class HubRunStore:
         with tempfile.TemporaryDirectory(prefix=".pull-", dir=target.parent) as staging:
             self._call(
                 self.api.snapshot_download,
+                f"downloading {self.repo_id}/{path}",
                 local_dir=staging,
                 allow_patterns=[f"{path}/*"],
             )

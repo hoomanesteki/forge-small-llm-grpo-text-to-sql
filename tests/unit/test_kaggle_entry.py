@@ -23,6 +23,7 @@ import pytest
 from forge.data.spider import raw_files
 from forge.eval.config import HOSTS
 from forge.ops import kaggle, manifest
+from tests.fakes import FakeHub
 from tests.kernel import KERNEL_ENV, SHA, WHEEL, argv, build_inputs, kernel_folder
 from tests.spike import ENTRY, entry
 
@@ -256,17 +257,18 @@ def test_secrets_are_recorded_by_where_they_came_from_never_by_value(
     monkeypatch.setitem(
         sys.modules, "kaggle_secrets", types.SimpleNamespace(UserSecretsClient=UserSecretsClient)
     )
-    uploads: list[dict[str, Any]] = []
+    hub = FakeHub()
 
-    class HfApi:
-        def __init__(self, token: str) -> None:
-            assert token == TOKEN
+    def makes_its_run(kernel: Any, preflight: bool) -> str:
+        if not preflight:
+            # As eval_job leaves the run's folder, its lock among its files.
+            kernel.run_dir.mkdir(parents=True)
+            (kernel.run_dir / "manifest.json").write_text(json.dumps({"status": "finished"}))
+            (kernel.run_dir / ".lock").write_text("")
+        return "finished"
 
-        def upload_folder(self, **kwargs: Any) -> None:
-            uploads.append(kwargs)
-
-    monkeypatch.setattr("huggingface_hub.HfApi", HfApi)
-    monkeypatch.setitem(script.JOBS, "eval", Job())
+    monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    monkeypatch.setitem(script.JOBS, "eval", makes_its_run)
 
     script.main(argv(kernel_root), run=lambda c: None)
 
@@ -277,15 +279,23 @@ def test_secrets_are_recorded_by_where_they_came_from_never_by_value(
     }
     assert status["stages"]["upload"]["result"] == "uploaded to forge-owner/forge-runs"
     run = kernel_root / "working" / "runs" / "run-1"
-    assert uploads == [
-        {
-            "repo_id": "forge-owner/forge-runs",
-            "repo_type": "model",
-            "folder_path": run,
-            "path_in_repo": "runs/run-1",
-            "commit_message": "Add run run-1",
-        }
+    assert hub.tokens == [TOKEN]
+    assert hub.calls == [
+        (
+            "upload_folder",
+            {
+                "repo_id": "forge-owner/forge-runs",
+                "repo_type": "model",
+                "folder_path": str(run),
+                "path_in_repo": "runs/run-1",
+                "ignore_patterns": [".lock"],
+                # The kernel's copy may be partial, so it never deletes what the store has.
+                "delete_patterns": None,
+                "commit_message": "Add run run-1",
+            },
+        )
     ]
+    assert hub.files == {"runs/run-1/manifest.json": b'{"status": "finished"}'}
     assert TOKEN not in capsys.readouterr().out
     assert TOKEN not in (run / "status.json").read_text()
 
