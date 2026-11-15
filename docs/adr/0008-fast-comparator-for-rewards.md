@@ -26,7 +26,9 @@ often, training optimizes something other than what is reported.
   `plug_value`, `keep_distinct` and the progress bar off. It skips `evaluate()`, which
   rewrites `value` in predictions (upstream issue #21). Predictions that are empty,
   comment-only or that the executor denies are false without running (upstream issue
-  #33), and the calls run in a worker thread under one overall deadline.
+  #33). Each item runs in a sandbox worker process that is killed when the item takes
+  longer than `item_timeout_s` (60 s by default; a killed item is false), under one
+  overall deadline (ADR-0014).
 - **Agreement is measured, not assumed.** `forge eval agreement` mutates gold queries
   with sqlglot (`forge.eval.mutations`), scores each prediction with both checkers and
   writes the rate and the first 20 distinct disagreements to

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import logging
+import multiprocessing
 import re
-import threading
 import time
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from forge.eval.agreement import (
     score,
 )
 from forge.eval.testsuite import GoldQueryFailed, OfficialEvalTimeout, official_exec_match
+from tests.fakes import InlineSandbox
+from tests.sandbox_jobs import review_query
 
 DB = "department_management"
 # No head is older than 1000, so this gold result is empty.
@@ -75,11 +78,13 @@ def test_refused_predictions_never_reach_the_evaluator(
         "DISTINCT VACUUM INTO 'copy.sqlite'",
     ]
 
-    verdicts = official_exec_match([(DB, pred, EMPTY_GOLD) for pred in refused])
+    # In this process, where the recorder replaces the evaluator.
+    inline = InlineSandbox(spider_mini)
+    verdicts = official_exec_match([(DB, pred, EMPTY_GOLD) for pred in refused], pool=inline)
     assert verdicts == [False] * len(refused)
     assert calls == []
 
-    assert official_exec_match([(DB, "SELECT name FROM head", EMPTY_GOLD)]) == [True]
+    assert official_exec_match([(DB, "SELECT name FROM head", EMPTY_GOLD)], pool=inline) == [True]
     assert calls == [
         {
             "db": str(db_path(DB).resolve()),
@@ -144,33 +149,54 @@ def test_official_match_runs_inside_an_event_loop(spider_mini: Path) -> None:
 
 
 @pytest.mark.phase(1)
-def test_official_match_has_an_overall_timeout(
-    spider_mini: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[str] = []
-
-    def slow(**kwargs: object) -> int:
-        calls.append(str(kwargs["p_str"]))
-        time.sleep(0.05)
-        return 1
-
-    monkeypatch.setattr(exec_eval, "eval_exec_match", slow)
-    items = [(DB, f"SELECT {i}", f"SELECT {i}") for i in range(100)]
+def test_official_match_has_an_overall_timeout(spider_mini: Path) -> None:
+    # About 0.1 s an item: the vetting look and the evaluator each count to 300,000.
+    slow = (
+        "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 300000) "
+        "SELECT count(*) FROM r"
+    )
+    items = [(DB, slow, COUNT_GOLD)] * 100
 
     start = time.monotonic()
     with pytest.raises(OfficialEvalTimeout, match=r"100 items took longer than 0\.3 s"):
         official_exec_match(items, timeout_s=0.3)
-    assert time.monotonic() - start < 1.0
-
-    # The worker stops after the item it was on.
-    time.sleep(0.2)
-    settled = len(calls)
-    time.sleep(0.2)
-    assert len(calls) == settled < len(items)
-    assert not any(t.name == "forge-official-eval" for t in threading.enumerate())
+    # Worker start-up aside, which can take a second on a busy machine.
+    assert time.monotonic() - start < 0.3 + 2.0
+    # No worker is left running an item.
+    assert multiprocessing.active_children() == []
 
     with pytest.raises(ValueError, match="timeout_s must be positive"):
         official_exec_match(items, timeout_s=0)
+    with pytest.raises(ValueError, match="item_timeout_s must be positive"):
+        official_exec_match(items, item_timeout_s=0)
+
+
+@pytest.mark.phase(1)
+def test_official_match_kills_a_pathological_prediction(
+    spider_mini: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The evaluator's own deadline gives a query 60 s; only the kill stops this sooner.
+    runaway = (
+        "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) SELECT count(*) FROM r"
+    )
+    cartesian = "SELECT count(*) FROM head AS a, head AS b, head AS c, head AS d, head AS e, " + (
+        "head AS f, head AS g, head AS h, head AS i"
+    )
+    items = [(DB, runaway, COUNT_GOLD), (DB, cartesian, COUNT_GOLD), (DB, COUNT_GOLD, COUNT_GOLD)]
+    # The FG-191 review's queries now fail on the length limit at once, here too.
+    items += [(DB, review_query(100), COUNT_GOLD), (DB, review_query(200), COUNT_GOLD)]
+    caplog.set_level(logging.DEBUG, logger="forge")
+
+    start = time.monotonic()
+    verdicts = official_exec_match(items, item_timeout_s=0.5)
+    elapsed = time.monotonic() - start
+
+    assert verdicts == [False, False, True, False, False]
+    # Two kills of 0.5 s and three worker start-ups, where the evaluator's own deadline
+    # would have taken two minutes.
+    assert elapsed < 10
+    assert "official EX item 0 on department_management killed after 0.5 s" in caplog.text
+    assert "2 restarts so far" in caplog.text
 
 
 @pytest.mark.phase(1)
@@ -239,6 +265,19 @@ def test_gold_scores_perfect_on_full_val() -> None:
 
     assert len(scores) == 872
     assert [s.mutation.example_id for s in scores if not (s.fast and s.official)] == []
+
+
+@pytest.mark.phase(1)
+@pytest.mark.requires_full_data
+def test_eval_gold_on_full_val_stays_perfect_under_the_limits() -> None:
+    # The phase 1 demo, under the SQLite limits measured from Spider (ADR-0014).
+    result = CliRunner().invoke(cli.app, ["eval", "gold", "--split", "val"])
+
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout)[2:] == [
+        ["fast", "EX", "872/872", "100.00%"],
+        ["official", "EX", "872/872", "100.00%"],
+    ]
 
 
 @pytest.mark.phase(1)

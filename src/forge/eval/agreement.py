@@ -12,26 +12,31 @@ and questions that share a gold query can get the same mutation. An item with th
 database, gold and prediction of an earlier one is the same check run again, so the
 report also counts each distinct item once.
 
-The fast side runs as a reward would: gold and prediction through ``SqliteExecutor`` with
-its row cap, the prediction under the default 2-second timeout and the gold under a
-longer one, since a slow gold query is not the prediction's fault.
+The fast side runs as a reward would: each gold query through ``SqliteExecutor`` with its
+row cap, under a long timeout since a slow gold query is not the prediction's fault, and
+each prediction in a ``SandboxPool`` worker under the default 2-second timeout, made
+hard by the pool. The official side runs on the same pool.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 from forge.core.types import Example, ExecResult
+from forge.data.spider import resolve_data_dir
 from forge.eval.mutations import Mutation, MutationKind, make_mutations
 from forge.eval.testsuite import official_exec_match
 from forge.sql.compare import order_matters, results_match
 from forge.sql.executor import DEFAULT_TIMEOUT_MS, SqliteExecutor
+from forge.sql.sandbox import SandboxPool
 
 AGREEMENT_TARGET = 0.98
 GOLD_TIMEOUT_MS = 10_000
+SCORE_WORKERS = min(4, os.cpu_count() or 1)
 SHOWN_DISAGREEMENTS = 20
 SHOWN_ROWS = 5
 # The data spike's license section, relative to docs/audit where reports go.
@@ -104,28 +109,34 @@ def score(
     *,
     data_dir: Path | None = None,
     pred_timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    workers: int = SCORE_WORKERS,
 ) -> list[ItemScore]:
-    """The fast and the official verdict on each prediction, in order."""
+    """The fast and the official verdict on each prediction, in order.
+
+    Predictions run across ``workers`` sandbox processes; official EX uses one of them.
+    """
+    root = resolve_data_dir(data_dir).resolve()
     gold_results: dict[tuple[str, str], ExecResult] = {}
-    fast: list[tuple[ExecResult, ExecResult, bool, bool]] = []
-    with SqliteExecutor(data_dir) as executor:
+    with SqliteExecutor(root) as executor:
         for m in mutations:
             key = (m.db_id, m.gold_sql)
             if key not in gold_results:
                 gold_results[key] = executor.run(m.db_id, m.gold_sql, timeout_ms=GOLD_TIMEOUT_MS)
-            gold = gold_results[key]
-            pred = executor.run(m.db_id, m.pred_sql, timeout_ms=pred_timeout_ms)
-            ordered = order_matters(m.gold_sql)
-            fast.append((gold, pred, ordered, results_match(gold, pred, order_matters=ordered)))
-    official = official_exec_match(
-        [(m.db_id, m.pred_sql, m.gold_sql) for m in mutations], data_dir=data_dir
-    )
-    return [
-        ItemScore(m, gold, pred, ordered, matched, verdict)
-        for m, (gold, pred, ordered, matched), verdict in zip(
-            mutations, fast, official, strict=True
+    # The official items load forge.eval.testsuite in the workers, so it loads at start-up.
+    with SandboxPool(workers, data_dir=root, imports=("forge.eval.testsuite",)) as pool:
+        preds = pool.run_many(
+            [(m.db_id, m.pred_sql) for m in mutations], timeout_ms=pred_timeout_ms
         )
-    ]
+        official = official_exec_match(
+            [(m.db_id, m.pred_sql, m.gold_sql) for m in mutations], data_dir=root, pool=pool
+        )
+    scores = []
+    for m, pred, verdict in zip(mutations, preds, official, strict=True):
+        gold = gold_results[(m.db_id, m.gold_sql)]
+        ordered = order_matters(m.gold_sql)
+        fast = results_match(gold, pred, order_matters=ordered)
+        scores.append(ItemScore(m, gold, pred, ordered, fast, verdict))
+    return scores
 
 
 def agreement_rate(scores: Sequence[ItemScore]) -> float:

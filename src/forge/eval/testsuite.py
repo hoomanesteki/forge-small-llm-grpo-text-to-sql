@@ -30,9 +30,12 @@ Around that call:
 - A gold query that fails raises ``GoldQueryFailed``. The evaluator asserts that gold
   runs, and a broken gold is a data problem, not a wrong prediction; callers skip the
   known ones (``forge.data.spider.FAILING_GOLD_IDS``).
-- The evaluator calls ``asyncio.run`` for every query, which raises inside a running
-  event loop such as a notebook cell's. So the items run in a worker thread under one
-  overall deadline, and each query keeps the vendored per-query timeout of 60 seconds.
+- Each item, the checks above and the evaluator's call alike, runs in a
+  ``forge.sql.sandbox.SandboxPool`` worker that is killed when the item takes longer
+  than ``item_timeout_s``: the evaluator's own timeout can't stop work inside one row,
+  or its column-permutation search in Python. A killed item is not a match. The
+  evaluator calls ``asyncio.run`` for every query, which raises inside a running event
+  loop such as a notebook cell's; a worker has none.
 
 The evaluator opens its own connections, read-only and with the executor's authorizer
 and limits (``third_party/test_suite_eval/CHANGES.md``), so SQL that got past these
@@ -41,8 +44,10 @@ checks still can't write.
 
 from __future__ import annotations
 
-import threading
+import logging
+import time
 from collections.abc import Sequence
+from contextlib import ExitStack
 from pathlib import Path
 from typing import NamedTuple
 
@@ -53,8 +58,14 @@ from test_suite_eval.parse import remove_distinct
 from forge.core.types import ErrorKind
 from forge.data.spider import db_path, resolve_data_dir
 from forge.sql.executor import SqliteExecutor, strip_leading
+from forge.sql.sandbox import SandboxPool, SandboxTimeout
+
+log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 3600.0
+# The evaluator's own timeout for one query (exec_eval.TIMEOUT); a prediction that runs
+# that long is no match whichever deadline stops it.
+DEFAULT_ITEM_TIMEOUT_S = 60.0
 VET_TIMEOUT_MS = 100
 REFUSED: frozenset[ErrorKind] = frozenset({"empty_sql", "denied"})
 
@@ -75,6 +86,10 @@ class GoldQueryFailed(ValueError):
         self.db_id = db_id
         self.gold_sql = gold_sql
 
+    def __reduce__(self) -> tuple[type[GoldQueryFailed], tuple[str, str], dict[str, object]]:
+        # Rebuilt from its fields, notes included, when it comes back from a worker.
+        return (GoldQueryFailed, (self.db_id, self.gold_sql), self.__dict__)
+
 
 class OfficialEvalTimeout(TimeoutError):
     """The items took longer than the overall deadline."""
@@ -85,53 +100,56 @@ def official_exec_match(
     *,
     data_dir: Path | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    item_timeout_s: float = DEFAULT_ITEM_TIMEOUT_S,
+    pool: SandboxPool | None = None,
 ) -> list[bool]:
     """The official verdict for each ``(db_id, pred_sql, gold_sql)`` item, in order.
 
-    Raises ``OfficialEvalTimeout`` when all of them take longer than ``timeout_s``; the
-    worker then stops after the item it is on. A missing database raises
+    Items run one at a time in a worker of ``pool``, or of a one-worker pool made for
+    this call; a pool passed in must be on the same data directory. An item still
+    running after ``item_timeout_s`` is killed and counts as no match. Raises
+    ``OfficialEvalTimeout`` once all of them take longer than ``timeout_s`` (worker
+    start-ups aside), killing the item then running. A missing database raises
     ``DataNotFound``, and a failing gold query ``GoldQueryFailed``.
     """
     if timeout_s <= 0:
         raise ValueError(f"timeout_s must be positive, got {timeout_s}")
+    if item_timeout_s <= 0:
+        raise ValueError(f"item_timeout_s must be positive, got {item_timeout_s}")
     root = resolve_data_dir(data_dir).resolve()
+    if pool is not None and pool.data_dir != root:
+        raise ValueError(f"the pool runs on {pool.data_dir}, not on {root}")
     jobs = [MatchItem(*item) for item in items]
-    stop = threading.Event()
-    outcome: list[list[bool] | BaseException] = []
-
-    def work() -> None:
-        try:
-            outcome.append(_match_all(jobs, root, stop))
-        except BaseException as exc:  # re-raised in the caller's thread below
-            outcome.append(exc)
-
-    # A daemon, so a worker still finishing its last query can't hold up interpreter exit.
-    worker = threading.Thread(target=work, name="forge-official-eval", daemon=True)
-    worker.start()
-    worker.join(timeout_s)
-    if worker.is_alive():
-        stop.set()
-        raise OfficialEvalTimeout(
-            f"official evaluation of {len(jobs)} items took longer than {timeout_s:g} s"
-        )
-    (result,) = outcome
-    if isinstance(result, BaseException):
-        raise result
-    return result
-
-
-def _match_all(items: Sequence[MatchItem], root: Path, stop: threading.Event) -> list[bool]:
     verdicts: list[bool] = []
-    # Made here because sqlite3 connections belong to the thread that opened them.
-    with SqliteExecutor(root) as executor:
-        for item in items:
-            if stop.is_set():
-                break
-            verdicts.append(_match(executor, root, item))
+    with ExitStack() as stack:
+        if pool is None:
+            # This module loads in the worker before the first item's deadline starts.
+            pool = stack.enter_context(SandboxPool(1, data_dir=root, imports=(__name__,)))
+        deadline = time.monotonic() + timeout_s
+        for number, job in enumerate(jobs):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise _overall_timeout(len(jobs), timeout_s)
+            try:
+                verdicts.append(pool.call(_match, root, job, timeout_s=min(item_timeout_s, left)))
+            except SandboxTimeout:
+                if left <= item_timeout_s:
+                    raise _overall_timeout(len(jobs), timeout_s) from None
+                log.debug(
+                    "official EX item %d on %s killed after %g s", number, job.db_id, item_timeout_s
+                )
+                verdicts.append(False)
     return verdicts
 
 
+def _overall_timeout(items: int, timeout_s: float) -> OfficialEvalTimeout:
+    return OfficialEvalTimeout(
+        f"official evaluation of {items} items took longer than {timeout_s:g} s"
+    )
+
+
 def _match(executor: SqliteExecutor, root: Path, item: MatchItem) -> bool:
+    """One item's verdict; ``executor`` vets the prediction, as the worker's own."""
     if item.pred_sql is None or _refused(executor, item.db_id, item.pred_sql):
         return False
     pred = strip_leading(item.pred_sql)

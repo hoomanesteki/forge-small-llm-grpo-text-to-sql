@@ -5,9 +5,10 @@ rule 9). It is read-only and immutable, so SQLite never writes, locks or journal
 file, and its authorizer is default-deny: only ``SQLITE_SELECT``, ``SQLITE_READ``,
 ``SQLITE_FUNCTION`` and ``SQLITE_RECURSIVE`` pass, so writes, DDL, ``ATTACH``, ``VACUUM``,
 ``PRAGMA`` and transactions fail as they are prepared, before anything runs. Its
-``LIMITS`` keep each SQLite step cheap: no string or blob over 100 kB (Spider's largest
-value is 213 bytes), LIKE and GLOB patterns of at most 1,000 characters, SQL text of at
-most 100 kB, and no attached databases, which also stops ``VACUUM INTO``.
+``LIMITS``, measured against what Spider needs, keep the work in one row small: no string,
+blob or table row over 4 kB, LIKE and GLOB patterns of at most 100 characters, SQL text of
+at most 8 kB, at most 200 columns, and no attached databases, which also stops ``VACUUM
+INTO``.
 
 ``SqliteExecutor.run`` adds the rest and never raises for bad SQL: one statement per
 call, and only a query; a deadline; a row cap; and a byte budget for the rows it keeps.
@@ -24,23 +25,27 @@ Each failure comes back as an ``ExecResult`` with an ``ErrorKind``:
 - ``timeout``: the deadline passed while the query ran or its rows were fetched. A
   progress handler checks it every ``PROGRESS_STEPS`` VM steps, and a watchdog thread
   interrupts SQLite at the deadline, for steps so slow that few of them fit in the
-  timeout. SQLite only stops between rows, so the work inside one row (with these
-  limits, well under a second for any single call) can still run past it.
+  timeout. SQLite only stops between rows, so the work inside one row can still run
+  past it; with these limits that is at most a few hundredths of a second.
 - ``syntax``, ``no_such_table``, ``no_such_column``: from SQLite's error message.
 - ``empty_sql``: nothing but whitespace, comments and semicolons.
 - ``other``: any other error, such as an unknown function, a ``?`` placeholder, a value
-  or SQL text over a limit, or rows whose values pass ``MAX_RESULT_BYTES``.
+  or SQL text over a limit, or rows that take more than ``MAX_RESULT_BYTES`` of memory.
+
+So the deadline of ``run`` is soft, and ``run`` is for trusted SQL: gold queries, schema
+reads, tests. Untrusted SQL, anything a model wrote, goes through ``run_many`` or a
+``forge.sql.sandbox.SandboxPool``, whose worker processes are killed at a hard deadline
+(ADR-0014).
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import get_context
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import Any, Protocol, Self
@@ -57,28 +62,36 @@ PROGRESS_STEPS = 1000
 ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
 )
-# The cost of LIKE, instr or replace grows with the product of their inputs' lengths, so
-# the length limit bounds the slowest single call: about 0.2 s at 100 kB, while at 1 MB
-# one instr call takes seconds. Spider's largest value is 213 bytes and its largest
-# schema row 1,191; its longest LIKE pattern is 44 characters and its longest gold query
-# 577. With no attached database allowed, ATTACH and VACUUM INTO fail on any connection.
-MAX_VALUE_BYTES = 100_000
+# Measured on the full Spider data (ADR-0014). Its longest gold query is 577 bytes and its
+# longest LIKE pattern 42 characters; its widest table has 48 columns and its widest gold
+# result 19. Its largest value is 213 bytes, but SQLite reads each CREATE statement in
+# sqlite_master through the length limit too, whenever it prepares a query, and soccer_1's
+# is 1,191 bytes: every gold query runs at that limit, and soccer_1's fail one byte under
+# it. The cost of instr, LIKE or replace grows with the product of their inputs' lengths,
+# so the length and SQL limits together bound the work one row can hold: a few hundredths
+# of a second here, where FG-191's 100 kB allowed 18 s. With no attached database allowed,
+# ATTACH and VACUUM INTO fail on any connection.
+MAX_VALUE_BYTES = 4_096
 LIMITS: Mapping[int, int] = MappingProxyType(
     {
         sqlite3.SQLITE_LIMIT_LENGTH: MAX_VALUE_BYTES,
-        sqlite3.SQLITE_LIMIT_LIKE_PATTERN_LENGTH: 1_000,
-        sqlite3.SQLITE_LIMIT_SQL_LENGTH: 100_000,
+        sqlite3.SQLITE_LIMIT_SQL_LENGTH: 8_192,
+        sqlite3.SQLITE_LIMIT_LIKE_PATTERN_LENGTH: 100,
+        sqlite3.SQLITE_LIMIT_COLUMN: 200,
         sqlite3.SQLITE_LIMIT_ATTACHED: 0,
     }
 )
-# Text counts its characters, a blob its bytes and any other value 8.
+# The memory the rows of one result may take, counted by row_size.
 MAX_RESULT_BYTES = 64 * 2**20
+# The most memory one value can take: a str holds 4 bytes a character once one of them
+# is past U+FFFF, and SQLite counts at least one byte a character.
+MAX_VALUE_SIZE = 4 * MAX_VALUE_BYTES + sys.getsizeof("\U00010000")
 
 MULTIPLE_STATEMENTS = "more than one statement; only a single statement may run"
 NOT_A_QUERY = "not a query; only statements that return rows may run"
 NOT_A_QUERY_KEYWORD = "{keyword} is not a query; only SELECT and VALUES statements may run"
 EMPTY_SQL = "no SQL"
-RESULT_TOO_BIG = f"result too big: more than {MAX_RESULT_BYTES // 2**20} MiB of values"
+RESULT_TOO_BIG = f"result too big: its rows take more than {MAX_RESULT_BYTES // 2**20} MiB"
 
 QUERY_KEYWORDS = frozenset({"SELECT", "VALUES"})
 # Every keyword a SQLite statement can start with.
@@ -261,7 +274,7 @@ class SqliteExecutor:
         max_rows: int = DEFAULT_MAX_ROWS,
     ) -> ExecResult:
         """Run one statement; a missing database raises ``DataNotFound``."""
-        _check_limits(timeout_ms, max_rows)
+        check_run_args(timeout_ms, max_rows)
         conn = self._connection(db_id)
         start = time.perf_counter()
         statements = statement_count(sql)
@@ -338,36 +351,19 @@ class SqliteExecutor:
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         max_rows: int = DEFAULT_MAX_ROWS,
     ) -> list[ExecResult]:
-        """Run ``(db_id, sql)`` pairs across ``workers`` processes; results keep their order.
+        """Run ``(db_id, sql)`` pairs in a ``SandboxPool`` of ``workers`` processes.
 
-        Each item gets its own ``timeout_ms``, enforced by ``run`` wherever it runs. One
-        worker runs them here, on this executor's connections. More start a process pool
-        with the spawn method on every platform, because forking a process that holds
-        SQLite connections (or CUDA, in a trainer) is unsafe. Each worker builds its own
-        executor from the data directory, so only that path and the queries go to the
-        workers, and plain ``ExecResult`` values come back. Spawn imports the calling
-        script again in each worker, so a script must call this under
-        ``if __name__ == "__main__":``.
+        Results keep their order. This is the path for untrusted SQL: each query has a
+        hard deadline, ``timeout_ms`` plus ``forge.sql.sandbox.KILL_GRACE_MS``, after
+        which its worker is killed. The pool lives for this call only; code that runs
+        batches again and again keeps its own ``SandboxPool``.
         """
-        _check_limits(timeout_ms, max_rows)
-        if workers < 1:
-            raise ValueError(f"workers must be at least 1, got {workers}")
-        if workers == 1:
-            return [
-                self.run(db_id, sql, timeout_ms=timeout_ms, max_rows=max_rows)
-                for db_id, sql in items
-            ]
-        jobs = [(db_id, sql, timeout_ms, max_rows) for db_id, sql in items]
-        # Big enough chunks to keep pickling overhead down, small enough to share the
-        # work evenly when some queries run to their timeout.
-        chunksize = max(1, len(jobs) // (workers * 8))
-        with ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=get_context("spawn"),
-            initializer=_start_worker,
-            initargs=(self.data_dir,),
-        ) as pool:
-            return list(pool.map(_run_job, jobs, chunksize=chunksize))
+        # Imported here because the sandbox builds on this module.
+        from forge.sql.sandbox import SandboxPool
+
+        check_run_args(timeout_ms, max_rows)
+        with SandboxPool(workers, data_dir=self.data_dir) as pool:
+            return pool.run_many(items, timeout_ms=timeout_ms, max_rows=max_rows)
 
     def close(self) -> None:
         for conn in self._connections.values():
@@ -403,25 +399,35 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def row_size(row: tuple[Any, ...]) -> int:
+    """The bytes a fetched row holds: the tuple, its values and its slot in the list.
+
+    A shared object such as ``None`` or a small int counts each time, so this errs high.
+    """
+    return sys.getsizeof(row) + 8 + sum(map(sys.getsizeof, row))
+
+
 def _fetch(cursor: sqlite3.Cursor, width: int, limit: int) -> list[tuple[Any, ...]] | None:
     """Up to ``limit`` rows of ``width`` values, or ``None`` once they pass the budget."""
-    # No value is longer than MAX_VALUE_BYTES, so a batch this size holds at most a quarter
-    # of the budget, and the memory held stays bounded however big the values are.
-    batch = max(1, MAX_RESULT_BYTES // (4 * width * MAX_VALUE_BYTES))
+    # No row is bigger than this, so a batch holds at most a quarter of the budget and the
+    # rows held never pass 1.25 times it, however big their values are.
+    largest = sys.getsizeof((None,) * width) + 8 + width * MAX_VALUE_SIZE
+    batch = max(1, MAX_RESULT_BYTES // (4 * largest))
     rows: list[tuple[Any, ...]] = []
     size = 0
     while len(rows) < limit:
         chunk = cursor.fetchmany(min(batch, limit - len(rows)))
         if not chunk:
             break
-        size += sum(len(v) if isinstance(v, str | bytes) else 8 for row in chunk for v in row)
+        size += sum(map(row_size, chunk))
         if size > MAX_RESULT_BYTES:
             return None
         rows.extend(chunk)
     return rows
 
 
-def _check_limits(timeout_ms: int, max_rows: int) -> None:
+def check_run_args(timeout_ms: int, max_rows: int) -> None:
+    """Raise ``ValueError`` for a timeout or row cap that ``run`` can't honor."""
     if timeout_ms <= 0:
         raise ValueError(f"timeout_ms must be positive, got {timeout_ms}")
     if max_rows < 0:
@@ -430,19 +436,3 @@ def _check_limits(timeout_ms: int, max_rows: int) -> None:
 
 def _ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000
-
-
-# Pool workers: each process builds one executor in _start_worker and keeps it.
-_worker: SqliteExecutor | None = None
-
-
-def _start_worker(data_dir: Path) -> None:
-    global _worker
-    _worker = SqliteExecutor(data_dir)
-
-
-def _run_job(job: tuple[str, str, int, int]) -> ExecResult:
-    if _worker is None:
-        raise RuntimeError("_run_job runs only in a pool started by SqliteExecutor.run_many")
-    db_id, sql, timeout_ms, max_rows = job
-    return _worker.run(db_id, sql, timeout_ms=timeout_ms, max_rows=max_rows)
