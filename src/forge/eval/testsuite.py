@@ -17,6 +17,14 @@ Around that call:
   to an empty result that matches any empty gold result (upstream issue #33). Both
   refusals happen before SQLite computes a row, so the executor's look is cut short
   after ``VET_TIMEOUT_MS`` and only its verdict is kept.
+- The evaluator rewrites a prediction before running it: ``postprocess`` turns ``> =``
+  into ``>=``, ``remove_distinct`` drops every ``DISTINCT`` and keeps the first statement
+  sqlparse finds, and ``replace_cur_year`` turns ``YEAR(CURDATE())`` into ``2020``. So
+  the string it will run is built here and vetted too: dropping ``DISTINCT`` turns
+  ``DISTINCT ATTACH ...``, a syntax error, into an ``ATTACH``.
+- What SQLite skips before the first statement (whitespace, comments, semicolons) is
+  stripped first. Otherwise the first statement sqlparse finds in ``; SELECT ...`` is the
+  bare ``;``, which runs to no rows and matches any empty gold result.
 - A prediction too big for sqlparse's grouping limits (``SQLParseError`` from
   ``remove_distinct``) is not a match: the evaluator can't read it.
 - A gold query that fails raises ``GoldQueryFailed``. The evaluator asserts that gold
@@ -26,8 +34,9 @@ Around that call:
   event loop such as a notebook cell's. So the items run in a worker thread under one
   overall deadline, and each query keeps the vendored per-query timeout of 60 seconds.
 
-The evaluator opens its own read-only connections (``third_party/test_suite_eval/
-CHANGES.md``); a prediction only gets there after the executor has let it through.
+The evaluator opens its own connections, read-only and with the executor's authorizer
+and limits (``third_party/test_suite_eval/CHANGES.md``), so SQL that got past these
+checks still can't write.
 """
 
 from __future__ import annotations
@@ -39,10 +48,11 @@ from typing import NamedTuple
 
 from sqlparse.exceptions import SQLParseError
 from test_suite_eval import exec_eval
+from test_suite_eval.parse import remove_distinct
 
 from forge.core.types import ErrorKind
 from forge.data.spider import db_path, resolve_data_dir
-from forge.sql.executor import SqliteExecutor
+from forge.sql.executor import SqliteExecutor, strip_leading
 
 DEFAULT_TIMEOUT_S = 3600.0
 VET_TIMEOUT_MS = 100
@@ -122,15 +132,20 @@ def _match_all(items: Sequence[MatchItem], root: Path, stop: threading.Event) ->
 
 
 def _match(executor: SqliteExecutor, root: Path, item: MatchItem) -> bool:
-    if item.pred_sql is None:
+    if item.pred_sql is None or _refused(executor, item.db_id, item.pred_sql):
         return False
-    vetted = executor.run(item.db_id, item.pred_sql, timeout_ms=VET_TIMEOUT_MS, max_rows=0)
-    if vetted.error_kind in REFUSED:
+    pred = strip_leading(item.pred_sql)
+    try:
+        # What eval_exec_match will run, built the way it builds it.
+        as_run: str = exec_eval.replace_cur_year(remove_distinct(exec_eval.postprocess(pred)))
+    except SQLParseError:
+        return False
+    if as_run != pred and _refused(executor, item.db_id, as_run):
         return False
     try:
         matched: int = exec_eval.eval_exec_match(
             db=str(db_path(item.db_id, root)),
-            p_str=item.pred_sql,
+            p_str=pred,
             g_str=item.gold_sql,
             plug_value=False,
             keep_distinct=False,
@@ -139,6 +154,9 @@ def _match(executor: SqliteExecutor, root: Path, item: MatchItem) -> bool:
     except AssertionError as exc:
         # The evaluator's own check that the gold query ran.
         raise GoldQueryFailed(item.db_id, item.gold_sql) from exc
-    except SQLParseError:
-        return False
     return matched == 1
+
+
+def _refused(executor: SqliteExecutor, db_id: str, sql: str) -> bool:
+    vetted = executor.run(db_id, sql, timeout_ms=VET_TIMEOUT_MS, max_rows=0)
+    return vetted.error_kind in REFUSED
