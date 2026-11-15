@@ -1,14 +1,58 @@
-"""Phase marker plugin.
+"""Phase marker plugin and shared Spider data fixtures.
 
 Every test declares the plan phase that introduced it with ``@pytest.mark.phase(n)``.
 ``pytest --phase N`` runs phases 0..N and skips the rest, which is what a phase gate
 runs. A test without the marker stops collection, so nothing slips past a gate
 unlabeled.
+
+Tests marked ``requires_full_data`` need the full Spider download, which CI doesn't
+have; they are skipped, with the reason, wherever it is absent.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+from pathlib import Path
+
 import pytest
+
+# Typer forces a rich terminal whenever GITHUB_ACTIONS is set, so CLI errors come back
+# boxed and full of ANSI codes in CI but plain everywhere else. Tests compare text, so
+# they always get the plain form. It has to be set before typer.rich_utils is imported.
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+
+SPIDER_MINI = Path(__file__).resolve().parent / "fixtures" / "spider_mini"
+
+
+@pytest.fixture
+def spider_mini(monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The committed Spider subset, with FORGE_DATA_DIR pointing at it."""
+    monkeypatch.setenv("FORGE_DATA_DIR", str(SPIDER_MINI))
+    return SPIDER_MINI
+
+
+@pytest.fixture
+def with_dev(spider_mini: Path, tmp_path: Path) -> Path:
+    """A copy of the fixture with dorm_1 moved from train to dev, so dev isn't empty."""
+    root = Path(shutil.copytree(spider_mini, tmp_path / "with_dev"))
+    items = json.loads((root / "train_spider.json").read_text(encoding="utf-8"))
+    (root / "train_spider.json").write_text(
+        json.dumps([item for item in items if item["db_id"] != "dorm_1"]), encoding="utf-8"
+    )
+    (root / "dev.json").write_text(
+        json.dumps([item for item in items if item["db_id"] == "dorm_1"]), encoding="utf-8"
+    )
+    return root
+
+
+@pytest.fixture
+def dev_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A scratch dev-usage log, so no test spends the project's real dev budget."""
+    path = tmp_path / "dev-usage.md"
+    monkeypatch.setenv("FORGE_DEV_USAGE", str(path))
+    return path
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -40,3 +84,18 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if unmarked:
         listing = "\n  ".join(unmarked)
         raise pytest.UsageError(f"tests without @pytest.mark.phase(n):\n  {listing}")
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    if item.get_closest_marker("requires_full_data") is None:
+        return
+    # Only full-data tests need the loader, so collecting the others never imports it.
+    from forge.data.spider import load_checksums, resolve_data_dir
+
+    root = resolve_data_dir()
+    missing = [rel for rel in load_checksums() if not (root / rel).is_file()]
+    if missing:
+        pytest.skip(
+            f"needs the full Spider data, but {len(missing)} of its files are missing from "
+            f"{root}; run `uv run forge data fetch` or set FORGE_DATA_DIR"
+        )

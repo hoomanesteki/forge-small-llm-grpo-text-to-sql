@@ -1,0 +1,6957 @@
+[
+    {
+        "db_id": "department_management",
+        "query": "SELECT count(*) FROM head WHERE age  >  56",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "head",
+            "WHERE",
+            "age",
+            ">",
+            "56"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "head",
+            "where",
+            "age",
+            ">",
+            "value"
+        ],
+        "question": "How many heads of the departments are older than 56 ?",
+        "question_toks": [
+            "How",
+            "many",
+            "heads",
+            "of",
+            "the",
+            "departments",
+            "are",
+            "older",
+            "than",
+            "56",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            10,
+                            false
+                        ],
+                        null
+                    ],
+                    56.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT name ,  born_state ,  age FROM head ORDER BY age",
+        "query_toks": [
+            "SELECT",
+            "name",
+            ",",
+            "born_state",
+            ",",
+            "age",
+            "FROM",
+            "head",
+            "ORDER",
+            "BY",
+            "age"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            ",",
+            "born_state",
+            ",",
+            "age",
+            "from",
+            "head",
+            "order",
+            "by",
+            "age"
+        ],
+        "question": "List the name, born state and age of the heads of departments ordered by age.",
+        "question_toks": [
+            "List",
+            "the",
+            "name",
+            ",",
+            "born",
+            "state",
+            "and",
+            "age",
+            "of",
+            "the",
+            "heads",
+            "of",
+            "departments",
+            "ordered",
+            "by",
+            "age",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                8,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [
+                "asc",
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            10,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            ],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT creation ,  name ,  budget_in_billions FROM department",
+        "query_toks": [
+            "SELECT",
+            "creation",
+            ",",
+            "name",
+            ",",
+            "budget_in_billions",
+            "FROM",
+            "department"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "creation",
+            ",",
+            "name",
+            ",",
+            "budget_in_billions",
+            "from",
+            "department"
+        ],
+        "question": "List the creation year, name and budget of each department.",
+        "question_toks": [
+            "List",
+            "the",
+            "creation",
+            "year",
+            ",",
+            "name",
+            "and",
+            "budget",
+            "of",
+            "each",
+            "department",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                3,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                2,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                5,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT max(budget_in_billions) ,  min(budget_in_billions) FROM department",
+        "query_toks": [
+            "SELECT",
+            "max",
+            "(",
+            "budget_in_billions",
+            ")",
+            ",",
+            "min",
+            "(",
+            "budget_in_billions",
+            ")",
+            "FROM",
+            "department"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "max",
+            "(",
+            "budget_in_billions",
+            ")",
+            ",",
+            "min",
+            "(",
+            "budget_in_billions",
+            ")",
+            "from",
+            "department"
+        ],
+        "question": "What are the maximum and minimum budget of the departments?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "maximum",
+            "and",
+            "minimum",
+            "budget",
+            "of",
+            "the",
+            "departments",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        1,
+                        [
+                            0,
+                            [
+                                0,
+                                5,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                5,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT avg(num_employees) FROM department WHERE ranking BETWEEN 10 AND 15",
+        "query_toks": [
+            "SELECT",
+            "avg",
+            "(",
+            "num_employees",
+            ")",
+            "FROM",
+            "department",
+            "WHERE",
+            "ranking",
+            "BETWEEN",
+            "10",
+            "AND",
+            "15"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "avg",
+            "(",
+            "num_employees",
+            ")",
+            "from",
+            "department",
+            "where",
+            "ranking",
+            "between",
+            "value",
+            "and",
+            "value"
+        ],
+        "question": "What is the average number of employees of the departments whose rank is between 10 and 15?",
+        "question_toks": [
+            "What",
+            "is",
+            "the",
+            "average",
+            "number",
+            "of",
+            "employees",
+            "of",
+            "the",
+            "departments",
+            "whose",
+            "rank",
+            "is",
+            "between",
+            "10",
+            "and",
+            "15",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        5,
+                        [
+                            0,
+                            [
+                                0,
+                                6,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    1,
+                    [
+                        0,
+                        [
+                            0,
+                            4,
+                            false
+                        ],
+                        null
+                    ],
+                    10.0,
+                    15.0
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT name FROM head WHERE born_state != 'California'",
+        "query_toks": [
+            "SELECT",
+            "name",
+            "FROM",
+            "head",
+            "WHERE",
+            "born_state",
+            "!",
+            "=",
+            "'California",
+            "'"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            "from",
+            "head",
+            "where",
+            "born_state",
+            "!",
+            "=",
+            "value"
+        ],
+        "question": "What are the names of the heads who are born outside the California state?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "of",
+            "the",
+            "heads",
+            "who",
+            "are",
+            "born",
+            "outside",
+            "the",
+            "California",
+            "state",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                8,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    7,
+                    [
+                        0,
+                        [
+                            0,
+                            9,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"California\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON T1.department_id  =  T2.department_id JOIN head AS T3 ON T2.head_id  =  T3.head_id WHERE T3.born_state  =  'Alabama'",
+        "query_toks": [
+            "SELECT",
+            "DISTINCT",
+            "T1.creation",
+            "FROM",
+            "department",
+            "AS",
+            "T1",
+            "JOIN",
+            "management",
+            "AS",
+            "T2",
+            "ON",
+            "T1.department_id",
+            "=",
+            "T2.department_id",
+            "JOIN",
+            "head",
+            "AS",
+            "T3",
+            "ON",
+            "T2.head_id",
+            "=",
+            "T3.head_id",
+            "WHERE",
+            "T3.born_state",
+            "=",
+            "'Alabama",
+            "'"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "distinct",
+            "t1",
+            ".",
+            "creation",
+            "from",
+            "department",
+            "as",
+            "t1",
+            "join",
+            "management",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "department_id",
+            "=",
+            "t2",
+            ".",
+            "department_id",
+            "join",
+            "head",
+            "as",
+            "t3",
+            "on",
+            "t2",
+            ".",
+            "head_id",
+            "=",
+            "t3",
+            ".",
+            "head_id",
+            "where",
+            "t3",
+            ".",
+            "born_state",
+            "=",
+            "value"
+        ],
+        "question": "What are the distinct creation years of the departments managed by a secretary born in state 'Alabama'?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "distinct",
+            "creation",
+            "years",
+            "of",
+            "the",
+            "departments",
+            "managed",
+            "by",
+            "a",
+            "secretary",
+            "born",
+            "in",
+            "state",
+            "'Alabama",
+            "'",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ],
+                    [
+                        "table_unit",
+                        2
+                    ],
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                1,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    "and",
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                12,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            7,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                true,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                3,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            9,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Alabama\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT creation FROM department GROUP BY creation ORDER BY count(*) DESC LIMIT 1",
+        "query_toks": [
+            "SELECT",
+            "creation",
+            "FROM",
+            "department",
+            "GROUP",
+            "BY",
+            "creation",
+            "ORDER",
+            "BY",
+            "count",
+            "(",
+            "*",
+            ")",
+            "DESC",
+            "LIMIT",
+            "1"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "creation",
+            "from",
+            "department",
+            "group",
+            "by",
+            "creation",
+            "order",
+            "by",
+            "count",
+            "(",
+            "*",
+            ")",
+            "desc",
+            "limit",
+            "value"
+        ],
+        "question": "In which year were most departments established?",
+        "question_toks": [
+            "In",
+            "which",
+            "year",
+            "were",
+            "most",
+            "departments",
+            "established",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                3,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [
+                [
+                    0,
+                    3,
+                    false
+                ]
+            ],
+            "having": [],
+            "orderBy": [
+                "desc",
+                [
+                    [
+                        0,
+                        [
+                            3,
+                            0,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            ],
+            "limit": 1,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT count(*) FROM department WHERE department_id NOT IN (SELECT department_id FROM management);",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "department",
+            "WHERE",
+            "department_id",
+            "NOT",
+            "IN",
+            "(",
+            "SELECT",
+            "department_id",
+            "FROM",
+            "management",
+            ")",
+            ";"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "department",
+            "where",
+            "department_id",
+            "not",
+            "in",
+            "(",
+            "select",
+            "department_id",
+            "from",
+            "management",
+            ")"
+        ],
+        "question": "How many departments are led by heads who are not mentioned?",
+        "question_toks": [
+            "How",
+            "many",
+            "departments",
+            "are",
+            "led",
+            "by",
+            "heads",
+            "who",
+            "are",
+            "not",
+            "mentioned",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    true,
+                    8,
+                    [
+                        0,
+                        [
+                            0,
+                            1,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    2
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    0,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            11,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "department_management",
+        "query": "SELECT T3.born_state FROM department AS T1 JOIN management AS T2 ON T1.department_id  =  T2.department_id JOIN head AS T3 ON T2.head_id  =  T3.head_id WHERE T1.name  =  'Treasury' INTERSECT SELECT T3.born_state FROM department AS T1 JOIN management AS T2 ON T1.department_id  =  T2.department_id JOIN head AS T3 ON T2.head_id  =  T3.head_id WHERE T1.name  =  'Homeland Security'",
+        "query_toks": [
+            "SELECT",
+            "T3.born_state",
+            "FROM",
+            "department",
+            "AS",
+            "T1",
+            "JOIN",
+            "management",
+            "AS",
+            "T2",
+            "ON",
+            "T1.department_id",
+            "=",
+            "T2.department_id",
+            "JOIN",
+            "head",
+            "AS",
+            "T3",
+            "ON",
+            "T2.head_id",
+            "=",
+            "T3.head_id",
+            "WHERE",
+            "T1.name",
+            "=",
+            "'Treasury",
+            "'",
+            "INTERSECT",
+            "SELECT",
+            "T3.born_state",
+            "FROM",
+            "department",
+            "AS",
+            "T1",
+            "JOIN",
+            "management",
+            "AS",
+            "T2",
+            "ON",
+            "T1.department_id",
+            "=",
+            "T2.department_id",
+            "JOIN",
+            "head",
+            "AS",
+            "T3",
+            "ON",
+            "T2.head_id",
+            "=",
+            "T3.head_id",
+            "WHERE",
+            "T1.name",
+            "=",
+            "'Homeland",
+            "Security",
+            "'"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t3",
+            ".",
+            "born_state",
+            "from",
+            "department",
+            "as",
+            "t1",
+            "join",
+            "management",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "department_id",
+            "=",
+            "t2",
+            ".",
+            "department_id",
+            "join",
+            "head",
+            "as",
+            "t3",
+            "on",
+            "t2",
+            ".",
+            "head_id",
+            "=",
+            "t3",
+            ".",
+            "head_id",
+            "where",
+            "t1",
+            ".",
+            "name",
+            "=",
+            "value",
+            "intersect",
+            "select",
+            "t3",
+            ".",
+            "born_state",
+            "from",
+            "department",
+            "as",
+            "t1",
+            "join",
+            "management",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "department_id",
+            "=",
+            "t2",
+            ".",
+            "department_id",
+            "join",
+            "head",
+            "as",
+            "t3",
+            "on",
+            "t2",
+            ".",
+            "head_id",
+            "=",
+            "t3",
+            ".",
+            "head_id",
+            "where",
+            "t1",
+            ".",
+            "name",
+            "=",
+            "value"
+        ],
+        "question": "List the states where both the secretary of 'Treasury' department and the secretary of 'Homeland Security' were born.",
+        "question_toks": [
+            "List",
+            "the",
+            "states",
+            "where",
+            "both",
+            "the",
+            "secretary",
+            "of",
+            "'Treasury",
+            "'",
+            "department",
+            "and",
+            "the",
+            "secretary",
+            "of",
+            "'Homeland",
+            "Security",
+            "'",
+            "were",
+            "born",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ],
+                    [
+                        "table_unit",
+                        2
+                    ],
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                1,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    "and",
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                12,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            7,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            2,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Treasury\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": {
+                "from": {
+                    "table_units": [
+                        [
+                            "table_unit",
+                            0
+                        ],
+                        [
+                            "table_unit",
+                            2
+                        ],
+                        [
+                            "table_unit",
+                            1
+                        ]
+                    ],
+                    "conds": [
+                        [
+                            false,
+                            2,
+                            [
+                                0,
+                                [
+                                    0,
+                                    1,
+                                    false
+                                ],
+                                null
+                            ],
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ],
+                        "and",
+                        [
+                            false,
+                            2,
+                            [
+                                0,
+                                [
+                                    0,
+                                    12,
+                                    false
+                                ],
+                                null
+                            ],
+                            [
+                                0,
+                                7,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                },
+                "select": [
+                    false,
+                    [
+                        [
+                            0,
+                            [
+                                0,
+                                [
+                                    0,
+                                    9,
+                                    false
+                                ],
+                                null
+                            ]
+                        ]
+                    ]
+                ],
+                "where": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                2,
+                                false
+                            ],
+                            null
+                        ],
+                        "\"Homeland Security\"",
+                        null
+                    ]
+                ],
+                "groupBy": [],
+                "having": [],
+                "orderBy": [],
+                "limit": null,
+                "intersect": null,
+                "union": null,
+                "except": null
+            },
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT count(*) FROM Aircraft",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "Aircraft"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "aircraft"
+        ],
+        "question": "How many aircrafts do we have?",
+        "question_toks": [
+            "How",
+            "many",
+            "aircrafts",
+            "do",
+            "we",
+            "have",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT count(*) FROM Aircraft",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "Aircraft"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "aircraft"
+        ],
+        "question": "How many aircrafts exist in the database?",
+        "question_toks": [
+            "How",
+            "many",
+            "aircrafts",
+            "exist",
+            "in",
+            "the",
+            "database",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT name ,  distance FROM Aircraft",
+        "query_toks": [
+            "SELECT",
+            "name",
+            ",",
+            "distance",
+            "FROM",
+            "Aircraft"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            ",",
+            "distance",
+            "from",
+            "aircraft"
+        ],
+        "question": "Show name and distance for all aircrafts.",
+        "question_toks": [
+            "Show",
+            "name",
+            "and",
+            "distance",
+            "for",
+            "all",
+            "aircrafts",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT name ,  distance FROM Aircraft",
+        "query_toks": [
+            "SELECT",
+            "name",
+            ",",
+            "distance",
+            "FROM",
+            "Aircraft"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            ",",
+            "distance",
+            "from",
+            "aircraft"
+        ],
+        "question": "What are the names and distances for all airplanes?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "and",
+            "distances",
+            "for",
+            "all",
+            "airplanes",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT aid FROM Aircraft WHERE distance  >  1000",
+        "query_toks": [
+            "SELECT",
+            "aid",
+            "FROM",
+            "Aircraft",
+            "WHERE",
+            "distance",
+            ">",
+            "1000"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "aid",
+            "from",
+            "aircraft",
+            "where",
+            "distance",
+            ">",
+            "value"
+        ],
+        "question": "Show ids for all aircrafts with more than 1000 distance.",
+        "question_toks": [
+            "Show",
+            "ids",
+            "for",
+            "all",
+            "aircrafts",
+            "with",
+            "more",
+            "than",
+            "1000",
+            "distance",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    1000.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT aid FROM Aircraft WHERE distance  >  1000",
+        "query_toks": [
+            "SELECT",
+            "aid",
+            "FROM",
+            "Aircraft",
+            "WHERE",
+            "distance",
+            ">",
+            "1000"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "aid",
+            "from",
+            "aircraft",
+            "where",
+            "distance",
+            ">",
+            "value"
+        ],
+        "question": "What are the ids of all aircrafts that can cover a distance of more than 1000?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "ids",
+            "of",
+            "all",
+            "aircrafts",
+            "that",
+            "can",
+            "cover",
+            "a",
+            "distance",
+            "of",
+            "more",
+            "than",
+            "1000",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    1000.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT count(*) FROM Aircraft WHERE distance BETWEEN 1000 AND 5000",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "Aircraft",
+            "WHERE",
+            "distance",
+            "BETWEEN",
+            "1000",
+            "AND",
+            "5000"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "aircraft",
+            "where",
+            "distance",
+            "between",
+            "value",
+            "and",
+            "value"
+        ],
+        "question": "How many aircrafts have distance between 1000 and 5000?",
+        "question_toks": [
+            "How",
+            "many",
+            "aircrafts",
+            "have",
+            "distance",
+            "between",
+            "1000",
+            "and",
+            "5000",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    1,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    1000.0,
+                    5000.0
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT name ,  distance FROM Aircraft WHERE aid  =  12",
+        "query_toks": [
+            "SELECT",
+            "name",
+            ",",
+            "distance",
+            "FROM",
+            "Aircraft",
+            "WHERE",
+            "aid",
+            "=",
+            "12"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            ",",
+            "distance",
+            "from",
+            "aircraft",
+            "where",
+            "aid",
+            "=",
+            "value"
+        ],
+        "question": "What is the name and distance for aircraft with id 12?",
+        "question_toks": [
+            "What",
+            "is",
+            "the",
+            "name",
+            "and",
+            "distance",
+            "for",
+            "aircraft",
+            "with",
+            "id",
+            "12",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            9,
+                            false
+                        ],
+                        null
+                    ],
+                    12.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT name ,  distance FROM Aircraft WHERE aid  =  12",
+        "query_toks": [
+            "SELECT",
+            "name",
+            ",",
+            "distance",
+            "FROM",
+            "Aircraft",
+            "WHERE",
+            "aid",
+            "=",
+            "12"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            ",",
+            "distance",
+            "from",
+            "aircraft",
+            "where",
+            "aid",
+            "=",
+            "value"
+        ],
+        "question": "What is the name and distance for the aircraft that has an id of 12?",
+        "question_toks": [
+            "What",
+            "is",
+            "the",
+            "name",
+            "and",
+            "distance",
+            "for",
+            "the",
+            "aircraft",
+            "that",
+            "has",
+            "an",
+            "id",
+            "of",
+            "12",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            9,
+                            false
+                        ],
+                        null
+                    ],
+                    12.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT min(distance) ,  avg(distance) ,  max(distance) FROM Aircraft",
+        "query_toks": [
+            "SELECT",
+            "min",
+            "(",
+            "distance",
+            ")",
+            ",",
+            "avg",
+            "(",
+            "distance",
+            ")",
+            ",",
+            "max",
+            "(",
+            "distance",
+            ")",
+            "FROM",
+            "Aircraft"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "min",
+            "(",
+            "distance",
+            ")",
+            ",",
+            "avg",
+            "(",
+            "distance",
+            ")",
+            ",",
+            "max",
+            "(",
+            "distance",
+            ")",
+            "from",
+            "aircraft"
+        ],
+        "question": "What is the minimum, average, and maximum distance of all aircrafts.",
+        "question_toks": [
+            "What",
+            "is",
+            "the",
+            "minimum",
+            ",",
+            "average",
+            ",",
+            "and",
+            "maximum",
+            "distance",
+            "of",
+            "all",
+            "aircrafts",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        5,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        1,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT name FROM Aircraft WHERE distance  >  (SELECT avg(distance) FROM Aircraft)",
+        "query_toks": [
+            "SELECT",
+            "name",
+            "FROM",
+            "Aircraft",
+            "WHERE",
+            "distance",
+            ">",
+            "(",
+            "SELECT",
+            "avg",
+            "(",
+            "distance",
+            ")",
+            "FROM",
+            "Aircraft",
+            ")"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            "from",
+            "aircraft",
+            "where",
+            "distance",
+            ">",
+            "(",
+            "select",
+            "avg",
+            "(",
+            "distance",
+            ")",
+            "from",
+            "aircraft",
+            ")"
+        ],
+        "question": "Show names for all aircrafts with distances more than the average.",
+        "question_toks": [
+            "Show",
+            "names",
+            "for",
+            "all",
+            "aircrafts",
+            "with",
+            "distances",
+            "more",
+            "than",
+            "the",
+            "average",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    1
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    5,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            11,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT name FROM Aircraft WHERE distance  >  (SELECT avg(distance) FROM Aircraft)",
+        "query_toks": [
+            "SELECT",
+            "name",
+            "FROM",
+            "Aircraft",
+            "WHERE",
+            "distance",
+            ">",
+            "(",
+            "SELECT",
+            "avg",
+            "(",
+            "distance",
+            ")",
+            "FROM",
+            "Aircraft",
+            ")"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            "from",
+            "aircraft",
+            "where",
+            "distance",
+            ">",
+            "(",
+            "select",
+            "avg",
+            "(",
+            "distance",
+            ")",
+            "from",
+            "aircraft",
+            ")"
+        ],
+        "question": "What are the names of all aircrafts that can cover more distances than average?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "of",
+            "all",
+            "aircrafts",
+            "that",
+            "can",
+            "cover",
+            "more",
+            "distances",
+            "than",
+            "average",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    1
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    5,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            11,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT name FROM Employee WHERE salary  >  (SELECT avg(salary) FROM Employee)",
+        "query_toks": [
+            "SELECT",
+            "name",
+            "FROM",
+            "Employee",
+            "WHERE",
+            "salary",
+            ">",
+            "(",
+            "SELECT",
+            "avg",
+            "(",
+            "salary",
+            ")",
+            "FROM",
+            "Employee",
+            ")"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            "from",
+            "employee",
+            "where",
+            "salary",
+            ">",
+            "(",
+            "select",
+            "avg",
+            "(",
+            "salary",
+            ")",
+            "from",
+            "employee",
+            ")"
+        ],
+        "question": "Show names for all employees with salary more than the average.",
+        "question_toks": [
+            "Show",
+            "names",
+            "for",
+            "all",
+            "employees",
+            "with",
+            "salary",
+            "more",
+            "than",
+            "the",
+            "average",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        2
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                13,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            14,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    2
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    5,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            14,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT name FROM Employee WHERE salary  >  (SELECT avg(salary) FROM Employee)",
+        "query_toks": [
+            "SELECT",
+            "name",
+            "FROM",
+            "Employee",
+            "WHERE",
+            "salary",
+            ">",
+            "(",
+            "SELECT",
+            "avg",
+            "(",
+            "salary",
+            ")",
+            "FROM",
+            "Employee",
+            ")"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "name",
+            "from",
+            "employee",
+            "where",
+            "salary",
+            ">",
+            "(",
+            "select",
+            "avg",
+            "(",
+            "salary",
+            ")",
+            "from",
+            "employee",
+            ")"
+        ],
+        "question": "What are the names of all employees who have a salary higher than average?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "of",
+            "all",
+            "employees",
+            "who",
+            "have",
+            "a",
+            "salary",
+            "higher",
+            "than",
+            "average",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        2
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                13,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            14,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    2
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    5,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            14,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT origin FROM Flight GROUP BY origin ORDER BY count(*) DESC LIMIT 1",
+        "query_toks": [
+            "SELECT",
+            "origin",
+            "FROM",
+            "Flight",
+            "GROUP",
+            "BY",
+            "origin",
+            "ORDER",
+            "BY",
+            "count",
+            "(",
+            "*",
+            ")",
+            "DESC",
+            "LIMIT",
+            "1"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "origin",
+            "from",
+            "flight",
+            "group",
+            "by",
+            "origin",
+            "order",
+            "by",
+            "count",
+            "(",
+            "*",
+            ")",
+            "desc",
+            "limit",
+            "value"
+        ],
+        "question": "Which origin has most number of flights?",
+        "question_toks": [
+            "Which",
+            "origin",
+            "has",
+            "most",
+            "number",
+            "of",
+            "flights",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                2,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [
+                [
+                    0,
+                    2,
+                    false
+                ]
+            ],
+            "having": [],
+            "orderBy": [
+                "desc",
+                [
+                    [
+                        0,
+                        [
+                            3,
+                            0,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            ],
+            "limit": 1,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT T1.name FROM Employee AS T1 JOIN Certificate AS T2 ON T1.eid  =  T2.eid JOIN Aircraft AS T3 ON T3.aid  =  T2.aid WHERE T3.name  =  \"Boeing 737-800\" INTERSECT SELECT T1.name FROM Employee AS T1 JOIN Certificate AS T2 ON T1.eid  =  T2.eid JOIN Aircraft AS T3 ON T3.aid  =  T2.aid WHERE T3.name  =  \"Airbus A340-300\"",
+        "query_toks": [
+            "SELECT",
+            "T1.name",
+            "FROM",
+            "Employee",
+            "AS",
+            "T1",
+            "JOIN",
+            "Certificate",
+            "AS",
+            "T2",
+            "ON",
+            "T1.eid",
+            "=",
+            "T2.eid",
+            "JOIN",
+            "Aircraft",
+            "AS",
+            "T3",
+            "ON",
+            "T3.aid",
+            "=",
+            "T2.aid",
+            "WHERE",
+            "T3.name",
+            "=",
+            "``",
+            "Boeing",
+            "737-800",
+            "''",
+            "INTERSECT",
+            "SELECT",
+            "T1.name",
+            "FROM",
+            "Employee",
+            "AS",
+            "T1",
+            "JOIN",
+            "Certificate",
+            "AS",
+            "T2",
+            "ON",
+            "T1.eid",
+            "=",
+            "T2.eid",
+            "JOIN",
+            "Aircraft",
+            "AS",
+            "T3",
+            "ON",
+            "T3.aid",
+            "=",
+            "T2.aid",
+            "WHERE",
+            "T3.name",
+            "=",
+            "``",
+            "Airbus",
+            "A340-300",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t1",
+            ".",
+            "name",
+            "from",
+            "employee",
+            "as",
+            "t1",
+            "join",
+            "certificate",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "eid",
+            "=",
+            "t2",
+            ".",
+            "eid",
+            "join",
+            "aircraft",
+            "as",
+            "t3",
+            "on",
+            "t3",
+            ".",
+            "aid",
+            "=",
+            "t2",
+            ".",
+            "aid",
+            "where",
+            "t3",
+            ".",
+            "name",
+            "=",
+            "value",
+            "intersect",
+            "select",
+            "t1",
+            ".",
+            "name",
+            "from",
+            "employee",
+            "as",
+            "t1",
+            "join",
+            "certificate",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "eid",
+            "=",
+            "t2",
+            ".",
+            "eid",
+            "join",
+            "aircraft",
+            "as",
+            "t3",
+            "on",
+            "t3",
+            ".",
+            "aid",
+            "=",
+            "t2",
+            ".",
+            "aid",
+            "where",
+            "t3",
+            ".",
+            "name",
+            "=",
+            "value"
+        ],
+        "question": "Show names for all employees who have certificates on both Boeing 737-800 and Airbus A340-300.",
+        "question_toks": [
+            "Show",
+            "names",
+            "for",
+            "all",
+            "employees",
+            "who",
+            "have",
+            "certificates",
+            "on",
+            "both",
+            "Boeing",
+            "737-800",
+            "and",
+            "Airbus",
+            "A340-300",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        2
+                    ],
+                    [
+                        "table_unit",
+                        3
+                    ],
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                12,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            15,
+                            false
+                        ],
+                        null
+                    ],
+                    "and",
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            16,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                13,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            10,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Boeing 737-800\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": {
+                "from": {
+                    "table_units": [
+                        [
+                            "table_unit",
+                            2
+                        ],
+                        [
+                            "table_unit",
+                            3
+                        ],
+                        [
+                            "table_unit",
+                            1
+                        ]
+                    ],
+                    "conds": [
+                        [
+                            false,
+                            2,
+                            [
+                                0,
+                                [
+                                    0,
+                                    12,
+                                    false
+                                ],
+                                null
+                            ],
+                            [
+                                0,
+                                15,
+                                false
+                            ],
+                            null
+                        ],
+                        "and",
+                        [
+                            false,
+                            2,
+                            [
+                                0,
+                                [
+                                    0,
+                                    9,
+                                    false
+                                ],
+                                null
+                            ],
+                            [
+                                0,
+                                16,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                },
+                "select": [
+                    false,
+                    [
+                        [
+                            0,
+                            [
+                                0,
+                                [
+                                    0,
+                                    13,
+                                    false
+                                ],
+                                null
+                            ]
+                        ]
+                    ]
+                ],
+                "where": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ],
+                        "\"Airbus A340-300\"",
+                        null
+                    ]
+                ],
+                "groupBy": [],
+                "having": [],
+                "orderBy": [],
+                "limit": null,
+                "intersect": null,
+                "union": null,
+                "except": null
+            },
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT T1.name FROM Employee AS T1 JOIN Certificate AS T2 ON T1.eid  =  T2.eid JOIN Aircraft AS T3 ON T3.aid  =  T2.aid WHERE T3.name  =  \"Boeing 737-800\" INTERSECT SELECT T1.name FROM Employee AS T1 JOIN Certificate AS T2 ON T1.eid  =  T2.eid JOIN Aircraft AS T3 ON T3.aid  =  T2.aid WHERE T3.name  =  \"Airbus A340-300\"",
+        "query_toks": [
+            "SELECT",
+            "T1.name",
+            "FROM",
+            "Employee",
+            "AS",
+            "T1",
+            "JOIN",
+            "Certificate",
+            "AS",
+            "T2",
+            "ON",
+            "T1.eid",
+            "=",
+            "T2.eid",
+            "JOIN",
+            "Aircraft",
+            "AS",
+            "T3",
+            "ON",
+            "T3.aid",
+            "=",
+            "T2.aid",
+            "WHERE",
+            "T3.name",
+            "=",
+            "``",
+            "Boeing",
+            "737-800",
+            "''",
+            "INTERSECT",
+            "SELECT",
+            "T1.name",
+            "FROM",
+            "Employee",
+            "AS",
+            "T1",
+            "JOIN",
+            "Certificate",
+            "AS",
+            "T2",
+            "ON",
+            "T1.eid",
+            "=",
+            "T2.eid",
+            "JOIN",
+            "Aircraft",
+            "AS",
+            "T3",
+            "ON",
+            "T3.aid",
+            "=",
+            "T2.aid",
+            "WHERE",
+            "T3.name",
+            "=",
+            "``",
+            "Airbus",
+            "A340-300",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t1",
+            ".",
+            "name",
+            "from",
+            "employee",
+            "as",
+            "t1",
+            "join",
+            "certificate",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "eid",
+            "=",
+            "t2",
+            ".",
+            "eid",
+            "join",
+            "aircraft",
+            "as",
+            "t3",
+            "on",
+            "t3",
+            ".",
+            "aid",
+            "=",
+            "t2",
+            ".",
+            "aid",
+            "where",
+            "t3",
+            ".",
+            "name",
+            "=",
+            "value",
+            "intersect",
+            "select",
+            "t1",
+            ".",
+            "name",
+            "from",
+            "employee",
+            "as",
+            "t1",
+            "join",
+            "certificate",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "eid",
+            "=",
+            "t2",
+            ".",
+            "eid",
+            "join",
+            "aircraft",
+            "as",
+            "t3",
+            "on",
+            "t3",
+            ".",
+            "aid",
+            "=",
+            "t2",
+            ".",
+            "aid",
+            "where",
+            "t3",
+            ".",
+            "name",
+            "=",
+            "value"
+        ],
+        "question": "What are the names of all employees who can fly both the Boeing 737-800 and the Airbus A340-300?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "of",
+            "all",
+            "employees",
+            "who",
+            "can",
+            "fly",
+            "both",
+            "the",
+            "Boeing",
+            "737-800",
+            "and",
+            "the",
+            "Airbus",
+            "A340-300",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        2
+                    ],
+                    [
+                        "table_unit",
+                        3
+                    ],
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                12,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            15,
+                            false
+                        ],
+                        null
+                    ],
+                    "and",
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            16,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                13,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            10,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Boeing 737-800\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": {
+                "from": {
+                    "table_units": [
+                        [
+                            "table_unit",
+                            2
+                        ],
+                        [
+                            "table_unit",
+                            3
+                        ],
+                        [
+                            "table_unit",
+                            1
+                        ]
+                    ],
+                    "conds": [
+                        [
+                            false,
+                            2,
+                            [
+                                0,
+                                [
+                                    0,
+                                    12,
+                                    false
+                                ],
+                                null
+                            ],
+                            [
+                                0,
+                                15,
+                                false
+                            ],
+                            null
+                        ],
+                        "and",
+                        [
+                            false,
+                            2,
+                            [
+                                0,
+                                [
+                                    0,
+                                    9,
+                                    false
+                                ],
+                                null
+                            ],
+                            [
+                                0,
+                                16,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                },
+                "select": [
+                    false,
+                    [
+                        [
+                            0,
+                            [
+                                0,
+                                [
+                                    0,
+                                    13,
+                                    false
+                                ],
+                                null
+                            ]
+                        ]
+                    ]
+                ],
+                "where": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ],
+                        "\"Airbus A340-300\"",
+                        null
+                    ]
+                ],
+                "groupBy": [],
+                "having": [],
+                "orderBy": [],
+                "limit": null,
+                "intersect": null,
+                "union": null,
+                "except": null
+            },
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT T2.name FROM Certificate AS T1 JOIN Aircraft AS T2 ON T2.aid  =  T1.aid GROUP BY T1.aid ORDER BY count(*) DESC LIMIT 1",
+        "query_toks": [
+            "SELECT",
+            "T2.name",
+            "FROM",
+            "Certificate",
+            "AS",
+            "T1",
+            "JOIN",
+            "Aircraft",
+            "AS",
+            "T2",
+            "ON",
+            "T2.aid",
+            "=",
+            "T1.aid",
+            "GROUP",
+            "BY",
+            "T1.aid",
+            "ORDER",
+            "BY",
+            "count",
+            "(",
+            "*",
+            ")",
+            "DESC",
+            "LIMIT",
+            "1"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t2",
+            ".",
+            "name",
+            "from",
+            "certificate",
+            "as",
+            "t1",
+            "join",
+            "aircraft",
+            "as",
+            "t2",
+            "on",
+            "t2",
+            ".",
+            "aid",
+            "=",
+            "t1",
+            ".",
+            "aid",
+            "group",
+            "by",
+            "t1",
+            ".",
+            "aid",
+            "order",
+            "by",
+            "count",
+            "(",
+            "*",
+            ")",
+            "desc",
+            "limit",
+            "value"
+        ],
+        "question": "Show the name of aircraft which fewest people have its certificate.",
+        "question_toks": [
+            "Show",
+            "the",
+            "name",
+            "of",
+            "aircraft",
+            "which",
+            "fewest",
+            "people",
+            "have",
+            "its",
+            "certificate",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        3
+                    ],
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            16,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [
+                [
+                    0,
+                    16,
+                    false
+                ]
+            ],
+            "having": [],
+            "orderBy": [
+                "desc",
+                [
+                    [
+                        0,
+                        [
+                            3,
+                            0,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            ],
+            "limit": 1,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT T2.name FROM Certificate AS T1 JOIN Aircraft AS T2 ON T2.aid  =  T1.aid GROUP BY T1.aid ORDER BY count(*) DESC LIMIT 1",
+        "query_toks": [
+            "SELECT",
+            "T2.name",
+            "FROM",
+            "Certificate",
+            "AS",
+            "T1",
+            "JOIN",
+            "Aircraft",
+            "AS",
+            "T2",
+            "ON",
+            "T2.aid",
+            "=",
+            "T1.aid",
+            "GROUP",
+            "BY",
+            "T1.aid",
+            "ORDER",
+            "BY",
+            "count",
+            "(",
+            "*",
+            ")",
+            "DESC",
+            "LIMIT",
+            "1"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t2",
+            ".",
+            "name",
+            "from",
+            "certificate",
+            "as",
+            "t1",
+            "join",
+            "aircraft",
+            "as",
+            "t2",
+            "on",
+            "t2",
+            ".",
+            "aid",
+            "=",
+            "t1",
+            ".",
+            "aid",
+            "group",
+            "by",
+            "t1",
+            ".",
+            "aid",
+            "order",
+            "by",
+            "count",
+            "(",
+            "*",
+            ")",
+            "desc",
+            "limit",
+            "value"
+        ],
+        "question": "What are the names of the aircraft that the least people are certified to fly?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "of",
+            "the",
+            "aircraft",
+            "that",
+            "the",
+            "least",
+            "people",
+            "are",
+            "certified",
+            "to",
+            "fly",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        3
+                    ],
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            16,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [
+                [
+                    0,
+                    16,
+                    false
+                ]
+            ],
+            "having": [],
+            "orderBy": [
+                "desc",
+                [
+                    [
+                        0,
+                        [
+                            3,
+                            0,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            ],
+            "limit": 1,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "flight_1",
+        "query": "SELECT T2.name FROM Certificate AS T1 JOIN Aircraft AS T2 ON T2.aid  =  T1.aid WHERE T2.distance  >  5000 GROUP BY T1.aid ORDER BY count(*)  >=  5",
+        "query_toks": [
+            "SELECT",
+            "T2.name",
+            "FROM",
+            "Certificate",
+            "AS",
+            "T1",
+            "JOIN",
+            "Aircraft",
+            "AS",
+            "T2",
+            "ON",
+            "T2.aid",
+            "=",
+            "T1.aid",
+            "WHERE",
+            "T2.distance",
+            ">",
+            "5000",
+            "GROUP",
+            "BY",
+            "T1.aid",
+            "ORDER",
+            "BY",
+            "count",
+            "(",
+            "*",
+            ")",
+            ">",
+            "=",
+            "5"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t2",
+            ".",
+            "name",
+            "from",
+            "certificate",
+            "as",
+            "t1",
+            "join",
+            "aircraft",
+            "as",
+            "t2",
+            "on",
+            "t2",
+            ".",
+            "aid",
+            "=",
+            "t1",
+            ".",
+            "aid",
+            "where",
+            "t2",
+            ".",
+            "distance",
+            ">",
+            "value",
+            "group",
+            "by",
+            "t1",
+            ".",
+            "aid",
+            "order",
+            "by",
+            "count",
+            "(",
+            "*",
+            ")",
+            ">",
+            "=",
+            "value"
+        ],
+        "question": "Show the name and distance of the aircrafts with more than 5000 distance and which at least 5 people have its certificate.",
+        "question_toks": [
+            "Show",
+            "the",
+            "name",
+            "and",
+            "distance",
+            "of",
+            "the",
+            "aircrafts",
+            "with",
+            "more",
+            "than",
+            "5000",
+            "distance",
+            "and",
+            "which",
+            "at",
+            "least",
+            "5",
+            "people",
+            "have",
+            "its",
+            "certificate",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        3
+                    ],
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                9,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            16,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    5000.0,
+                    null
+                ]
+            ],
+            "groupBy": [
+                [
+                    0,
+                    16,
+                    false
+                ]
+            ],
+            "having": [],
+            "orderBy": [
+                "asc",
+                [
+                    [
+                        0,
+                        [
+                            3,
+                            0,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            ],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT count(*) FROM professor AS T1 JOIN department AS T2 ON T1.dept_code  =  T2.dept_code WHERE DEPT_NAME  =  \"Accounting\"",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "professor",
+            "AS",
+            "T1",
+            "JOIN",
+            "department",
+            "AS",
+            "T2",
+            "ON",
+            "T1.dept_code",
+            "=",
+            "T2.dept_code",
+            "WHERE",
+            "DEPT_NAME",
+            "=",
+            "``",
+            "Accounting",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "professor",
+            "as",
+            "t1",
+            "join",
+            "department",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "dept_code",
+            "=",
+            "t2",
+            ".",
+            "dept_code",
+            "where",
+            "dept_name",
+            "=",
+            "value"
+        ],
+        "question": "Find the number of professors in accounting department.",
+        "question_toks": [
+            "Find",
+            "the",
+            "number",
+            "of",
+            "professors",
+            "in",
+            "accounting",
+            "department",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        5
+                    ],
+                    [
+                        "table_unit",
+                        2
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                28,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            12,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Accounting\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT count(*) FROM professor AS T1 JOIN department AS T2 ON T1.dept_code  =  T2.dept_code WHERE DEPT_NAME  =  \"Accounting\"",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "professor",
+            "AS",
+            "T1",
+            "JOIN",
+            "department",
+            "AS",
+            "T2",
+            "ON",
+            "T1.dept_code",
+            "=",
+            "T2.dept_code",
+            "WHERE",
+            "DEPT_NAME",
+            "=",
+            "``",
+            "Accounting",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "professor",
+            "as",
+            "t1",
+            "join",
+            "department",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "dept_code",
+            "=",
+            "t2",
+            ".",
+            "dept_code",
+            "where",
+            "dept_name",
+            "=",
+            "value"
+        ],
+        "question": "How many professors are in the accounting dept?",
+        "question_toks": [
+            "How",
+            "many",
+            "professors",
+            "are",
+            "in",
+            "the",
+            "accounting",
+            "dept",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        5
+                    ],
+                    [
+                        "table_unit",
+                        2
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                28,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            12,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Accounting\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT count(DISTINCT PROF_NUM) FROM CLASS WHERE CRS_CODE  =  \"ACCT-211\"",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "DISTINCT",
+            "PROF_NUM",
+            ")",
+            "FROM",
+            "CLASS",
+            "WHERE",
+            "CRS_CODE",
+            "=",
+            "``",
+            "ACCT-211",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "distinct",
+            "prof_num",
+            ")",
+            "from",
+            "class",
+            "where",
+            "crs_code",
+            "=",
+            "value"
+        ],
+        "question": "How many professors are teaching class with code ACCT-211?",
+        "question_toks": [
+            "How",
+            "many",
+            "professors",
+            "are",
+            "teaching",
+            "class",
+            "with",
+            "code",
+            "ACCT-211",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                6,
+                                true
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            2,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"ACCT-211\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT count(DISTINCT PROF_NUM) FROM CLASS WHERE CRS_CODE  =  \"ACCT-211\"",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "DISTINCT",
+            "PROF_NUM",
+            ")",
+            "FROM",
+            "CLASS",
+            "WHERE",
+            "CRS_CODE",
+            "=",
+            "``",
+            "ACCT-211",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "distinct",
+            "prof_num",
+            ")",
+            "from",
+            "class",
+            "where",
+            "crs_code",
+            "=",
+            "value"
+        ],
+        "question": "How many professors teach a class with the code ACCT-211?",
+        "question_toks": [
+            "How",
+            "many",
+            "professors",
+            "teach",
+            "a",
+            "class",
+            "with",
+            "the",
+            "code",
+            "ACCT-211",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                6,
+                                true
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            2,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"ACCT-211\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT T3.EMP_FNAME ,  T3.EMP_LNAME FROM professor AS T1 JOIN department AS T2 ON T1.dept_code  =  T2.dept_code JOIN employee AS T3 ON T1.EMP_NUM  =  T3.EMP_NUM WHERE DEPT_NAME  =  \"Biology\"",
+        "query_toks": [
+            "SELECT",
+            "T3.EMP_FNAME",
+            ",",
+            "T3.EMP_LNAME",
+            "FROM",
+            "professor",
+            "AS",
+            "T1",
+            "JOIN",
+            "department",
+            "AS",
+            "T2",
+            "ON",
+            "T1.dept_code",
+            "=",
+            "T2.dept_code",
+            "JOIN",
+            "employee",
+            "AS",
+            "T3",
+            "ON",
+            "T1.EMP_NUM",
+            "=",
+            "T3.EMP_NUM",
+            "WHERE",
+            "DEPT_NAME",
+            "=",
+            "``",
+            "Biology",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t3",
+            ".",
+            "emp_fname",
+            ",",
+            "t3",
+            ".",
+            "emp_lname",
+            "from",
+            "professor",
+            "as",
+            "t1",
+            "join",
+            "department",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "dept_code",
+            "=",
+            "t2",
+            ".",
+            "dept_code",
+            "join",
+            "employee",
+            "as",
+            "t3",
+            "on",
+            "t1",
+            ".",
+            "emp_num",
+            "=",
+            "t3",
+            ".",
+            "emp_num",
+            "where",
+            "dept_name",
+            "=",
+            "value"
+        ],
+        "question": "What is the first and last name of the professor in biology department?",
+        "question_toks": [
+            "What",
+            "is",
+            "the",
+            "first",
+            "and",
+            "last",
+            "name",
+            "of",
+            "the",
+            "professor",
+            "in",
+            "biology",
+            "department",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        5
+                    ],
+                    [
+                        "table_unit",
+                        2
+                    ],
+                    [
+                        "table_unit",
+                        3
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                28,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    "and",
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                27,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            17,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                19,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                18,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            12,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Biology\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT T3.EMP_FNAME ,  T3.EMP_LNAME FROM professor AS T1 JOIN department AS T2 ON T1.dept_code  =  T2.dept_code JOIN employee AS T3 ON T1.EMP_NUM  =  T3.EMP_NUM WHERE DEPT_NAME  =  \"Biology\"",
+        "query_toks": [
+            "SELECT",
+            "T3.EMP_FNAME",
+            ",",
+            "T3.EMP_LNAME",
+            "FROM",
+            "professor",
+            "AS",
+            "T1",
+            "JOIN",
+            "department",
+            "AS",
+            "T2",
+            "ON",
+            "T1.dept_code",
+            "=",
+            "T2.dept_code",
+            "JOIN",
+            "employee",
+            "AS",
+            "T3",
+            "ON",
+            "T1.EMP_NUM",
+            "=",
+            "T3.EMP_NUM",
+            "WHERE",
+            "DEPT_NAME",
+            "=",
+            "``",
+            "Biology",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t3",
+            ".",
+            "emp_fname",
+            ",",
+            "t3",
+            ".",
+            "emp_lname",
+            "from",
+            "professor",
+            "as",
+            "t1",
+            "join",
+            "department",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "dept_code",
+            "=",
+            "t2",
+            ".",
+            "dept_code",
+            "join",
+            "employee",
+            "as",
+            "t3",
+            "on",
+            "t1",
+            ".",
+            "emp_num",
+            "=",
+            "t3",
+            ".",
+            "emp_num",
+            "where",
+            "dept_name",
+            "=",
+            "value"
+        ],
+        "question": "What are the first and last name of all biology professors?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "first",
+            "and",
+            "last",
+            "name",
+            "of",
+            "all",
+            "biology",
+            "professors",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        5
+                    ],
+                    [
+                        "table_unit",
+                        2
+                    ],
+                    [
+                        "table_unit",
+                        3
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                28,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    "and",
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                27,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            17,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                19,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                18,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            12,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Biology\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT DISTINCT T1.EMP_FNAME ,  T1.EMP_DOB FROM employee AS T1 JOIN CLASS AS T2 ON T1.EMP_NUM  =  T2.PROF_NUM WHERE CRS_CODE  =  \"ACCT-211\"",
+        "query_toks": [
+            "SELECT",
+            "DISTINCT",
+            "T1.EMP_FNAME",
+            ",",
+            "T1.EMP_DOB",
+            "FROM",
+            "employee",
+            "AS",
+            "T1",
+            "JOIN",
+            "CLASS",
+            "AS",
+            "T2",
+            "ON",
+            "T1.EMP_NUM",
+            "=",
+            "T2.PROF_NUM",
+            "WHERE",
+            "CRS_CODE",
+            "=",
+            "``",
+            "ACCT-211",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "distinct",
+            "t1",
+            ".",
+            "emp_fname",
+            ",",
+            "t1",
+            ".",
+            "emp_dob",
+            "from",
+            "employee",
+            "as",
+            "t1",
+            "join",
+            "class",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "emp_num",
+            "=",
+            "t2",
+            ".",
+            "prof_num",
+            "where",
+            "crs_code",
+            "=",
+            "value"
+        ],
+        "question": "What are the first names and date of birth of professors teaching course ACCT-211?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "first",
+            "names",
+            "and",
+            "date",
+            "of",
+            "birth",
+            "of",
+            "professors",
+            "teaching",
+            "course",
+            "ACCT-211",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        3
+                    ],
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                17,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            6,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                true,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                19,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                23,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            2,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"ACCT-211\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT school_code FROM department WHERE dept_name  =  \"Accounting\"",
+        "query_toks": [
+            "SELECT",
+            "school_code",
+            "FROM",
+            "department",
+            "WHERE",
+            "dept_name",
+            "=",
+            "``",
+            "Accounting",
+            "''"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "school_code",
+            "from",
+            "department",
+            "where",
+            "dept_name",
+            "=",
+            "value"
+        ],
+        "question": "What is the code of the school where the accounting department belongs to?",
+        "question_toks": [
+            "What",
+            "is",
+            "the",
+            "code",
+            "of",
+            "the",
+            "school",
+            "where",
+            "the",
+            "accounting",
+            "department",
+            "belongs",
+            "to",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        2
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                13,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            12,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"Accounting\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT T1.school_code FROM department AS T1 JOIN professor AS T2 ON T1.dept_code  =  T2.dept_code GROUP BY T1.school_code ORDER BY count(*) LIMIT 1",
+        "query_toks": [
+            "SELECT",
+            "T1.school_code",
+            "FROM",
+            "department",
+            "AS",
+            "T1",
+            "JOIN",
+            "professor",
+            "AS",
+            "T2",
+            "ON",
+            "T1.dept_code",
+            "=",
+            "T2.dept_code",
+            "GROUP",
+            "BY",
+            "T1.school_code",
+            "ORDER",
+            "BY",
+            "count",
+            "(",
+            "*",
+            ")",
+            "LIMIT",
+            "1"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t1",
+            ".",
+            "school_code",
+            "from",
+            "department",
+            "as",
+            "t1",
+            "join",
+            "professor",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "dept_code",
+            "=",
+            "t2",
+            ".",
+            "dept_code",
+            "group",
+            "by",
+            "t1",
+            ".",
+            "school_code",
+            "order",
+            "by",
+            "count",
+            "(",
+            "*",
+            ")",
+            "limit",
+            "value"
+        ],
+        "question": "Which school has the smallest amount of professors?",
+        "question_toks": [
+            "Which",
+            "school",
+            "has",
+            "the",
+            "smallest",
+            "amount",
+            "of",
+            "professors",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        2
+                    ],
+                    [
+                        "table_unit",
+                        5
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            28,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                13,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [
+                [
+                    0,
+                    13,
+                    false
+                ]
+            ],
+            "having": [],
+            "orderBy": [
+                "asc",
+                [
+                    [
+                        0,
+                        [
+                            3,
+                            0,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            ],
+            "limit": 1,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "college_1",
+        "query": "SELECT T1.school_code FROM department AS T1 JOIN professor AS T2 ON T1.dept_code  =  T2.dept_code GROUP BY T1.school_code ORDER BY count(*) LIMIT 1",
+        "query_toks": [
+            "SELECT",
+            "T1.school_code",
+            "FROM",
+            "department",
+            "AS",
+            "T1",
+            "JOIN",
+            "professor",
+            "AS",
+            "T2",
+            "ON",
+            "T1.dept_code",
+            "=",
+            "T2.dept_code",
+            "GROUP",
+            "BY",
+            "T1.school_code",
+            "ORDER",
+            "BY",
+            "count",
+            "(",
+            "*",
+            ")",
+            "LIMIT",
+            "1"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "t1",
+            ".",
+            "school_code",
+            "from",
+            "department",
+            "as",
+            "t1",
+            "join",
+            "professor",
+            "as",
+            "t2",
+            "on",
+            "t1",
+            ".",
+            "dept_code",
+            "=",
+            "t2",
+            ".",
+            "dept_code",
+            "group",
+            "by",
+            "t1",
+            ".",
+            "school_code",
+            "order",
+            "by",
+            "count",
+            "(",
+            "*",
+            ")",
+            "limit",
+            "value"
+        ],
+        "question": "Which school has the fewest professors?",
+        "question_toks": [
+            "Which",
+            "school",
+            "has",
+            "the",
+            "fewest",
+            "professors",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        2
+                    ],
+                    [
+                        "table_unit",
+                        5
+                    ]
+                ],
+                "conds": [
+                    [
+                        false,
+                        2,
+                        [
+                            0,
+                            [
+                                0,
+                                11,
+                                false
+                            ],
+                            null
+                        ],
+                        [
+                            0,
+                            28,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                13,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [],
+            "groupBy": [
+                [
+                    0,
+                    13,
+                    false
+                ]
+            ],
+            "having": [],
+            "orderBy": [
+                "asc",
+                [
+                    [
+                        0,
+                        [
+                            3,
+                            0,
+                            false
+                        ],
+                        null
+                    ]
+                ]
+            ],
+            "limit": 1,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT dorm_name FROM dorm WHERE gender  =  'F'",
+        "query_toks": [
+            "SELECT",
+            "dorm_name",
+            "FROM",
+            "dorm",
+            "WHERE",
+            "gender",
+            "=",
+            "'F",
+            "'"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "dorm_name",
+            "from",
+            "dorm",
+            "where",
+            "gender",
+            "=",
+            "value"
+        ],
+        "question": "Find the name of dorms only for female (F gender).",
+        "question_toks": [
+            "Find",
+            "the",
+            "name",
+            "of",
+            "dorms",
+            "only",
+            "for",
+            "female",
+            "(",
+            "F",
+            "gender",
+            ")",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            12,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"F\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT dorm_name FROM dorm WHERE gender  =  'F'",
+        "query_toks": [
+            "SELECT",
+            "dorm_name",
+            "FROM",
+            "dorm",
+            "WHERE",
+            "gender",
+            "=",
+            "'F",
+            "'"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "dorm_name",
+            "from",
+            "dorm",
+            "where",
+            "gender",
+            "=",
+            "value"
+        ],
+        "question": "What are the names of the all-female dorms?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "of",
+            "the",
+            "all-female",
+            "dorms",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            12,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"F\"",
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT dorm_name FROM dorm WHERE student_capacity  >  300",
+        "query_toks": [
+            "SELECT",
+            "dorm_name",
+            "FROM",
+            "dorm",
+            "WHERE",
+            "student_capacity",
+            ">",
+            "300"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "dorm_name",
+            "from",
+            "dorm",
+            "where",
+            "student_capacity",
+            ">",
+            "value"
+        ],
+        "question": "Find the name of dorms that can accommodate more than 300 students.",
+        "question_toks": [
+            "Find",
+            "the",
+            "name",
+            "of",
+            "dorms",
+            "that",
+            "can",
+            "accommodate",
+            "more",
+            "than",
+            "300",
+            "students",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    300.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT count(*) FROM student WHERE sex  =  'F' AND age  <  25",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "student",
+            "WHERE",
+            "sex",
+            "=",
+            "'F",
+            "'",
+            "AND",
+            "age",
+            "<",
+            "25"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "student",
+            "where",
+            "sex",
+            "=",
+            "value",
+            "and",
+            "age",
+            "<",
+            "value"
+        ],
+        "question": "How many female students (sex is F) whose age is below 25?",
+        "question_toks": [
+            "How",
+            "many",
+            "female",
+            "students",
+            "(",
+            "sex",
+            "is",
+            "F",
+            ")",
+            "whose",
+            "age",
+            "is",
+            "below",
+            "25",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            5,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"F\"",
+                    null
+                ],
+                "and",
+                [
+                    false,
+                    4,
+                    [
+                        0,
+                        [
+                            0,
+                            4,
+                            false
+                        ],
+                        null
+                    ],
+                    25.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT count(*) FROM student WHERE sex  =  'F' AND age  <  25",
+        "query_toks": [
+            "SELECT",
+            "count",
+            "(",
+            "*",
+            ")",
+            "FROM",
+            "student",
+            "WHERE",
+            "sex",
+            "=",
+            "'F",
+            "'",
+            "AND",
+            "age",
+            "<",
+            "25"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "count",
+            "(",
+            "*",
+            ")",
+            "from",
+            "student",
+            "where",
+            "sex",
+            "=",
+            "value",
+            "and",
+            "age",
+            "<",
+            "value"
+        ],
+        "question": "How many girl students who are younger than 25?",
+        "question_toks": [
+            "How",
+            "many",
+            "girl",
+            "students",
+            "who",
+            "are",
+            "younger",
+            "than",
+            "25",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        3,
+                        [
+                            0,
+                            [
+                                0,
+                                0,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            5,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"F\"",
+                    null
+                ],
+                "and",
+                [
+                    false,
+                    4,
+                    [
+                        0,
+                        [
+                            0,
+                            4,
+                            false
+                        ],
+                        null
+                    ],
+                    25.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT fname FROM student WHERE city_code  =  'PHL' AND age BETWEEN 20 AND 25",
+        "query_toks": [
+            "SELECT",
+            "fname",
+            "FROM",
+            "student",
+            "WHERE",
+            "city_code",
+            "=",
+            "'PHL",
+            "'",
+            "AND",
+            "age",
+            "BETWEEN",
+            "20",
+            "AND",
+            "25"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "fname",
+            "from",
+            "student",
+            "where",
+            "city_code",
+            "=",
+            "value",
+            "and",
+            "age",
+            "between",
+            "value",
+            "and",
+            "value"
+        ],
+        "question": "Find the first name of students living in city PHL whose age is between 20 and 25.",
+        "question_toks": [
+            "Find",
+            "the",
+            "first",
+            "name",
+            "of",
+            "students",
+            "living",
+            "in",
+            "city",
+            "PHL",
+            "whose",
+            "age",
+            "is",
+            "between",
+            "20",
+            "and",
+            "25",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        0
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                3,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    2,
+                    [
+                        0,
+                        [
+                            0,
+                            8,
+                            false
+                        ],
+                        null
+                    ],
+                    "\"PHL\"",
+                    null
+                ],
+                "and",
+                [
+                    false,
+                    1,
+                    [
+                        0,
+                        [
+                            0,
+                            4,
+                            false
+                        ],
+                        null
+                    ],
+                    20.0,
+                    25.0
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT dorm_name FROM dorm WHERE dormid NOT IN (SELECT dormid FROM has_amenity)",
+        "query_toks": [
+            "SELECT",
+            "dorm_name",
+            "FROM",
+            "dorm",
+            "WHERE",
+            "dormid",
+            "NOT",
+            "IN",
+            "(",
+            "SELECT",
+            "dormid",
+            "FROM",
+            "has_amenity",
+            ")"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "dorm_name",
+            "from",
+            "dorm",
+            "where",
+            "dormid",
+            "not",
+            "in",
+            "(",
+            "select",
+            "dormid",
+            "from",
+            "has_amenity",
+            ")"
+        ],
+        "question": "Find the name of dorms that do not have any amenity",
+        "question_toks": [
+            "Find",
+            "the",
+            "name",
+            "of",
+            "dorms",
+            "that",
+            "do",
+            "not",
+            "have",
+            "any",
+            "amenity"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    true,
+                    8,
+                    [
+                        0,
+                        [
+                            0,
+                            9,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    3
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    0,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            15,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT dorm_name FROM dorm WHERE dormid NOT IN (SELECT dormid FROM has_amenity)",
+        "query_toks": [
+            "SELECT",
+            "dorm_name",
+            "FROM",
+            "dorm",
+            "WHERE",
+            "dormid",
+            "NOT",
+            "IN",
+            "(",
+            "SELECT",
+            "dormid",
+            "FROM",
+            "has_amenity",
+            ")"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "dorm_name",
+            "from",
+            "dorm",
+            "where",
+            "dormid",
+            "not",
+            "in",
+            "(",
+            "select",
+            "dormid",
+            "from",
+            "has_amenity",
+            ")"
+        ],
+        "question": "What are the names of all the dorms that don't have any amenities?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "of",
+            "all",
+            "the",
+            "dorms",
+            "that",
+            "do",
+            "n't",
+            "have",
+            "any",
+            "amenities",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    true,
+                    8,
+                    [
+                        0,
+                        [
+                            0,
+                            9,
+                            false
+                        ],
+                        null
+                    ],
+                    {
+                        "from": {
+                            "table_units": [
+                                [
+                                    "table_unit",
+                                    3
+                                ]
+                            ],
+                            "conds": []
+                        },
+                        "select": [
+                            false,
+                            [
+                                [
+                                    0,
+                                    [
+                                        0,
+                                        [
+                                            0,
+                                            15,
+                                            false
+                                        ],
+                                        null
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "where": [],
+                        "groupBy": [],
+                        "having": [],
+                        "orderBy": [],
+                        "limit": null,
+                        "intersect": null,
+                        "union": null,
+                        "except": null
+                    },
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT dorm_name ,  gender FROM dorm WHERE student_capacity  >  300 OR student_capacity  <  100",
+        "query_toks": [
+            "SELECT",
+            "dorm_name",
+            ",",
+            "gender",
+            "FROM",
+            "dorm",
+            "WHERE",
+            "student_capacity",
+            ">",
+            "300",
+            "OR",
+            "student_capacity",
+            "<",
+            "100"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "dorm_name",
+            ",",
+            "gender",
+            "from",
+            "dorm",
+            "where",
+            "student_capacity",
+            ">",
+            "value",
+            "or",
+            "student_capacity",
+            "<",
+            "value"
+        ],
+        "question": "Find the name and gender type of the dorms whose capacity is greater than 300 or less than 100.",
+        "question_toks": [
+            "Find",
+            "the",
+            "name",
+            "and",
+            "gender",
+            "type",
+            "of",
+            "the",
+            "dorms",
+            "whose",
+            "capacity",
+            "is",
+            "greater",
+            "than",
+            "300",
+            "or",
+            "less",
+            "than",
+            "100",
+            "."
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                12,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    300.0,
+                    null
+                ],
+                "or",
+                [
+                    false,
+                    4,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    100.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    },
+    {
+        "db_id": "dorm_1",
+        "query": "SELECT dorm_name ,  gender FROM dorm WHERE student_capacity  >  300 OR student_capacity  <  100",
+        "query_toks": [
+            "SELECT",
+            "dorm_name",
+            ",",
+            "gender",
+            "FROM",
+            "dorm",
+            "WHERE",
+            "student_capacity",
+            ">",
+            "300",
+            "OR",
+            "student_capacity",
+            "<",
+            "100"
+        ],
+        "query_toks_no_value": [
+            "select",
+            "dorm_name",
+            ",",
+            "gender",
+            "from",
+            "dorm",
+            "where",
+            "student_capacity",
+            ">",
+            "value",
+            "or",
+            "student_capacity",
+            "<",
+            "value"
+        ],
+        "question": "What are the names and types of the dorms that have a capacity greater than 300 or less than 100?",
+        "question_toks": [
+            "What",
+            "are",
+            "the",
+            "names",
+            "and",
+            "types",
+            "of",
+            "the",
+            "dorms",
+            "that",
+            "have",
+            "a",
+            "capacity",
+            "greater",
+            "than",
+            "300",
+            "or",
+            "less",
+            "than",
+            "100",
+            "?"
+        ],
+        "sql": {
+            "from": {
+                "table_units": [
+                    [
+                        "table_unit",
+                        1
+                    ]
+                ],
+                "conds": []
+            },
+            "select": [
+                false,
+                [
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                10,
+                                false
+                            ],
+                            null
+                        ]
+                    ],
+                    [
+                        0,
+                        [
+                            0,
+                            [
+                                0,
+                                12,
+                                false
+                            ],
+                            null
+                        ]
+                    ]
+                ]
+            ],
+            "where": [
+                [
+                    false,
+                    3,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    300.0,
+                    null
+                ],
+                "or",
+                [
+                    false,
+                    4,
+                    [
+                        0,
+                        [
+                            0,
+                            11,
+                            false
+                        ],
+                        null
+                    ],
+                    100.0,
+                    null
+                ]
+            ],
+            "groupBy": [],
+            "having": [],
+            "orderBy": [],
+            "limit": null,
+            "intersect": null,
+            "union": null,
+            "except": null
+        }
+    }
+]

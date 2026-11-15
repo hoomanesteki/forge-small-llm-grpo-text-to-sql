@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import re
 import subprocess
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
+from typing import Any, get_args
 
 import pytest
+from pydantic import ValidationError
 
-from forge.ops.manifest import DirtyTreeError, build_manifest, config_hash, git_sha
+from forge.core.types import RunManifest
+from forge.data.manifest import data_manifest_hash
+from forge.ops.manifest import DirtyTreeError, Platform, build_manifest, config_hash, git_sha
 
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+@pytest.fixture(autouse=True)
+def _fixture_data(spider_mini: Path) -> None:
+    """build_manifest hashes the data, so give it the small committed subset."""
 
 
 @pytest.fixture
@@ -29,11 +40,10 @@ def test_dirty_tree_blocked(repo: Path) -> None:
     assert len(clean) == 40
     (repo / "a.txt").write_text("two\n")
     with pytest.raises(DirtyTreeError):
-        build_manifest("eval", {"x": 1}, run_id="r", model_ref="m", seed=0, repo=repo)
-    manifest = build_manifest(
-        "eval", {"x": 1}, run_id="r", model_ref="m", seed=0, repo=repo, allow_dirty=True
-    )
-    assert manifest["git_sha"] == f"{clean}-dirty"
+        build_manifest("eval", {"x": 1}, model_ref="m", seed=0, repo=repo)
+    manifest = build_manifest("eval", {"x": 1}, model_ref="m", seed=0, repo=repo, allow_dirty=True)
+    assert manifest.git_sha == f"{clean}-dirty"
+    assert manifest.run_id.endswith(f"-m-eval-{clean[:7]}")
 
 
 @pytest.mark.phase(0)
@@ -53,13 +63,16 @@ def test_config_hash_stable() -> None:
 
 
 @pytest.mark.phase(0)
-def test_manifest_records_hashes(repo: Path) -> None:
+def test_manifest_records_hashes(repo: Path, spider_mini: Path) -> None:
     m = build_manifest(
         "sft", {"lr": 2e-4}, run_id="r1", model_ref="Qwen/Qwen3-1.7B", seed=42, repo=repo
     )
-    assert m["config_hash"] == config_hash({"lr": 2e-4})
-    assert m["data_manifest_hash"] == "unset"
-    assert m["status"] == "running"
+    assert isinstance(m, RunManifest)
+    assert m.run_id == "r1"
+    assert m.config_hash == config_hash({"lr": 2e-4})
+    assert m.data_manifest_hash == data_manifest_hash(spider_mini)
+    assert re.fullmatch(r"[0-9a-f]{64}", m.data_manifest_hash)
+    assert m.status == "running"
 
 
 @pytest.mark.phase(0)
@@ -81,3 +94,95 @@ def test_untracked_counts_even_if_status_hides_them(repo: Path) -> None:
     (repo / "new_module.py").write_text("x = 1\n")
     with pytest.raises(DirtyTreeError):
         git_sha(repo)
+
+
+@pytest.mark.phase(1)
+def test_run_id_generated_from_the_utc_start_date(repo: Path) -> None:
+    # 01:00 at UTC+5 is still the previous day in UTC, which is what the id must use.
+    started = datetime(2026, 11, 4, 1, 0, tzinfo=timezone(timedelta(hours=5)))
+    m = build_manifest(
+        "sft", {"lr": 2e-4}, model_ref="Qwen/Qwen3-1.7B", seed=42, repo=repo, now=started
+    )
+    assert m.run_id == f"2026-11-03-qwen3-1-7b-sft-{git_sha(repo)[:7]}"
+    assert m.started_at == started
+    assert m.started_at.astimezone(UTC).date().isoformat() == m.run_id[:10]
+
+
+@pytest.mark.phase(1)
+def test_naive_start_time_rejected(repo: Path) -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_manifest("eval", {}, model_ref="m", seed=0, repo=repo, now=datetime(2026, 11, 3))
+
+
+class _NoOffset(tzinfo):
+    """A tzinfo that knows no offset, which makes its datetimes naive."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return None
+
+
+@pytest.mark.phase(1)
+def test_start_time_without_an_offset_rejected(repo: Path) -> None:
+    now = datetime(2026, 11, 3, 23, 30, tzinfo=_NoOffset())
+    assert now.tzinfo is not None
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_manifest("eval", {}, model_ref="m", seed=0, repo=repo, now=now)
+
+
+@pytest.mark.phase(1)
+def test_manifest_keeps_its_own_copy_of_the_config(repo: Path) -> None:
+    lora: dict[str, Any] = {"r": 16, "target_modules": ["q_proj"]}
+    config: dict[str, Any] = {"lora": lora, "data": Path("data/spider")}
+    m = build_manifest("sft", config, model_ref="m", seed=0, repo=repo)
+
+    lora["r"] = 32
+    lora["target_modules"].append("v_proj")
+
+    # What was hashed, as JSON: the caller's edits don't reach it.
+    assert m.config == {"lora": {"r": 16, "target_modules": ["q_proj"]}, "data": "data/spider"}
+    assert config_hash(m.config) == m.config_hash
+    assert m.config_hash != config_hash(config)
+
+
+@pytest.mark.phase(1)
+def test_manifest_hash_matches_a_config_with_int_keys(repo: Path) -> None:
+    config: dict[str, Any] = {"lr_schedule": {2: 1e-4, 10: 1e-5}}
+    m = build_manifest("sft", config, model_ref="m", seed=0, repo=repo)
+
+    # The copy has the keys as JSON writes them, and still hashes like the config.
+    assert m.config == {"lr_schedule": {"2": 1e-4, "10": 1e-5}}
+    assert m.config_hash == config_hash(config)
+    assert config_hash(m.config) == m.config_hash
+
+
+@pytest.mark.phase(1)
+def test_manifest_round_trips_through_json(repo: Path) -> None:
+    m = build_manifest(
+        "grpo",
+        {"grpo": {"num_generations": 6}, "seed": 42},
+        model_ref="Qwen/Qwen3-4B",
+        seed=42,
+        platform="kaggle",
+        gpu="T4",
+        parent_run="2026-11-01-qwen3-4b-sft-a1b2c3d",
+        repo=repo,
+    )
+    assert RunManifest.model_validate_json(m.model_dump_json()) == m
+
+
+@pytest.mark.phase(1)
+def test_unknown_platform_rejected_at_runtime(repo: Path) -> None:
+    # The CLI hands over plain strings, so the model has to catch what typing can't.
+    with pytest.raises(ValidationError, match="platform"):
+        build_manifest("eval", {}, model_ref="m", seed=0, repo=repo, platform="aws")
+
+
+@pytest.mark.phase(1)
+def test_platforms_match_the_manifest_contract() -> None:
+    assert get_args(RunManifest.model_fields["platform"].annotation) == get_args(Platform)
