@@ -267,6 +267,51 @@ def data_prompt_stats(
     typer.echo(render_prompt_stats(prompt_stats(fitted, max_tokens=MAX_PROMPT_TOKENS)))
 
 
+@data_app.command("build-sft")
+def data_build_sft(
+    prompt_version: Annotated[
+        PromptVersionName, typer.Option(help="The prompt version training uses (ADR-0007).")
+    ],
+    tokenizer: Annotated[
+        str,
+        typer.Option(
+            help="The model to train: a Hub repo, as <repo>@<revision> to pin it, or a local "
+            "directory. Its chat template counts prompt tokens for the overflow policy."
+        ),
+    ],
+    out: Annotated[
+        Path | None, typer.Option(help="Where the <hash> folders go (default data/sft).")
+    ] = None,
+) -> None:
+    """Build the SFT dataset from the train split and save it as <out>/<hash>/.
+
+    Rows are TRL prompt-completion pairs: the prompt messages, then the gold query in a
+    sql code block. Repeated questions, gold that fails on SQLite and prompts the overflow
+    policy can't fit or leaves without the columns the gold reads are left out and counted.
+    """
+    from forge.data.prompts import chat_token_counter, load_tokenizer, render_prompt_stats
+    from forge.data.spider import resolve_data_dir
+    from forge.ops.paths import RepoRootNotFound
+    from forge.train.sft_data import build_sft_dataset, render_counts, save_sft
+
+    try:
+        data_dir = resolve_data_dir()
+        count = chat_token_counter(load_tokenizer(tokenizer))
+        dataset = build_sft_dataset(prompt_version, tokenizer, count, data_dir=data_dir)
+        folder = save_sft(dataset, out)
+    # OSError covers missing data, a tokenizer that can't be loaded and a failed write;
+    # ValueError covers SplitLeak.
+    except (ImportError, OSError, RepoRootNotFound, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    meta = dataset.meta
+    typer.echo(f"data: {data_dir}")
+    typer.echo(f"prompt {prompt_version}, tokenizer {tokenizer}\n")
+    typer.echo(render_counts(meta.counts) + "\n")
+    typer.echo(render_prompt_stats(meta.prompts) + "\n")
+    typer.echo(f"sft dataset: {folder}\nhash: {meta.hash}")
+
+
 @sql_app.command("run")
 def sql_run(
     sql: Annotated[str, typer.Argument(help="One SQL statement.")],
