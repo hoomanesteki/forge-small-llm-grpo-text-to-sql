@@ -23,7 +23,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-104 | Splits by database and dev guard | 3 | done |  |  | val is 15 of 146 train dbs (872 questions) by hashed `db_id`, committed id manifests, `assert_train_only`, `load_dev` logs each use, ADR-0004 |
 | FG-105 | Schema serializer and prompt builder | 5 | done |  |  | One `CREATE TABLE` line per table from `sqlite_master`, p2 sample rows, `fit_prompt` overflow policy, `forge data prompt-stats` |
 | FG-106 | Safe SQL executor | 5 | done |  |  | Read-only immutable URI, default-deny authorizer, deadline every 1,000 VM steps, row cap, statements counted before execution, spawn pool, `forge sql run`; every train and val gold query runs except the 3 known failures |
-| FG-107 | SQL extraction and result comparator | 3 | todo |  |  |  |
+| FG-107 | SQL extraction and result comparator | 3 | done |  |  | Last sql block, else last SELECT/WITH line, think blocks dropped; multiset or list rows, 6-decimal floats, column orders up to 6 columns; top-level ORDER BY by sqlglot with a regex fallback |
 | FG-108 | Official evaluator integration and agreement check | 5 | todo |  |  |  |
 
 ## Phase 2: Evaluation harness (v0.2.0)
@@ -187,3 +187,15 @@ Work discovered along the way that is not a plan story.
 - The vendored evaluator still opens its own connections (read-only in `exec_eval`, read-write in
   `get_schema` and `isValidSQL`). The one-module rule test covers `src/forge` only; FG-108 decides
   how official EX opens databases.
+- A truncated result never matches an untruncated one (with the same cap their row counts differ),
+  and two truncated results compare on the rows kept, so the six train and val golds over the cap
+  still match themselves. That is exact only for the same query: FG-202 and FG-503 should run gold,
+  and predictions against those golds, with a cap above 20,662 rows.
+- `order_matters` counts only a top-level ORDER BY. 34 of the 8,659 train and val golds have one only
+  in a subquery, where the official evaluator's substring test says order matters. With rows shuffled
+  and columns reordered, the two comparators disagreed on 21 of 8,620 golds, all of them among those
+  34; on 8,650 random gold pairs from the same database they agreed every time. FG-108 measures this
+  properly. Every train and val gold parses with sqlglot 30.31, so the regex fallback never runs on them.
+- `extract_sql` takes one line when there is no sql block, as section 3.7 says, so an unfenced query
+  split over several lines loses its tail. An unclosed `<think>` (a reply cut off while thinking) is
+  not dropped either. FG-204 can count both if they show up.
