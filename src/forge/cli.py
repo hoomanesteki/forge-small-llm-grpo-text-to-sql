@@ -365,7 +365,12 @@ def eval_run(
         typer.Option(help="Why dev is evaluated: required for --split dev, and logged."),
     ] = None,
     limit: Annotated[
-        int | None, typer.Option(min=1, help="Answer only the first N questions by id.")
+        int | None,
+        typer.Option(
+            min=1,
+            help="Answer only the first N questions: by id on val and dev, in file order on "
+            "train (train_spider before the rowless train_others).",
+        ),
     ] = None,
     prompt_version: Annotated[
         PromptVersionName, typer.Option(help="p1, or p2 with sample rows.")

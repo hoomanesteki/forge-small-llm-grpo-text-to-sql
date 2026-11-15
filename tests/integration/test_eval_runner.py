@@ -19,7 +19,8 @@ from typer.testing import CliRunner
 from forge import cli
 from forge.core.types import Example, Generation, GenParams, Prompt, RunManifest, Score
 from forge.data.manifest import data_manifest_hash
-from forge.data.splits import load_val
+from forge.data.spider import FAILING_GOLD_IDS, ROWLESS_DBS
+from forge.data.splits import load_train, load_val
 from forge.eval import runner
 from forge.eval.config import OFFICIAL_ITEM_TIMEOUT_S, PRED_TIMEOUT_MS, EvalConfig
 from forge.eval.run_files import RunConflict
@@ -246,6 +247,34 @@ def test_resume_no_duplicates(spider_mini: Path, runs: Path, tmp_path: Path) -> 
     assert all(s.ex_fast and s.ex_official for s in scores)
     assert run.resumed == 8 and list(run.scores) == scores
     assert manifest.status == "finished" and manifest.started_at == first.started_at
+
+
+@pytest.mark.phase(2)
+def test_limited_train_run_starts_with_train_spider(spider_mini: Path, runs: Path) -> None:
+    train = [e for e in load_train() if e.id not in FAILING_GOLD_IDS]
+    by_id = {example.id: example for example in train}
+    # The fixture's train_others questions sort first by id, and all are on rowless geo.
+    others = [e for e in train if e.id.startswith("spider-others-")]
+    assert len(others) == 10 and {e.db_id for e in others} <= ROWLESS_DBS
+    assert min(e.id for e in train) == others[0].id
+
+    limited = run_eval(
+        EvalConfig(model="gold", backend="fake", split="train", limit=12, run_id="train-12"),
+        allow_dirty=True,
+        workers=1,
+    )
+    # The loader's order: train_spider.json first, so the gold results say something.
+    assert [s.example_id for s in limited.scores] == [e.id for e in train[:12]]
+    assert [s.example_id[:13] for s in limited.scores] == ["spider-train-"] * 12
+    assert not {by_id[s.example_id].db_id for s in limited.scores} & ROWLESS_DBS
+
+    whole = run_eval(
+        EvalConfig(model="gold", backend="fake", split="train", run_id="train-all"),
+        allow_dirty=True,
+        workers=1,
+    )
+    assert [s.example_id for s in whole.scores] == [e.id for e in train]
+    assert [s.example_id for s in whole.scores][-10:] == [e.id for e in others]
 
 
 @pytest.mark.phase(2)
