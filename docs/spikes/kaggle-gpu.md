@@ -163,8 +163,8 @@ in a private dataset is the last resort, with its risk written down.
   and bitsandbytes come preinstalled is unknown. Sources:
   [Dockerfile.tmpl](https://github.com/Kaggle/docker-python/blob/main/Dockerfile.tmpl),
   [docker-python releases](https://github.com/Kaggle/docker-python/releases).
-- Forge's `pyproject.toml` requires Python below 3.13, so on that image its wheel would
-  not install (see the Found list in `docs/progress.md`).
+- Forge's `pyproject.toml` required Python below 3.13, so on that image its wheel would
+  not have installed. FG-303 widened it to below 3.14 and added 3.13 to CI (ADR-0002).
 - The T4 is compute capability 7.5: fp16 only, no bf16 in hardware.
 - The stacks conflict. vllm 0.33.0 pins torch 2.14.0 and transformers below 5.21;
   Unsloth 2026.11.4 caps trl at 1.15.0 and transformers at 5.17.0; Unsloth's T4 notebook

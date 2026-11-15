@@ -89,9 +89,10 @@ def redact(text: str, env: Mapping[str, str], extra: Sequence[str] = ()) -> str:
 
 def check_python() -> Check:
     version = platform.python_version()
-    ok = (3, 11) <= sys.version_info[:2] < (3, 13)
+    # The range pyproject.toml allows: 3.13 is the Kaggle image's, 3.12 the laptop's.
+    ok = (3, 11) <= sys.version_info[:2] < (3, 14)
     return Check(
-        "python", ok, version, "" if ok else "use Python 3.11 or 3.12 (uv python install 3.12)"
+        "python", ok, version, "" if ok else "use Python 3.11 to 3.13 (uv python install 3.12)"
     )
 
 

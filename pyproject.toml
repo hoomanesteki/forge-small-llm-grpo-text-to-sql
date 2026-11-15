@@ -5,7 +5,7 @@ description = "Post-train a small open LLM with GRPO on verifiable text-to-SQL r
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Hooman Esteki" }]
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     # huggingface-hub's HTTP client: forge data fetch catches its transport errors, which
     # are not OSErrors.
