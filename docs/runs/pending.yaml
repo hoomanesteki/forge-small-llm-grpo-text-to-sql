@@ -32,3 +32,16 @@ pending:
     how: docs/spikes/kaggle-gpu.md, "Running the spike", step 6
     fills:
       - docs/spikes/kaggle-gpu.md, every "To be measured" item of question 6
+  - story: FG-302
+    run: kaggle-dataset-publish
+    platform: kaggle
+    accelerator: none (uploads only, no kernel runs)
+    est_gpu_hours: 0
+    status: blocked
+    blocked_on:
+      - a Kaggle account with an API token in ~/.kaggle/access_token
+      - FORGE_KAGGLE_USER in .env, since an API token doesn't name its user
+    how: docs/runbook.md, "Code and data on Kaggle", steps 1 and 2
+    fills:
+      - the FG-302 PR description, the output of both commands (acceptance criterion 2)
+      - docs/progress.md, FG-302 status done
