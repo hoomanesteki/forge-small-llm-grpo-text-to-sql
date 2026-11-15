@@ -1,6 +1,6 @@
 [project]
 name = "forge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Post-train a small open LLM with GRPO on verifiable text-to-SQL rewards, on free GPUs."
 readme = "README.md"
 license = { text = "MIT" }
