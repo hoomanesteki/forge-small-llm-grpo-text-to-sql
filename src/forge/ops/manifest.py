@@ -20,7 +20,7 @@ from forge.data.manifest import data_manifest_hash
 from forge.ops.paths import APPEND_ONLY_LOGS
 
 # Mirrors RunManifest.platform; a unit test keeps the two in step.
-Platform = Literal["local-cpu", "kaggle", "colab", "modal"]
+Platform = Literal["local-cpu", "local-mps", "kaggle", "colab", "modal"]
 
 
 class DirtyTreeError(RuntimeError):
