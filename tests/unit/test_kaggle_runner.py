@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 from forge import cli
 from forge.eval.config import EvalConfig
 from forge.ops import kaggle, kaggle_job
+from forge.ops.dev_usage import log_dev_use, read_uses
 from forge.ops.kaggle import KaggleClient, KaggleError, check_kernel_metadata
 from forge.ops.kaggle_job import (
     COLAB_DIRS,
@@ -405,6 +406,61 @@ def test_jobs_a_later_story_builds_and_bad_options_are_refused_before_any_upload
         result = _run("--job", "eval", "--config", str(path), "--yes")
         assert result.exit_code == 1 and message in result.stderr, result.stderr
     assert fake.commands == []
+
+
+@pytest.mark.phase(3)
+def test_dev_job_needs_a_reason_and_its_push_logs_the_look(
+    repo: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    dev = repo.parent / "dev.yaml"
+    dev.write_text("model: gold\nbackend: fake\nsplit: dev\nops: {est_gpu_hours: 0.5}\n")
+    spike = str(repo / "configs/spike/throughput.yaml")
+    for args, message in (
+        (["--job", "eval", "--config", str(dev)], "--split dev needs --reason"),
+        (
+            ["--job", "eval", "--config", str(repo / "configs/eval/job.yaml"), "--reason", "x"],
+            "--reason goes with --split dev",
+        ),
+        (["--job", "spike", "--config", spike, "--reason", "x"], "takes no --reason"),
+        # A notebook could spend any number of looks, and log none of them.
+        (
+            [
+                "--job",
+                "eval",
+                "--config",
+                str(dev),
+                "--reason",
+                "baseline",
+                "--emit-notebook",
+                str(repo.parent / "dev.ipynb"),
+            ],
+            "can't log its dev look",
+        ),
+    ):
+        result = _run(*args, "--yes")
+        assert result.exit_code == 1 and message in result.stderr, result.output
+    assert fake.commands == [] and not dev_log.exists()
+
+    result = _run("--job", "eval", "--config", str(dev), "--reason", "baseline", "--yes")
+
+    assert result.exit_code == 0, result.output
+    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    # The kernel gets the reason it needs to load dev, and the push logs the look here.
+    argv = _baked_argv(fake.pushed[0]["entry.py"])
+    options = json.loads(argv[argv.index("--options") + 1])
+    assert options == {"model": "gold", "backend": "fake", "split": "dev", "reason": "baseline"}
+    assert read_uses(dev_log) == [(date.today().isoformat(), run_id, "baseline")]
+    assert "dev look 1 of 6 logged in docs/dev-usage.md" in result.stdout
+
+    # Once the six looks are spent, a dev job is refused before anything is uploaded.
+    for i in range(2, 7):
+        log_dev_use(f"run-{i}", "earlier look", path=dev_log)
+    fake.commands.clear()
+    spent = _run("--job", "eval", "--config", str(dev), "--reason", "one more", "--run-id", "x")
+    assert spent.exit_code == 1 and "had its 6 looks" in spent.stderr
+    assert fake.commands == [] and len(read_uses(dev_log)) == 6
 
 
 @pytest.mark.phase(3)

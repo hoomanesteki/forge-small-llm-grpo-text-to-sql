@@ -68,6 +68,7 @@ AgreementSplitName = Literal["train", "val"]
 BackendName = Literal["hf", "vllm", "llamacpp", "fake"]
 DeviceName = Literal["cpu", "mps"]
 StoreName = Literal["local", "hub"]
+QuantizationName = Literal["bitsandbytes"]
 
 # Printed by the commands that read dev without a model, so nobody logs them as dev uses
 # or holds back from running them.
@@ -389,6 +390,10 @@ def eval_run(
             min=0, max=1, help="1 asks once more, with the error, when a query fails to run."
         ),
     ] = 0,
+    quantization: Annotated[
+        QuantizationName | None,
+        typer.Option(help="Load vllm's model in 4-bit with bitsandbytes, for a model past 4B."),
+    ] = None,
     run_id: Annotated[
         str | None,
         typer.Option("--run-id", help="Name the run, or resume the run of that name."),
@@ -444,6 +449,7 @@ def eval_run(
         n=n,
         temperature=temperature,
         retry=retry,
+        quantization=quantization,
         run_id=run_id,
         store=store,
     )
@@ -862,14 +868,17 @@ KaggleJobName = Literal["eval", "sft", "grpo", "spike"]
 def _kaggle_job_errors() -> tuple[type[Exception], ...]:
     """What a Kaggle job command can raise: a refused check, a failed kaggle call, a bad
     config (ValueError) or one a later story builds (NotAvailable), a file that can't be
-    read (OSError), and a root that isn't a checkout (GitError)."""
+    read (OSError), a root that isn't a checkout (GitError), and a dev look logged past
+    the budget (DevBudgetExceeded)."""
     from forge.eval.config import NotAvailable
+    from forge.ops.dev_usage import DevBudgetExceeded
     from forge.ops.kaggle import KaggleError
     from forge.ops.kaggle_job import JobRefused
     from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound
 
     return (
+        DevBudgetExceeded,
         DirtyTreeError,
         GitError,
         JobRefused,
@@ -925,6 +934,10 @@ def kaggle_run(
             help="Push past the week's GPU budget; an eval run's config records it.",
         ),
     ] = False,
+    reason: Annotated[
+        str | None,
+        typer.Option(help="Why dev is evaluated: required for a dev config, and logged."),
+    ] = None,
 ) -> None:
     """Push a GPU job to Kaggle once it passes the checks every GPU job must pass.
 
@@ -932,11 +945,12 @@ def kaggle_run(
     which is published if it doesn't; and the config's ops.est_gpu_hours must fit what the
     ledger and Kaggle's quota leave this week. It prints the estimate, asks unless --yes,
     pushes the kernel on a T4 and prints the run id, which status, logs, wait and output
-    take.
+    take. A dev job's push spends one of the six dev looks, logged in docs/dev-usage.md.
     """
     import json
 
     from forge.ops import kaggle_job as jobs
+    from forge.ops.dev_usage import MAX_DEV_USES
     from forge.ops.doctor import DEFAULT_RUN_STORE
     from forge.ops.dotenv import forge_env
     from forge.ops.kaggle import KaggleClient
@@ -958,6 +972,8 @@ def kaggle_run(
             resume=resume,
             preflight=preflight,
             allow_over_budget=allow_over_budget,
+            reason=reason,
+            notebook=emit_notebook is not None,
         )
         code = data = None
         if plan.mounts_datasets:
@@ -996,10 +1012,13 @@ def kaggle_run(
         jobs.record_push(
             runs_dir(), plan, kernel=kernel, version=pushed.version, code=code, budget=budget
         )
+        looks = jobs.log_dev_look(plan)
     except _kaggle_job_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(pushed.output)
+    if looks is not None:
+        typer.echo(f"dev look {looks} of {MAX_DEV_USES} logged in docs/dev-usage.md")
     typer.echo(f"run {plan.run_id}: kernel {kernel}, version {pushed.version}")
     typer.echo(f"next: forge kaggle wait {plan.run_id}")
 

@@ -21,6 +21,7 @@ KERNEL_ENV = (
     "FORGE_CACHE_DIR",
     "FORGE_DATA_DIR",
     "FORGE_CODE_SHA",
+    "FORGE_DEV_USAGE",
     "HF_TOKEN",
     "WANDB_API_KEY",
 )
