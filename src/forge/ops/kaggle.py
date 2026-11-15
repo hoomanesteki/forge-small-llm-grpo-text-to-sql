@@ -1,4 +1,4 @@
-"""Kaggle kernels: the metadata a push sends, checked before it is sent.
+"""Kaggle: the metadata a kernel push sends, and the datasets a kernel mounts.
 
 ``kaggle kernels push -p DIR`` reads ``DIR/kernel-metadata.json`` and uploads the one
 script it names. The CLI (kaggle 2.2.5) lets some mistakes through quietly: it ignores a
@@ -10,15 +10,27 @@ laptop instead of in a queued GPU session.
 Every Forge kernel is a private Python script. The template in
 ``kaggle/kernel-metadata.template.json`` asks for a T4 with internet; a CPU kernel drops
 the GPU and the machine shape.
+
+A GPU job mounts two private datasets: ``<owner>/forge-code``, the wheel built at one
+commit with ``requirements-gpu.txt`` and ``GIT_SHA``, and ``<owner>/forge-spider``, the
+Spider files ``spider.sha256`` lists, with that file. ``KaggleClient`` runs the kaggle CLI
+as an argument list, never through a shell, and reads what it prints as well as its exit
+code: ``datasets create`` and ``version`` report a refused upload and still exit 0.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+import shlex
+import subprocess
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from forge.ops.dotenv import forge_env
 
 TEMPLATE = Path("kaggle") / "kernel-metadata.template.json"  # relative to the repo root
 METADATA_FILE = "kernel-metadata.json"
@@ -213,3 +225,133 @@ def _strings(meta: Mapping[str, Any]) -> list[tuple[str, str]]:
         items = value if isinstance(value, list) else [value]
         found += [(key, item) for item in items if isinstance(item, str)]
     return found
+
+
+OWNER_ENV = "FORGE_KAGGLE_USER"
+
+# kaggle 2.2.5 prints "Dataset creation error: ..." or "Dataset version creation error: ..."
+# on stdout and exits 0 when the server refuses an upload.
+_UPLOAD_REFUSED = re.compile(r"creation error", re.IGNORECASE)
+
+# Gets a command as an argument list; returns its exit code and captured output.
+Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+
+
+class KaggleError(RuntimeError):
+    """A kaggle command failed, or printed a failure and exited 0."""
+
+
+def run_command(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run ``args`` without a shell, capturing output, with the repo's ``.env`` merged in.
+
+    The merged environment matters: Kaggle credentials may live only in ``.env``.
+    """
+    return subprocess.run(list(args), capture_output=True, text=True, check=False, env=forge_env())
+
+
+def kaggle_bin() -> str:
+    """The kaggle script next to this interpreter, so an unactivated venv still works."""
+    sibling = Path(sys.executable).parent / "kaggle"
+    return str(sibling) if sibling.is_file() else "kaggle"
+
+
+@dataclass(frozen=True)
+class KaggleClient:
+    """The kaggle CLI, run through ``run`` so tests can stand in for it."""
+
+    run: Runner = run_command
+    executable: str = field(default_factory=kaggle_bin)
+
+    def dataset_exists(self, ref: str) -> bool:
+        """Whether the dataset ``owner/slug`` exists; raises on any other failure."""
+        command = [self.executable, "datasets", "status", ref]
+        result = _run(self.run, command)
+        if result.returncode == 0:
+            return True
+        # A missing dataset is a 404, which kaggle 2.2.5 reports as "... was not found."
+        if "not found" in _output(result).lower():
+            return False
+        raise _failed(command, result)
+
+    def create_dataset(self, folder: Path) -> str:
+        """Create the dataset ``folder``'s metadata names; returns what the CLI printed."""
+        # Never -u: without it a new dataset is private. zip mode uploads each subfolder
+        # as an archive, where the default (skip) would leave it out without a word.
+        return self._upload([self.executable, "datasets", "create", "-p", str(folder), "-r", "zip"])
+
+    def version_dataset(self, folder: Path, message: str) -> str:
+        """Upload ``folder`` as a new version, noted ``message``; returns what the CLI printed."""
+        command = [self.executable, "datasets", "version", "-p", str(folder), "-m", message]
+        return self._upload([*command, "-r", "zip"])
+
+    def _upload(self, command: list[str]) -> str:
+        output = _check(self.run, command)
+        if _UPLOAD_REFUSED.search(output):
+            raise KaggleError(f"{_display(command)} was refused: {_tail(output)}")
+        return output.strip()
+
+
+def kaggle_owner(env: Mapping[str, str], home: Path) -> str:
+    """The Kaggle user who owns Forge's datasets.
+
+    ``FORGE_KAGGLE_USER`` if set, else the username in the Kaggle credentials:
+    ``KAGGLE_USERNAME``, or ``kaggle.json`` in ``KAGGLE_CONFIG_DIR`` or ``~/.kaggle``. An
+    API token doesn't name its user, so with one ``FORGE_KAGGLE_USER`` has to be set.
+    """
+    owner = env.get(OWNER_ENV) or env.get("KAGGLE_USERNAME") or _kaggle_json_username(env, home)
+    if not owner:
+        raise KaggleError(
+            f"no Kaggle username: set {OWNER_ENV} in .env or the environment, since an API "
+            "token doesn't name its user"
+        )
+    if not _OWNER.fullmatch(owner):
+        raise KaggleError(f"{owner!r} is not a Kaggle username")
+    return owner
+
+
+def _kaggle_json_username(env: Mapping[str, str], home: Path) -> str | None:
+    config_dir = (
+        Path(env["KAGGLE_CONFIG_DIR"]) if env.get("KAGGLE_CONFIG_DIR") else home / ".kaggle"
+    )
+    path = config_dir / "kaggle.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        # The decoder's message gives a position, never the file's text, so no key leaks.
+        raise KaggleError(f"{path} is not valid JSON: {exc}") from exc
+    username = data.get("username") if isinstance(data, dict) else None
+    return username if isinstance(username, str) and username else None
+
+
+def _run(run: Runner, command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return run(command)
+    except OSError as exc:  # FileNotFoundError when the program isn't installed
+        raise KaggleError(f"could not run {Path(command[0]).name}: {exc}") from exc
+
+
+def _check(run: Runner, command: list[str]) -> str:
+    result = _run(run, command)
+    if result.returncode != 0:
+        raise _failed(command, result)
+    return result.stdout
+
+
+def _failed(command: list[str], result: subprocess.CompletedProcess[str]) -> KaggleError:
+    return KaggleError(f"{_display(command)} exited {result.returncode}: {_tail(_output(result))}")
+
+
+def _output(result: subprocess.CompletedProcess[str]) -> str:
+    return f"{result.stdout or ''}\n{result.stderr or ''}"
+
+
+def _tail(text: str, lines: int = 3) -> str:
+    # The last lines say why; earlier ones are upload progress and usage text.
+    kept = [line.strip() for line in text.splitlines() if line.strip()]
+    return " / ".join(kept[-lines:]) or "no output"
+
+
+def _display(command: Sequence[str]) -> str:
+    return shlex.join([Path(command[0]).name, *command[1:]])
