@@ -1,0 +1,17 @@
+# GPU packages for Forge jobs on Kaggle's T4 image, installed on top of the image's own
+# torch and its CUDA build (ADR-0002, ADR-0006). Candidate pins: none has run on a T4 yet.
+# Where uv.lock has the package these are its versions, so a GPU job runs the library
+# code CI tested. kaggle/spike/throughput.py installs and times this list as its "trl"
+# stack, and a unit test keeps the two the same.
+#
+# vLLM is not here: vllm 0.33.0 pins torch 2.14.0 and transformers < 5.21, which clash
+# with this list. The spike measures it in a venv of its own, and FG-306 decides. The
+# image moved to CUDA 13 in late October 2026, so bitsandbytes' CUDA build is the pin
+# most likely to need a change.
+trl==1.18.0  # unverified until FG-301 runs
+transformers==5.23.0  # unverified until FG-301 runs
+peft==0.21.3  # unverified until FG-301 runs
+accelerate==1.15.0  # unverified until FG-301 runs
+datasets==5.2.0  # unverified until FG-301 runs
+huggingface-hub==2.4.0  # unverified until FG-301 runs
+bitsandbytes==0.50.2  # unverified until FG-301 runs

@@ -10,12 +10,13 @@ which question each stage answers:
 - download:<model>: how long a model takes to fetch, and the commit fetched.
 - install:<stack>: how long a candidate GPU stack takes to install into a venv of its own.
 - vllm:<model>: fp16 generation throughput with vLLM on 100 prompts.
+- grpo:<stack>:<model>: seconds per GRPO step and peak GPU memory over 10 steps.
 - limit-probe, pushed as its own CPU kernel: a heartbeat file rewritten until the session
   is killed, so the output of a timed-out session shows what survives the kill.
 
 Each stage runs in a child process, so a crash or an out-of-memory kill in one leaves the
-others and the report intact; the report is rewritten after every stage. A GPU stack
-installs into a venv of its own, deleted after use, so it can't disturb the image.
+others and the report intact; the report is rewritten after every stage. The stacks pin
+versions that conflict with each other, so each gets its own venv, deleted after use.
 
 The script needs only the standard library to start: heavy imports happen inside the
 stages, and nothing runs on import. Kaggle runs a script kernel without arguments, so
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import functools
 import importlib.metadata
+import itertools
 import json
 import os
 import platform
@@ -34,6 +36,7 @@ import re
 import shlex
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -69,6 +72,9 @@ PACKAGES = (
 )
 INTERNET_PROBE_URL = "https://huggingface.co"
 UV_PIN = "uv==0.12.3"
+# Plan section 3.10: prompts are fitted to 1,536 tokens, LoRA covers every linear layer.
+MAX_PROMPT_TOKENS = 1536
+LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 
 # The prompt format of forge.data.prompts (p1), copied because the kernel runs without
 # Forge installed. A unit test keeps the copy in step.
@@ -147,11 +153,52 @@ class Stack:
     system_site_packages: bool
 
 
-# Candidate pins, unverified until FG-301 runs on a T4. vLLM 0.33.0 pins torch 2.14.0 and
-# transformers < 5.21, so it gets a venv of its own.
+# Candidate pins, unverified until FG-301 runs on a T4. They conflict, hence one venv each:
+# vLLM 0.33.0 pins torch 2.14.0 and transformers < 5.21, and Unsloth's T4 recipe pins
+# vLLM 0.11.2 (torch 2.9.0), transformers 4.57.6 and TRL 0.22.2.
 STACKS = {
     "vllm": Stack(("vllm==0.33.0",), system_site_packages=False),
+    # Forge's training stack, as in uv.lock; kaggle/requirements-gpu.txt lists the same pins.
+    "trl": Stack(
+        (
+            "trl==1.18.0",
+            "transformers==5.23.0",
+            "peft==0.21.3",
+            "accelerate==1.15.0",
+            "datasets==5.2.0",
+            "huggingface-hub==2.4.0",
+            "bitsandbytes==0.50.2",
+        ),
+        system_site_packages=True,
+    ),
+    # TRL generating through vLLM in the same process: the newest vLLM TRL 1.18 accepts.
+    "trl-vllm": Stack(
+        (
+            "trl==1.18.0",
+            "transformers==5.20.2",
+            "peft==0.21.3",
+            "vllm==0.33.0",
+            "datasets==5.2.0",
+            "bitsandbytes==0.50.2",
+        ),
+        system_site_packages=False,
+    ),
+    # Unsloth's own Kaggle T4 GRPO notebook, with its newest release.
+    "unsloth": Stack(
+        (
+            "unsloth==2026.11.4",
+            "unsloth-zoo==2026.11.4",
+            "vllm==0.11.2",
+            "transformers==4.57.6",
+            "trl==0.22.2",
+            "datasets==4.3.0",
+            "bitsandbytes==0.50.2",
+            "torchao>=0.16.0,<0.18.0",
+        ),
+        system_site_packages=False,
+    ),
 }
+GRPO_STACKS = ("trl", "unsloth", "trl-vllm")  # in the order run measures them
 
 
 @dataclass(frozen=True)
@@ -180,12 +227,21 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument("--prompts", type=_positive, default=100)
     shared.add_argument("--seed", type=int, default=0)
+    grpo = argparse.ArgumentParser(add_help=False)
+    grpo.add_argument("--steps", type=_positive, default=10, help="GRPO optimizer steps")
+    grpo.add_argument("--num-generations", type=_positive, default=6)
+    grpo.add_argument("--max-completion-length", type=_positive, default=256)
+    grpo.add_argument("--batch-size", type=_positive, default=6, help="completions per device")
+    grpo.add_argument("--grad-accum", type=_positive, default=4)
+    grpo.add_argument("--lora-rank", type=_positive, default=16)
+    grpo.add_argument("--quant", choices=["4bit", "none"], default="4bit")
 
-    run = commands.add_parser("run", parents=[shared], help="every stage, one child each")
+    run = commands.add_parser("run", parents=[shared, grpo], help="every stage, one child each")
     run.add_argument("--out-dir", default="/kaggle/working", help="kept as the kernel's output")
     run.add_argument("--work-dir", default="/kaggle/temp/forge-spike", help="discarded scratch")
     run.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS))
     run.add_argument("--vllm", action=argparse.BooleanOptionalAction, default=True)
+    run.add_argument("--stacks", nargs="*", choices=GRPO_STACKS, default=list(GRPO_STACKS))
     run.add_argument("--max-tokens", type=_positive, default=256, help="vLLM tokens per reply")
     run.add_argument("--secret-labels", nargs="*", default=["HF_TOKEN"])
     run.add_argument(
@@ -212,13 +268,33 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     vllm.add_argument("--max-tokens", type=_positive, default=256)
     vllm.add_argument("--max-model-len", type=_positive, default=2048)
     vllm.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    bench = commands.add_parser("grpo-bench", parents=[child, shared, grpo])
+    bench.add_argument("--model", required=True)
+    bench.add_argument("--revision", default=None)
+    bench.add_argument("--stack", choices=GRPO_STACKS, required=True)
+    bench.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    bench.add_argument("--work-dir", required=True)
 
     probe = commands.add_parser("limit-probe", help="rewrite a heartbeat until killed")
     probe.add_argument("--out-dir", default="/kaggle/working")
     probe.add_argument("--interval-seconds", type=float, default=30.0)
     probe.add_argument("--max-beats", type=_positive, default=None, help="stop after this many")
 
-    return parser.parse_args(list(argv))
+    args = parser.parse_args(list(argv))
+    # TRL generates batch_size * grad_accum completions at a time, whole groups only.
+    whole = args.command not in ("run", "grpo-bench") or (
+        args.num_generations >= 2
+        and (args.batch_size * args.grad_accum) % args.num_generations == 0
+    )
+    if not whole:
+        parser.error(
+            f"--batch-size {args.batch_size} times --grad-accum {args.grad_accum} must be "
+            f"a multiple of --num-generations {args.num_generations}, which must be 2 or more"
+        )
+    cpu = args.command == "grpo-bench" and args.device == "cpu"
+    if cpu and (args.quant == "4bit" or args.stack != "trl"):
+        parser.error("--device cpu runs the trl stack without --quant 4bit")
+    return args
 
 
 def _positive(text: str) -> int:
@@ -238,6 +314,9 @@ def plan_stages(args: argparse.Namespace, python: str = sys.executable) -> list[
     stages += [Stage(f"download:{m}", python, ("download", "--model", m)) for m in args.models]
     if args.vllm:
         stages += _stack_stages("vllm", "vllm", work, python, args, _vllm_argv)
+    for stack in args.stacks:
+        bench = functools.partial(_grpo_argv, stack, work)
+        stages += _stack_stages(stack, f"grpo:{stack}", work, python, args, bench)
     return stages
 
 
@@ -268,6 +347,22 @@ def _stack_stages(
 def _vllm_argv(model: str, args: argparse.Namespace) -> tuple[str, ...]:
     options = _options(prompts=args.prompts, max_tokens=args.max_tokens, seed=args.seed)
     return ("vllm-bench", "--model", model, *options)
+
+
+def _grpo_argv(stack: str, work: Path, model: str, args: argparse.Namespace) -> tuple[str, ...]:
+    options = _options(
+        prompts=args.prompts,
+        seed=args.seed,
+        steps=args.steps,
+        num_generations=args.num_generations,
+        max_completion_length=args.max_completion_length,
+        batch_size=args.batch_size,
+        grad_accum=args.grad_accum,
+        lora_rank=args.lora_rank,
+        quant=args.quant,
+        work_dir=work / "grpo",
+    )
+    return ("grpo-bench", "--stack", stack, "--model", model, *options)
 
 
 def _options(**values: object) -> tuple[str, ...]:
@@ -537,6 +632,172 @@ def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def sql_block_reward(
+    prompts: list[Any], completions: list[Any], **kwargs: Any
+) -> list[float | None]:
+    """1 for a reply with a closed sql block, else 0: a cheap stand-in for Forge's rewards,
+    so the timing is the trainer's and not the SQL executor's."""
+    texts = [c[0]["content"] if isinstance(c, list) else c for c in completions]
+    return [1.0 if re.search(r"```sql\s.*?```", text, re.DOTALL) else 0.0 for text in texts]
+
+
+def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
+    """Time ``--steps`` GRPO steps, LoRA in fp16 on the GPU (plain fp32 with ``--device cpu``)."""
+    on_gpu = args.device == "cuda"
+    if args.stack == "unsloth":
+        # Unsloth patches TRL when it is imported, so it has to come first.
+        os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
+        import unsloth  # noqa: F401
+
+    import torch
+    from datasets import Dataset
+    from transformers import TrainerCallback
+    from trl import GRPOConfig, GRPOTrainer
+
+    marks: list[float] = []
+
+    class StepTimer(TrainerCallback):
+        def on_train_begin(self, *args: Any, **kwargs: Any) -> None:
+            marks.append(time.perf_counter())
+
+        def on_step_end(self, *args: Any, **kwargs: Any) -> None:
+            marks.append(time.perf_counter())
+
+    if on_gpu:
+        torch.cuda.reset_peak_memory_stats()
+    start = time.perf_counter()
+    model, tokenizer, peft_config = (_unsloth_model if args.stack == "unsloth" else _hf_model)(args)
+    load_seconds = time.perf_counter() - start
+
+    fields = GRPOConfig.__dataclass_fields__
+    config: dict[str, Any] = {
+        "output_dir": str(Path(args.work_dir) / args.stack),
+        "max_steps": args.steps,
+        "per_device_train_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.grad_accum,
+        "num_generations": args.num_generations,
+        "max_completion_length": args.max_completion_length,
+        "learning_rate": 5e-6,  # plan section 3.10
+        "logging_steps": 1,
+        "save_strategy": "no",
+        "report_to": "none",
+        "seed": args.seed,
+        # A T4 has no bf16, and TRL's bf16 default crashes there (TRL issue 7889).
+        "fp16": on_gpu,
+        "bf16": False,
+        "use_cpu": not on_gpu,
+        "optim": "adamw_8bit" if on_gpu else "adamw_torch",
+    }
+    if "chat_template_kwargs" in fields:
+        config["chat_template_kwargs"] = {"enable_thinking": False}
+    if "max_prompt_length" in fields:
+        # TRL before 0.28 cuts prompts to 512 tokens unless told otherwise.
+        config["max_prompt_length"] = MAX_PROMPT_TOKENS
+    if args.stack == "trl-vllm":
+        config.update(use_vllm=True, vllm_mode="colocate")
+    trainer = GRPOTrainer(
+        model=model,
+        reward_funcs=[sql_block_reward],
+        args=GRPOConfig(**config),
+        train_dataset=Dataset.from_list([{"prompt": p} for p in spike_prompts(args.prompts)]),
+        processing_class=tokenizer,
+        peft_config=peft_config,
+        callbacks=[StepTimer()],
+    )
+    if args.quant == "4bit" and args.stack != "unsloth":
+        # TRL casts QLoRA adapters to bf16, which fp16's grad scaler can't unscale (TRL
+        # issue 7776); fp32 adapters train fine under fp16 autocast.
+        trained = trainer.model
+        assert trained is not None  # the constructor sets it
+        for param in trained.parameters():
+            if param.requires_grad:
+                param.data = param.data.float()
+
+    start = time.perf_counter()
+    trainer.train()
+    train_seconds = time.perf_counter() - start
+    steps = [round(b - a, 3) for a, b in itertools.pairwise(marks)]
+    settings = {key: value for key, value in config.items() if key not in ("output_dir", "seed")}
+    settings["lora_rank"] = args.lora_rank
+    # Unsloth's fast_inference generates with its own colocated vLLM.
+    settings["generates_with_vllm"] = args.stack in ("trl-vllm", "unsloth")
+    return {
+        "stack": args.stack,
+        "model": args.model,
+        "device": args.device,
+        "quant": args.quant,
+        "settings": settings,
+        "completions_per_step": args.batch_size * args.grad_accum,
+        "versions": versions(),
+        "load_seconds": round(load_seconds, 3),
+        "train_seconds": round(train_seconds, 3),
+        # The first step also builds the optimizer and warms the kernels up.
+        "step_seconds": steps,
+        "median_step_seconds": statistics.median(steps[1:]) if len(steps) > 1 else None,
+        "memory": cuda_memory() if on_gpu else None,
+        "log_history": trainer.state.log_history,
+    }
+
+
+def _hf_model(args: argparse.Namespace) -> tuple[Any, Any, Any]:
+    """The model through transformers, 4-bit NF4 if asked, and the LoRA config TRL adds."""
+    import torch
+    from peft import LoraConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+    on_gpu = args.device == "cuda"
+    quant = None
+    if args.quant == "4bit":
+        quant = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16
+        )
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        revision=args.revision,
+        dtype=torch.float16 if on_gpu else torch.float32,
+        quantization_config=quant,
+        # No FlashAttention 2 below compute capability 8.0.
+        attn_implementation="sdpa",
+        device_map={"": 0} if on_gpu else None,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, revision=args.revision, padding_side="left"
+    )
+    lora = LoraConfig(
+        r=args.lora_rank,
+        lora_alpha=2 * args.lora_rank,
+        lora_dropout=0.0,
+        target_modules=list(LORA_TARGETS),
+        task_type="CAUSAL_LM",
+    )
+    return model, tokenizer, lora
+
+
+def _unsloth_model(args: argparse.Namespace) -> tuple[Any, Any, Any]:
+    """The model through Unsloth with its colocated vLLM, LoRA already applied."""
+    import torch
+    from unsloth import FastLanguageModel
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=args.model,
+        revision=args.revision,
+        max_seq_length=MAX_PROMPT_TOKENS + args.max_completion_length,
+        load_in_4bit=args.quant == "4bit",
+        fast_inference=True,
+        max_lora_rank=args.lora_rank,
+        dtype=torch.float16,
+    )
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=args.lora_rank,
+        lora_alpha=2 * args.lora_rank,
+        target_modules=list(LORA_TARGETS),
+        use_gradient_checkpointing="unsloth",
+        random_state=args.seed,
+    )
+    return model, tokenizer, None
+
+
 def limit_probe(args: argparse.Namespace) -> int:
     """Rewrite a heartbeat file every interval until the session is killed."""
     path = Path(args.out_dir) / PROBE_NAME
@@ -683,6 +944,7 @@ CHILDREN: dict[str, Callable[[argparse.Namespace], Any]] = {
     "download": download_stage,
     "install": install_stage,
     "vllm-bench": vllm_stage,
+    "grpo-bench": grpo_stage,
 }
 
 

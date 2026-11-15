@@ -6,6 +6,7 @@ so these check the wiring and the report, not a measurement.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -21,9 +22,11 @@ from typing import Any
 import pytest
 
 from forge.data import prompts as forge_prompts
+from forge.ops.kaggle import METADATA_FILE, check_kernel_metadata
 from tests.spike import THROUGHPUT, throughput
 
 ROOT = Path(__file__).resolve().parents[2]
+BENCH = ["grpo-bench", "--out", "o", "--work-dir", "w", "--model", "m"]
 spike = throughput()
 
 
@@ -60,8 +63,13 @@ def test_defaults_measure_the_planned_spike() -> None:
     assert args.out_dir == "/kaggle/working"
     assert args.work_dir.startswith("/kaggle/temp/")
     assert args.models == ["Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B"]
-    # Story FG-301, question 4: 100 prompts, here with replies of up to 256 tokens.
     assert (args.prompts, args.max_tokens) == (100, 256)
+    # Story FG-301, question 5: 10 steps, 6 generations, 256-token completions, 4-bit.
+    assert (args.steps, args.num_generations, args.max_completion_length) == (10, 6, 256)
+    assert args.quant == "4bit"
+    # Plan section 3.10's batch: 6 completions a device, 4 accumulation steps.
+    assert (args.batch_size, args.grad_accum) == (6, 4)
+    assert args.stacks == ["trl", "unsloth", "trl-vllm"]
     assert args.vllm is True
     assert args.secret_labels == ["HF_TOKEN"]
     # Inside the story's 1.5 GPU hours, with room for the report to get out.
@@ -72,9 +80,15 @@ def test_defaults_measure_the_planned_spike() -> None:
 @pytest.mark.parametrize(
     ("argv", "message"),
     [
+        (["run", "--num-generations", "5"], "must be a multiple of --num-generations 5"),
+        (["run", "--num-generations", "1", "--batch-size", "1"], "must be 2 or more"),
         (["run", "--prompts", "0"], "must be at least 1, got 0"),
-        (["install", "--out", "o", "--venv", "v", "--stack", "pytorch"], "invalid choice"),
+        (["run", "--stacks", "pytorch"], "invalid choice"),
         (["vllm-bench", "--model", "m"], "--out"),
+        (
+            [*BENCH, "--stack", "trl", "--device", "cpu"],
+            "--device cpu runs the trl stack without --quant 4bit",
+        ),
         ([], "required"),
     ],
 )
@@ -125,28 +139,41 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
         "install:vllm",
         f"vllm:{small}",
         f"vllm:{large}",
+        "install:trl",
+        f"grpo:trl:{small}",
+        f"grpo:trl:{large}",
+        "install:unsloth",
+        f"grpo:unsloth:{small}",
+        f"grpo:unsloth:{large}",
+        "install:trl-vllm",
+        f"grpo:trl-vllm:{small}",
+        f"grpo:trl-vllm:{large}",
     ]
     by_name = {stage.name: stage for stage in stages}
-    venv = tmp_path / "work" / "venvs" / "vllm"
-    bench = by_name[f"vllm:{large}"]
+    venv = tmp_path / "work" / "venvs" / "trl"
+    bench = by_name[f"grpo:trl:{large}"]
     # Benches run in their stack's venv, need its install and the model, and the last
     # one of each stack deletes the venv.
     assert bench.python == str(venv / "bin" / "python")
-    assert bench.needs == ("install:vllm", f"download:{large}")
+    assert bench.needs == ("install:trl", f"download:{large}")
     assert bench.removes == str(venv)
-    assert by_name[f"vllm:{small}"].removes is None
-    assert by_name["install:vllm"].python == "/usr/bin/python3"
+    assert by_name[f"grpo:trl:{small}"].removes is None
+    assert by_name["install:trl"].python == "/usr/bin/python3"
     # Each bench's arguments parse as its child command, with the run's settings.
-    vllm = spike.parse_args([*bench.argv, "--out", "x.json"])
-    assert (vllm.command, vllm.model, vllm.prompts, vllm.max_tokens) == (
-        "vllm-bench",
+    child = spike.parse_args([*bench.argv, "--out", "x.json"])
+    assert (child.command, child.stack, child.model, child.device) == (
+        "grpo-bench",
+        "trl",
         large,
-        100,
-        256,
+        "cuda",
     )
+    assert (child.steps, child.num_generations, child.max_completion_length) == (10, 6, 256)
+    vllm = spike.parse_args([*by_name[f"vllm:{small}"].argv, "--out", "x.json"])
+    assert (vllm.command, vllm.prompts, vllm.max_tokens) == ("vllm-bench", 100, 256)
 
-    only = spike.plan_stages(_run_args(tmp_path, "--no-vllm"), python="py")
-    assert [s.name for s in only][-2:] == [f"download:{small}", f"download:{large}"]
+    only = spike.plan_stages(_run_args(tmp_path, "--no-vllm", "--stacks", "trl"), python="py")
+    assert [s.name for s in only][-3:] == ["install:trl", f"grpo:trl:{small}", f"grpo:trl:{large}"]
+    assert not any(s.name.startswith("vllm:") for s in only)
 
 
 def _fake_runner(outcomes: dict[str, Any], calls: list[str]) -> Any:
@@ -161,12 +188,12 @@ def _fake_runner(outcomes: dict[str, Any], calls: list[str]) -> Any:
 
 @pytest.mark.phase(3)
 def test_run_report_records_every_stage(tmp_path: Path) -> None:
-    args = _run_args(tmp_path, "--models", "m/small", "m/large")
+    args = _run_args(tmp_path, "--models", "m/small", "--stacks", "trl", "unsloth")
     venvs = tmp_path / "work" / "venvs"
-    (venvs / "vllm").mkdir(parents=True)
+    (venvs / "unsloth").mkdir(parents=True)
     calls: list[str] = []
     outcomes = {
-        "download:m/large": spike.Outcome("error", error="RuntimeError: no such repo"),
+        "install:trl": spike.Outcome("error", error="RuntimeError: uv pip install exited 1"),
         "vllm:m/small": spike.Outcome("timeout", error="killed after 60 s, the budget left"),
     }
     report = spike.run(args, runner=_fake_runner(outcomes, calls))
@@ -185,24 +212,26 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
     }
     assert (report["schema"], report["story"]) == (spike.REPORT_SCHEMA, "FG-301")
     assert report["finished_at"] is not None
-    assert report["args"]["models"] == ["m/small", "m/large"]
+    assert report["args"]["models"] == ["m/small"]
     statuses = {s["name"]: (s["status"], s["error"]) for s in report["stages"]}
     assert statuses == {
         "env": ("ok", None),
         "secrets": ("ok", None),
         "download:m/small": ("ok", None),
-        "download:m/large": ("error", "RuntimeError: no such repo"),
         "install:vllm": ("ok", None),
         "vllm:m/small": ("timeout", "killed after 60 s, the budget left"),
-        # Never started: its model didn't download.
-        "vllm:m/large": ("skipped", "needs download:m/large"),
+        "install:trl": ("error", "RuntimeError: uv pip install exited 1"),
+        # Never started: its install failed.
+        "grpo:trl:m/small": ("skipped", "needs install:trl"),
+        "install:unsloth": ("ok", None),
+        "grpo:unsloth:m/small": ("ok", None),
     }
-    assert "vllm:m/large" not in calls
+    assert "grpo:trl:m/small" not in calls
     for stage in report["stages"]:
         assert set(stage) >= {"name", "status", "started_at", "seconds", "result", "error"}
     assert report["stages"][0]["result"] == {"stage": "env"}
     # Each stack's venv is gone once its last bench is over.
-    assert not (venvs / "vllm").exists()
+    assert not (venvs / "unsloth").exists()
 
 
 @pytest.mark.phase(3)
@@ -216,8 +245,8 @@ def test_run_skips_stages_once_out_of_budget(tmp_path: Path) -> None:
     assert all(status == "skipped" for _, status in statuses[1:])
     assert calls == ["env"]
     errors = {s["name"]: s["error"] for s in report["stages"]}
-    assert errors["secrets"] == errors["install:vllm"] == "out of budget (1 min)"
-    assert errors["vllm:m/small"] == "needs install:vllm, download:m/small"
+    assert errors["secrets"] == errors["install:trl"] == "out of budget (1 min)"
+    assert errors["grpo:trl:m/small"] == "needs install:trl, download:m/small"
 
 
 @pytest.fixture
@@ -389,28 +418,27 @@ def test_install_stage_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
             elif args == ["--version"]:
                 print("uv 0.12.3")
             elif args[:2] == ["pip", "freeze"]:
-                print("vllm==0.33.0")
+                print("trl==1.18.0")
             """
         )
     )
     uv.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    venv = tmp_path / "venvs" / "vllm"
-    args = spike.parse_args(["install", "--out", "x.json", "--stack", "vllm", "--venv", str(venv)])
+    venv = tmp_path / "venvs" / "trl"
+    args = spike.parse_args(["install", "--out", "x.json", "--stack", "trl", "--venv", str(venv)])
     result = spike.install_stage(args)
 
     python = str(venv / "bin" / "python")
-    requirements = " ".join(spike.STACKS["vllm"].requirements)
+    requirements = " ".join(spike.STACKS["trl"].requirements)
     assert log.read_text().splitlines() == [
-        # vLLM brings its own torch, so the venv doesn't see the image's.
-        f"venv --python {sys.executable} {venv}",
+        f"venv --python {sys.executable} --system-site-packages {venv}",
         f"pip install --python {python} {requirements}",
         "--version",
         f"pip freeze --python {python}",
     ]
     assert result["uv"] == "uv 0.12.3"
     assert result["uv_bootstrap_seconds"] is None  # uv was already there
-    assert result["freeze"] == ["vllm==0.33.0"]
+    assert result["freeze"] == ["trl==1.18.0"]
     assert result["install_seconds"] >= 0
 
 
@@ -424,3 +452,80 @@ def test_prompts_follow_forges_format() -> None:
     assert len({p[1]["content"] for p in prompts}) == 100  # no question repeats
     assert spike.spike_prompts(100) == prompts
     assert [m["role"] for m in prompts[0]] == ["system", "user"]
+
+
+def _requirement_lines(path: Path) -> list[str]:
+    lines = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            assert "unverified until FG-301 runs" in raw, raw
+            lines.append(line)
+    return lines
+
+
+@pytest.mark.phase(3)
+def test_requirements_file_is_the_trl_stack() -> None:
+    # FG-302 ships kaggle/requirements-gpu.txt; the spike installs and times the same pins.
+    assert tuple(_requirement_lines(ROOT / "kaggle" / "requirements-gpu.txt")) == (
+        spike.STACKS["trl"].requirements
+    )
+    # And they are the versions uv.lock gives CI, where the lock has the package.
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    for requirement in spike.STACKS["trl"].requirements:
+        name, version = requirement.split("==")
+        if f'\nname = "{name}"\n' in lock:
+            assert f'\nname = "{name}"\nversion = "{version}"\n' in lock, requirement
+
+
+@pytest.mark.phase(3)
+def test_sql_block_reward() -> None:
+    completions = [
+        [{"role": "assistant", "content": "```sql\nSELECT 1\n```"}],
+        [{"role": "assistant", "content": "SELECT 1"}],
+        [{"role": "assistant", "content": "```sql\nSELECT 1"}],
+    ]
+    assert spike.sql_block_reward(prompts=[None] * 3, completions=completions) == [1.0, 0.0, 0.0]
+
+
+@pytest.mark.phase(3)
+def test_bundle_writes_both_kernels(tmp_path: Path) -> None:
+    from kaggle_spike import KERNELS, bundle
+
+    commands = bundle("forge-owner", tmp_path)
+    gpu = json.loads((tmp_path / "gpu" / METADATA_FILE).read_text())
+    limit = json.loads((tmp_path / "limit" / METADATA_FILE).read_text())
+    for meta in (gpu, limit):
+        assert check_kernel_metadata(meta) == []
+        assert meta["is_private"] is True and meta["enable_internet"] is True
+        assert meta["code_file"] == "throughput.py"
+    assert (gpu["id"], gpu["enable_gpu"], gpu["machine_shape"]) == (
+        "forge-owner/forge-throughput-spike",
+        True,
+        "NvidiaTeslaT4",
+    )
+    # Waiting for the session limit spends no GPU quota.
+    assert limit["enable_gpu"] is False and "machine_shape" not in limit
+
+    # Each kernel's script carries the arguments it will run with.
+    for name, kernel in KERNELS.items():
+        spec = importlib.util.spec_from_file_location(
+            f"baked_{name}", tmp_path / name / "throughput.py"
+        )
+        assert spec is not None and spec.loader is not None
+        baked = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = baked
+        spec.loader.exec_module(baked)
+        argv = baked.KERNEL_ARGV
+        assert argv == list(kernel.argv)
+        assert baked.parse_args(argv).command == kernel.argv[0]
+
+    # The push timeout keeps to the story's 1.5 GPU hours and outlasts the run's budget.
+    budget = spike.parse_args(["run"]).budget_minutes * 60
+    assert budget < KERNELS["gpu"].timeout_s <= 90 * 60
+    assert commands[:3] == [
+        f"kaggle kernels push -p {tmp_path / 'gpu'} --accelerator NvidiaTeslaT4 -t 5400",
+        "kaggle kernels status forge-owner/forge-throughput-spike",
+        f"kaggle kernels output forge-owner/forge-throughput-spike -p {tmp_path / 'gpu'}-output -o",
+    ]
+    assert commands[3] == f"kaggle kernels push -p {tmp_path / 'limit'} -t 900"
