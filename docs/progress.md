@@ -115,6 +115,7 @@ Work discovered along the way that is not a plan story.
 | FG-191 | Gate 1 fixes: sandbox safety | done | Statements denied by keyword before SQLite runs them, SQLite limits on every connection (the evaluator's too), a watchdog at the deadline, a 64 MiB result budget, `\v` counted as SQLite does; official EX vets what the evaluator runs and strips leading `;` |
 | FG-192 | Gate 1 fixes: data and prompts | done | `load_dev` refuses an empty dev, `assert_train_only` refuses iterators, fetch won't overwrite other data and reports network errors, p2 samples keep their spaces, `[name]` quoted, fallback lines must parse; ADR-0004 says what counts as a dev use |
 | FG-193 | Gate 1 fixes: hashing and reports | done | A model hashes like its `model_dump()`, manifests keep a JSON copy of the config and need a real UTC offset, `@` stays in local paths; the agreement report credits Spider (CC BY-SA 4.0) and counts distinct items, regenerated as `docs/audit/agreement-2026-11-15.md` |
+| FG-194 | Gate 1 fixes: hard deadline | done | Untrusted SQL runs in `SandboxPool` workers that are killed 250 ms past their timeout, and each official EX item runs in one too; SQLite limits set from Spider's measured needs (4 kB values and rows, 8 kB SQL, 100-character LIKE patterns, 200 columns); result budgets count real memory, and the evaluator's fetch is bounded; ADR-0014 |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -131,7 +132,7 @@ Work discovered along the way that is not a plan story.
 - Training golds 3153, 4513 and 4514 fail on SQLite, and the official evaluator asserts on a
   failing gold. FG-103 flags them; FG-108 skips them.
 - The evaluator's `asyncio.run` fails inside a running event loop (notebook cells), so FG-108
-  calls it from a script or a worker thread.
+  calls it from a script or a worker thread. Since FG-194 it runs in a worker process.
 - Headline test-suite EX needs `testsuitedatabases.zip` (about 1.2 GB, Google Drive) in FG-508.
 - Only `wta_1` (dev) has text that is not valid UTF-8, so FG-106 builds its own test database.
 - `data_manifest_hash()` now loads and hashes the data, so `build_manifest` needs
@@ -193,9 +194,10 @@ Work discovered along the way that is not a plan story.
   gold cache should run gold with a longer timeout.
 - `run_many` starts a spawn pool per call (about a second of start-up), and a script that calls it
   needs `if __name__ == "__main__":`. FG-503 may want one long-lived pool; FG-303's Kaggle entry
-  needs the guard.
+  needs the guard. Since FG-194 the pool is a `SandboxPool`, which starts in about 0.2 s.
 - `SQLITE_FUNCTION` allows `randomblob` and `zeroblob`, which could allocate up to SQLite's 1 GB
-  length limit in one VM step. FG-191 sets `SQLITE_LIMIT_LENGTH` to 100 kB in `connect_readonly`.
+  length limit in one VM step. FG-191 sets `SQLITE_LIMIT_LENGTH` to 100 kB in `connect_readonly`,
+  and FG-194 to 4 kB.
 - The vendored evaluator still opens its own connections (read-only in `exec_eval`, read-write in
   `get_schema` and `isValidSQL`). The one-module rule test covers `src/forge` only; FG-108 decides
   how official EX opens databases. Since FG-191 `exec_eval`'s connections have the executor's
@@ -235,7 +237,9 @@ Work discovered along the way that is not a plan story.
   unpacking the test-suite databases beside Spider's turns classical EX into test-suite EX (FG-508).
 - The evaluator's per-query timeout stays upstream's 60 s: it is a default argument bound when the module
   loads, so changing it means editing vendored code. `official_exec_match` adds an overall deadline
-  (1 h by default) and stops its worker after the item it is on.
+  (1 h by default) and stops its worker after the item it is on. Since FG-194 each item runs in a worker
+  process that is killed after `item_timeout_s` (60 s by default), and the overall deadline kills the
+  item it is on.
 - sqlglot reads Spider's double-quoted strings (`"France"`) as names, so `change_literal` only changes
   numbers and single-quoted strings.
 - Timings on the laptop: `forge eval gold --split val` about 10 s, `forge eval agreement --mutations 2000`
@@ -252,7 +256,9 @@ Work discovered along the way that is not a plan story.
   pattern on 100 kB, takes about 0.2 s; at 1 MB one `instr` takes seconds), so only a statement that
   packs many such calls into one row still overruns. If reward workers ever see that, run them in
   processes that can be killed (FG-503). The watchdog thread costs about 40 µs per `run` (8 µs to
-  52 µs for `SELECT 1` on the laptop).
+  52 µs for `SELECT 1` on the laptop). The FG-191 review found such rows: 100 `instr` calls on a 99 kB
+  string ran 8.7 s against 300 ms, 200 calls 18.5 s against 2,000 ms. FG-194 runs untrusted SQL in
+  workers that are killed at the deadline, and its limits hold the slowest row that fits to 0.06 s.
 - SQLite reads `\v` as whitespace only inside a run that starts with one of space, tab, newline, form
   feed or return, and Python's check after the first statement never skips it. `statement_count`
   follows both rules; sqlite3 on 3.11.15 and 3.12.13 agrees on the cases in the unit tests.
@@ -288,3 +294,27 @@ Work discovered along the way that is not a plan story.
   `ExecResult.rows`) raises `TypeError` instead of hashing like the same text as a string.
 - `build_manifest` stores the config as the JSON it hashed, so a `Path` comes back as a string and
   a tuple as a list (FG-193).
+- SQLite reads each `CREATE` statement in `sqlite_master` through `SQLITE_LIMIT_LENGTH` whenever it
+  prepares a query, so that limit can't go under the longest one, soccer_1's 1,191 bytes: one byte
+  less and every query on soccer_1 fails. Spider's largest stored value is 213 bytes. Records (sorts,
+  `DISTINCT`, materialized CTEs) count against it too; a sorted self-join of baseball_1's `team`
+  needs between 400 and 600 bytes. Measured for FG-194 (ADR-0014).
+- SQLite names an unaliased result column by its expression's text, and that name counts against
+  the length limit, so a single unaliased expression over 4 kB fails with `string or blob too big`
+  while the same one with `AS v` runs. A comment over the limit fails the same way, and `printf()`
+  past the limit returns NULL instead of failing.
+- A sandbox job crosses to its worker by module and name, and a spawned worker imports modules
+  afresh, so a lambda can't be a job and a monkeypatch in the test process doesn't reach a worker.
+  Tests that patch what a worker runs either pass `tests/fakes.py::InlineSandbox` as the pool or
+  put the job in an importable module (`tests/sandbox_jobs.py`).
+- The sandbox pool costs well under a millisecond a query and about 0.16 s a restart on the laptop
+  (`scripts/bench_sandbox.py`, ADR-0014). FG-202 and FG-501/FG-503 run predictions through a
+  `SandboxPool` and can hand it to `official_exec_match` as `pool`; `SqliteExecutor.run` stays for
+  gold queries, schema reads and tests.
+- The limits are Spider's. FG-508 should check the test-suite databases against them, and FG-605
+  BIRD, which stores longer text, the way `test_spider_data_fits_the_limits` checks Spider.
+- With FG-194's pool and limits, `forge eval agreement --mutations 2000 --split val --seed 0` gives
+  the same report as `docs/audit/agreement-2026-11-15.md` apart from the date and commit, so it is
+  not regenerated.
+- `GoldQueryFailed` now pickles from its fields, since it comes back from a sandbox worker; an
+  exception that can't be pickled comes back as a `SandboxError` naming it.
