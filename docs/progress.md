@@ -117,6 +117,7 @@ Work discovered along the way that is not a plan story.
 | FG-193 | Gate 1 fixes: hashing and reports | done | A model hashes like its `model_dump()`, manifests keep a JSON copy of the config and need a real UTC offset, `@` stays in local paths; the agreement report credits Spider (CC BY-SA 4.0) and counts distinct items, regenerated as `docs/audit/agreement-2026-11-15.md` |
 | FG-194 | Gate 1 fixes: hard deadline | done | Untrusted SQL runs in `SandboxPool` workers that are killed 250 ms past their timeout, and each official EX item runs in one too; SQLite limits set from Spider's measured needs (4 kB values and rows, 8 kB SQL, 100-character LIKE patterns, 200 columns); result budgets count real memory, and the evaluator's fetch is bounded; ADR-0014 |
 | FG-195 | Gate 1 fixes: review follow-ups | done | `forge data fetch` reports hf_xet's bare `RuntimeError` with the retry hint, `canonical_json` sorts keys as the strings JSON writes so a manifest's copy of an int-keyed config hashes like it, and a `/` after the `@` outside `refs/` makes a model ref a path; the FG-192 note on `extract_sql` no longer claims short sentences that parse as a SELECT are passed over |
+| FG-196 | Gate 1 fixes: sandbox polish | done | A watchdog test that fails if the watchdog is removed (a query the progress handler never checks); a worker that dies under an official EX item counts as no match instead of aborting the run, and both eval CLIs catch `SandboxError`; a job whose result can't be pickled reports the type instead of killing its worker; the executor, ADR-0014 and progress narrowed to say the in-process few-hundredths bound was measured for four functions only and the item timeout covers the whole item (FG-508) |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -262,7 +263,10 @@ Work discovered along the way that is not a plan story.
   processes that can be killed (FG-503). The watchdog thread costs about 40 µs per `run` (8 µs to
   52 µs for `SELECT 1` on the laptop). The FG-191 review found such rows: 100 `instr` calls on a 99 kB
   string ran 8.7 s against 300 ms, 200 calls 18.5 s against 2,000 ms. FG-194 runs untrusted SQL in
-  workers that are killed at the deadline, and its limits hold the slowest row that fits to 0.06 s.
+  workers that are killed at the deadline, and its limits hold a row of `instr`, `replace`, `LIKE` or
+  `GLOB` to about 0.06 s. FG-196 found that holds only for those four functions: a row of `ltrim` with
+  a large character set, or `unhex` with a large ignore set, still runs a second or two, so the
+  in-process deadline is soft and only the pool kill is a hard bound.
 - SQLite reads `\v` as whitespace only inside a run that starts with one of space, tab, newline, form
   feed or return, and Python's check after the first statement never skips it. `statement_count`
   follows both rules; sqlite3 on 3.11.15 and 3.12.13 agrees on the cases in the unit tests.
@@ -332,4 +336,22 @@ Work discovered along the way that is not a plan story.
   the same report as `docs/audit/agreement-2026-11-15.md` apart from the date and commit, so it is
   not regenerated.
 - `GoldQueryFailed` now pickles from its fields, since it comes back from a sandbox worker; an
-  exception that can't be pickled comes back as a `SandboxError` naming it.
+  exception that can't be pickled comes back as a `SandboxError` naming it. A job's *return value*
+  that can't be pickled is now caught in `_serve` and reported the same way, naming its type,
+  instead of crashing the worker (FG-196).
+- Under the 4 kB limits the progress handler alone stops any query within about 0.65 s on the laptop:
+  1,000 VM steps never span longer. So the watchdog only matters for a query that runs *fewer* than
+  `PROGRESS_STEPS` steps, where the handler never fires and the query would otherwise run to
+  completion (FG-196). `test_watchdog_stops_a_query_the_handler_never_checks` uses a 10-row `VALUES`
+  query of bounded-but-slow `ltrim` calls, under `PROGRESS_STEPS` steps: it times out with the
+  watchdog and completes (`ok=True`) without it. `test_timeout_holds_for_expensive_rows`'s `SLOW_ROWS`
+  are stopped by the handler, so that test passed with or without the watchdog (the FG-194 review's
+  point); the watchdog test now covers the gap.
+- Official EX worker failures: a worker killed at `item_timeout_s` already counted as no match; since
+  FG-196 a worker that *crashes* under an item counts as no match too (logged), rather than raising
+  `SandboxError` out of the whole call. `forge eval gold` and `forge eval agreement` now catch
+  `SandboxError`, so a pool that can't start prints a clean error.
+- `DEFAULT_ITEM_TIMEOUT_S` (60 s) bounds the whole official-EX item: two vetting runs plus the gold
+  and the prediction on every `.sqlite` in the folder. With Spider's one database per folder that is
+  about the evaluator's 60 s per query, but once the test-suite databases land (FG-508) an item runs
+  2N queries under the one deadline, so it must scale with the file count then (FG-196, ADR-0014).

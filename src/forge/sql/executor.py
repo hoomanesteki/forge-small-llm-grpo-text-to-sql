@@ -24,9 +24,13 @@ Each failure comes back as an ``ExecResult`` with an ``ErrorKind``:
   that returns no columns is denied too.
 - ``timeout``: the deadline passed while the query ran or its rows were fetched. A
   progress handler checks it every ``PROGRESS_STEPS`` VM steps, and a watchdog thread
-  interrupts SQLite at the deadline, for steps so slow that few of them fit in the
-  timeout. SQLite only stops between rows, so the work inside one row can still run
-  past it; with these limits that is at most a few hundredths of a second.
+  interrupts SQLite at the deadline; the watchdog covers queries that run too few steps
+  for the handler to fire. SQLite only looks at either between rows, so the work inside
+  one row runs to the end. For ``instr``, ``replace``, ``LIKE`` and ``GLOB`` the limits
+  hold that to a few hundredths of a second (measured), but other string functions are
+  slower: one row of ``ltrim`` calls with a large character set, or ``unhex`` with a
+  large ignore set, can run a second or two. So this deadline is soft and its overrun is
+  not bounded in general; only a ``SandboxPool`` kill is a hard bound.
 - ``syntax``, ``no_such_table``, ``no_such_column``: from SQLite's error message.
 - ``empty_sql``: nothing but whitespace, comments and semicolons.
 - ``other``: any other error, such as an unknown function, a ``?`` placeholder, a value
@@ -67,10 +71,12 @@ ALLOWED_ACTIONS = frozenset(
 # result 19. Its largest value is 213 bytes, but SQLite reads each CREATE statement in
 # sqlite_master through the length limit too, whenever it prepares a query, and soccer_1's
 # is 1,191 bytes: every gold query runs at that limit, and soccer_1's fail one byte under
-# it. The cost of instr, LIKE or replace grows with the product of their inputs' lengths,
-# so the length and SQL limits together bound the work one row can hold: a few hundredths
-# of a second here, where FG-191's 100 kB allowed 18 s. With no attached database allowed,
-# ATTACH and VACUUM INTO fail on any connection.
+# it. The cost of instr, LIKE, GLOB or replace grows with the product of their inputs'
+# lengths, so for those the length and SQL limits hold one row to a few hundredths of a
+# second, where FG-191's 100 kB allowed 18 s. Not every function is that cheap (ltrim with
+# a large character set, unhex with a large ignore set, run a second or two in one row), so
+# the in-process deadline is soft; the SandboxPool kill is the hard bound (ADR-0014). With
+# no attached database allowed, ATTACH and VACUUM INTO fail on any connection.
 MAX_VALUE_BYTES = 4_096
 LIMITS: Mapping[int, int] = MappingProxyType(
     {
