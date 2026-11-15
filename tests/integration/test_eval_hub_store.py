@@ -16,6 +16,7 @@ from forge.eval.config import EvalConfig
 from forge.eval.runner import run_eval
 from forge.infer.base import FakeBackend
 from forge.ops.hub import HubRunStore
+from forge.ops.manifest import CODE_SHA_ENV
 from tests.fakes import FakeHub, hub_error
 
 REPO = "owner/forge-runs"
@@ -30,6 +31,9 @@ def runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev_log: Path) -> Path
     # The run store's settings come from here, never from a real .env.
     monkeypatch.setenv("FORGE_ROOT", str(tmp_path))
     monkeypatch.delenv("HF_TOKEN", raising=False)
+    # tmp_path is no checkout, so the code's commit is named as a kernel names it. Built at
+    # run time, so no literal here looks like a real commit.
+    monkeypatch.setenv(CODE_SHA_ENV, "".join("0123456789abcdef"[(i * 7) % 16] for i in range(40)))
     return tmp_path / "runs"
 
 
