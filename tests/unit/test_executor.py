@@ -62,6 +62,17 @@ STATEMENT_COUNTS = {
     "SELECT 1;\v": 2,
     "SELECT 1; \v": 2,
     "SELECT 1;\n\v": 2,
+    # SQLite skips a byte order mark wherever a token starts; Python's check after the
+    # first statement doesn't.
+    "\ufeff": 0,
+    "\ufeff;\ufeffSELECT 1": 1,
+    "SELECT \ufeff1 \ufeff": 1,
+    "SELECT 1;\ufeff": 2,
+    "SELECT 1; \ufeff": 2,
+    # A parameter's Tcl-style suffix runs to whitespace or ")", and takes a ";" with it.
+    "SELECT $a(;)": 1,
+    "SELECT :a(x y);": 1,
+    "SELECT $a(') ; SELECT 2 -- '": 2,
 }
 
 
@@ -123,6 +134,31 @@ STATEMENT_KEYWORDS: dict[str, str | None] = {
     "WITH s AS (SELECT 1)": None,
     "": None,
     "-- DELETE FROM t": None,
+    # Keywords are ASCII to SQLite: a long s (U+017F) or a dotless i (U+0131) upper-cases
+    # to a keyword's letters in Python, but the word is a name.
+    "\u017felect 1": None,
+    "WITH \u017felect AS (SELECT 1) DELETE FROM nowhere": "DELETE",
+    "WITH value\u017f AS (SELECT 1) DELETE FROM nowhere": "DELETE",
+    "WITH \u0131nsert AS (SELECT 1 AS a) SELECT a FROM \u0131nsert": "SELECT",
+    # A table may be named like a keyword that can follow the WITH clause.
+    "WITH replace AS (SELECT 1 AS a) SELECT a FROM replace": "SELECT",
+    "WITH a AS (SELECT 1), replace(x) AS (SELECT 2) SELECT x FROM replace": "SELECT",
+    "WITH 'delete' AS MATERIALIZED (SELECT 1) SELECT 2": "SELECT",
+    "WITH s AS (SELECT 1) , u AS NOT MATERIALIZED (SELECT 2) UPDATE t SET a = 1": "UPDATE",
+    "WITH s AS (SELECT 1) nothing": None,
+    "WITH s AS (SELECT 1; DELETE FROM t": None,
+    "WITH recursive AS (SELECT 1) SELECT 2": None,
+    # A byte order mark is whitespace where a token starts and part of a word inside one.
+    "\ufeffDELETE FROM nowhere": "DELETE",
+    "\ufeff\ufeffEXPLAIN SELECT 1": "EXPLAIN",
+    "\ufeff; \ufeffSELECT 1": "SELECT",
+    "WITH s AS (SELECT 1)\ufeffDELETE FROM nowhere": "DELETE",
+    "SELECT\ufeff1": None,
+    # A parameter's Tcl-style suffix holds parentheses and quotes that SQLite never sees.
+    "WITH s AS (SELECT $a(() ) DELETE FROM nowhere": "DELETE",
+    "WITH s AS (SELECT @a(') ) DELETE FROM nowhere -- '": "DELETE",
+    "WITH s AS (SELECT :a(x)) DELETE FROM nowhere": "DELETE",
+    "WITH s AS (SELECT #a()), u AS (SELECT $b::c(()) INSERT INTO t VALUES (1)": "INSERT",
 }
 
 
@@ -130,6 +166,54 @@ STATEMENT_KEYWORDS: dict[str, str | None] = {
 @pytest.mark.parametrize(("sql", "keyword"), STATEMENT_KEYWORDS.items())
 def test_statement_keyword(sql: str, keyword: str | None) -> None:
     assert statement_keyword(sql) == keyword
+
+
+_SQLITE_READS = frozenset(
+    {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+)
+_SQLITE_WRITES = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
+
+
+def _what_sqlite_prepares(sql: str) -> str:
+    """``read``, ``write``, ``nothing`` or ``error``: what SQLite makes of ``sql``, by what
+    it asks the authorizer while it prepares the statement on a scratch database."""
+    actions: list[int] = []
+
+    def record(action: int, *_: object) -> int:
+        actions.append(action)
+        return sqlite3.SQLITE_OK if action in _SQLITE_READS else sqlite3.SQLITE_DENY
+
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.executescript("CREATE TABLE t (a); CREATE TABLE nowhere (a);")
+        conn.set_authorizer(record)
+        try:
+            conn.execute(sql).close()
+            failed = False
+        except sqlite3.ProgrammingError as exc:
+            # Parameters are only bound after the statement is prepared.
+            failed = "Incorrect number of bindings" not in str(exc)
+        except (sqlite3.Error, ValueError):
+            failed = True
+    if _SQLITE_WRITES.intersection(actions):
+        return "write"
+    if failed:
+        return "error"
+    return "read" if actions else "nothing"
+
+
+@pytest.mark.phase(1)
+def test_statement_keywords_agree_with_sqlite() -> None:
+    # The table above, checked against SQLite itself: a query keyword must be a statement
+    # SQLite prepares as a read, a write keyword one it prepares as a write, and None one
+    # it can't prepare or that holds nothing. Other keywords are the statement's first
+    # word, which needs no check.
+    expected = {"SELECT": "read", "VALUES": "read", "DELETE": "write", "INSERT": "write"}
+    expected |= {"REPLACE": "write", "UPDATE": "write"}
+    for sql, keyword in STATEMENT_KEYWORDS.items():
+        if keyword is None:
+            assert _what_sqlite_prepares(sql) in ("error", "nothing"), sql
+        elif keyword in expected:
+            assert _what_sqlite_prepares(sql) == expected[keyword], sql
 
 
 @pytest.mark.phase(1)

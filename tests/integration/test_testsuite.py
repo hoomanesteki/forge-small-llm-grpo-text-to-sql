@@ -9,6 +9,7 @@ import multiprocessing
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_suite_eval import exec_eval
@@ -17,6 +18,7 @@ from typer.testing import CliRunner
 from forge import cli
 from forge.data.spider import DataNotFound, db_path, load_raw
 from forge.data.splits import load_val
+from forge.eval import testsuite
 from forge.eval.agreement import (
     GOLD_TIMEOUT_MS,
     agreement_mutations,
@@ -25,7 +27,9 @@ from forge.eval.agreement import (
     score,
 )
 from forge.eval.testsuite import GoldQueryFailed, OfficialEvalTimeout, official_exec_match
-from forge.sql.sandbox import SandboxError
+from forge.sql import sandbox
+from forge.sql.sandbox import SandboxError, SandboxPool
+from tests import sandbox_jobs as jobs
 from tests.fakes import InlineSandbox
 from tests.sandbox_jobs import review_query
 
@@ -35,20 +39,16 @@ EMPTY_GOLD = "SELECT name FROM head WHERE age > 1000"
 COUNT_GOLD = "SELECT count(*) FROM head WHERE age  >  56"
 
 
-class _PoolThatLosesAWorker:
-    """An ``InlineSandbox`` that raises ``SandboxError`` for one chosen prediction, the
-    way the real pool does when a worker dies under a job."""
+class _PoolThatLosesAWorker(SandboxPool):
+    """A real pool whose worker dies (exit code 3) when an item has one chosen prediction."""
 
     def __init__(self, data_dir: Path, die_on: str) -> None:
-        self.data_dir = data_dir.resolve()
-        self._inner = InlineSandbox(data_dir)
+        super().__init__(1, data_dir=data_dir, imports=("tests.sandbox_jobs",))
         self._die_on = die_on
 
-    def call(self, fn: object, *args: object, timeout_s: float) -> object:
-        item = args[-1]
-        if getattr(item, "pred_sql", None) == self._die_on:
-            raise SandboxError("sandbox worker died with exit code 1")
-        return self._inner.call(fn, *args, timeout_s=timeout_s)
+    def call(self, fn: Any, *args: Any, timeout_s: float) -> Any:
+        assert fn is testsuite._match
+        return super().call(jobs.match_or_die, *args, self._die_on, timeout_s=timeout_s)
 
 
 def _upstream(pred: str, gold: str) -> int:
@@ -234,13 +234,37 @@ def test_official_match_survives_a_worker_death(
     good = "SELECT name FROM head WHERE age > 2000"  # empty, so it matches EMPTY_GOLD
     crash = "SELECT name FROM head"
     items = [(DB, good, EMPTY_GOLD), (DB, crash, EMPTY_GOLD), (DB, good, EMPTY_GOLD)]
-    pool = _PoolThatLosesAWorker(spider_mini, die_on=crash)
     caplog.set_level(logging.WARNING, logger="forge.eval.testsuite")
 
-    verdicts = official_exec_match(items, pool=pool)
+    with _PoolThatLosesAWorker(spider_mini, die_on=crash) as pool:
+        verdicts = official_exec_match(items, pool=pool)
+        assert pool.restarts == 1
 
     assert verdicts == [True, False, True]
-    assert "official EX item 1 on department_management" in caplog.text
+    assert (
+        "official EX item 1 on department_management: sandbox worker died with exit code 3"
+        in caplog.text
+    )
+
+
+@pytest.mark.phase(1)
+def test_official_match_raises_when_no_worker_starts(
+    spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Unlike a death under one item, a worker that can't start would score every item as a
+    # miss, so it is raised for the CLIs to report instead of counted.
+    items = [(DB, COUNT_GOLD, COUNT_GOLD)] * 3
+    with (
+        SandboxPool(1, data_dir=spider_mini, imports=("forge_no_such_module",)) as broken,
+        pytest.raises(SandboxError, match="a sandbox worker exited while starting"),
+    ):
+        official_exec_match(items, pool=broken)
+
+    # The pool official_exec_match makes for itself, when its worker is never ready.
+    monkeypatch.setattr(sandbox, "START_TIMEOUT_S", 0.01)
+    with pytest.raises(SandboxError, match=r"a sandbox worker didn't start in 0\.01 s"):
+        official_exec_match(items)
+    assert multiprocessing.active_children() == []
 
 
 def _cells(text: str) -> list[list[str]]:

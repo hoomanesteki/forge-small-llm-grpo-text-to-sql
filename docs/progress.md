@@ -118,6 +118,7 @@ Work discovered along the way that is not a plan story.
 | FG-194 | Gate 1 fixes: hard deadline | done | Untrusted SQL runs in `SandboxPool` workers that are killed 250 ms past their timeout, and each official EX item runs in one too; SQLite limits set from Spider's measured needs (4 kB values and rows, 8 kB SQL, 100-character LIKE patterns, 200 columns); result budgets count real memory, and the evaluator's fetch is bounded; ADR-0014 |
 | FG-195 | Gate 1 fixes: review follow-ups | done | `forge data fetch` reports hf_xet's bare `RuntimeError` with the retry hint, `canonical_json` sorts keys as the strings JSON writes so a manifest's copy of an int-keyed config hashes like it, and a `/` after the `@` outside `refs/` makes a model ref a path; the FG-192 note on `extract_sql` no longer claims short sentences that parse as a SELECT are passed over |
 | FG-196 | Gate 1 fixes: sandbox polish | done | A watchdog test that fails if the watchdog is removed (a query the progress handler never checks); a worker that dies under an official EX item counts as no match instead of aborting the run, and both eval CLIs catch `SandboxError`; a job whose result can't be pickled reports the type instead of killing its worker; the executor, ADR-0014 and progress narrowed to say the in-process few-hundredths bound was measured for four functions only and the item timeout covers the whole item (FG-508) |
+| FG-197 | Gate 1 fixes: final polish | done | Official EX counts only a worker's death as a miss, so a pool that can't start raises again; a reply the parent can't unpickle keeps its worker; `statement_keyword` reads byte order marks, Tcl-style parameters, ASCII keywords and the `WITH` grammar as SQLite does; a forced Hub download that fails shows its cause, the bad zip and the hint; the timing tests assert the kill and use the worst rows the limits allow, gold is measured as the evaluator runs it, and ADR-0014 lists the known limits |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -186,7 +187,12 @@ Work discovered along the way that is not a plan story.
 - A write that names a missing table or column fails on the name before SQLite asks the authorizer.
   Since FG-191 the executor denies by statement keyword first (`statement_keyword`), so every
   statement that isn't `SELECT`, `VALUES` or `WITH ... SELECT` gets `denied`, `EXPLAIN` included, and
-  FG-501's `non_select` guard can rely on `error_kind`.
+  FG-501's `non_select` guard can rely on `error_kind`. Since FG-197 the keyword is read the way
+  SQLite's tokenizer reads it: a byte order mark is whitespace where a token starts, a Tcl-style
+  parameter such as `$a(...)` is one token, keywords are ASCII (Python upper-cases a long s to S),
+  and a `WITH` clause follows its grammar. Writes behind any of those came back as `no_such_table`,
+  `no_such_column` or `other`, a BOM even let `EXPLAIN` run, and a table named `replace` made a
+  query `denied`.
 - Eight gold queries return more than the 10,000-row cap: baseball_1 train 03661-03664 (18,228
   and 16,049 rows), flight_4 val 06877-06878 (10,507) and wta_1 dev 00455-00456 (20,662). Their
   results come back truncated, so FG-107 has to decide how a truncated result compares, or
@@ -263,10 +269,13 @@ Work discovered along the way that is not a plan story.
   processes that can be killed (FG-503). The watchdog thread costs about 40 µs per `run` (8 µs to
   52 µs for `SELECT 1` on the laptop). The FG-191 review found such rows: 100 `instr` calls on a 99 kB
   string ran 8.7 s against 300 ms, 200 calls 18.5 s against 2,000 ms. FG-194 runs untrusted SQL in
-  workers that are killed at the deadline, and its limits hold a row of `instr`, `replace`, `LIKE` or
-  `GLOB` to about 0.06 s. FG-196 found that holds only for those four functions: a row of `ltrim` with
-  a large character set, or `unhex` with a large ignore set, still runs a second or two, so the
-  in-process deadline is soft and only the pool kill is a hard bound.
+  workers that are killed at the deadline. Its limits keep each call cheap but don't bound a row:
+  FG-197 measured 8 kB of compact calls reading their arguments from a column at 0.07 s of `instr`,
+  0.34 to 0.38 s of `LIKE` or `GLOB`, 2.2 to 2.8 s of `ltrim` and 4.3 to 5.5 s of `unhex` on the
+  laptop (Apple M4), and nested CTEs multiply calls past the text: 1,000 `unhex` calls in 379 bytes
+  ran 6.5 s against 100 ms. The in-process deadline has no bound; only the pool kill is a hard one
+  (ADR-0014). The FG-194 and FG-196 figures (0.06 s, then a second or two) came from rows with
+  fewer or cheaper calls than the limits allow.
 - SQLite reads `\v` as whitespace only inside a run that starts with one of space, tab, newline, form
   feed or return, and Python's check after the first statement never skips it. `statement_count`
   follows both rules; sqlite3 on 3.11.15 and 3.12.13 agrees on the cases in the unit tests.
@@ -338,20 +347,48 @@ Work discovered along the way that is not a plan story.
 - `GoldQueryFailed` now pickles from its fields, since it comes back from a sandbox worker; an
   exception that can't be pickled comes back as a `SandboxError` naming it. A job's *return value*
   that can't be pickled is now caught in `_serve` and reported the same way, naming its type,
-  instead of crashing the worker (FG-196).
-- Under the 4 kB limits the progress handler alone stops any query within about 0.65 s on the laptop:
-  1,000 VM steps never span longer. So the watchdog only matters for a query that runs *fewer* than
-  `PROGRESS_STEPS` steps, where the handler never fires and the query would otherwise run to
-  completion (FG-196). `test_watchdog_stops_a_query_the_handler_never_checks` uses a 10-row `VALUES`
-  query of bounded-but-slow `ltrim` calls, under `PROGRESS_STEPS` steps: it times out with the
-  watchdog and completes (`ok=True`) without it. `test_timeout_holds_for_expensive_rows`'s `SLOW_ROWS`
-  are stopped by the handler, so that test passed with or without the watchdog (the FG-194 review's
-  point); the watchdog test now covers the gap.
+  instead of crashing the worker (FG-196). One that pickles in the worker but can't be rebuilt in
+  the parent comes back the same way and keeps its worker (FG-197).
+- The watchdog is for steps so slow that the progress handler's next check comes late or never, and
+  how soon the handler alone stops a query depends on what its steps cost. FG-196 noted that the
+  handler alone stops any query within 0.65 s; that was wrong (FG-197). A 50-row query of 100
+  `unhex` calls a row runs about 420 VM steps and 0.6 to 0.7 s a row, and against a 300 ms timeout
+  it stopped at 0.61 s with the watchdog and 1.8 to 2.0 s without.
+  `test_watchdog_stops_a_query_the_handler_never_checks` covers the far end, a 10-row `VALUES`
+  query under `PROGRESS_STEPS` steps that the handler never checks: it times out with the
+  watchdog and completes (`ok=True`) without it.
+  `test_timeout_holds_for_expensive_rows`'s `SLOW_ROWS` are stopped by the handler, so that test
+  passes with or without the watchdog (the FG-194 review's point).
 - Official EX worker failures: a worker killed at `item_timeout_s` already counted as no match; since
   FG-196 a worker that *crashes* under an item counts as no match too (logged), rather than raising
   `SandboxError` out of the whole call. `forge eval gold` and `forge eval agreement` now catch
-  `SandboxError`, so a pool that can't start prints a clean error.
+  `SandboxError`, so a pool that can't start prints a clean error. FG-196 caught every `SandboxError`
+  in `official_exec_match`, so a pool whose workers couldn't start scored each item as a miss;
+  since FG-197 only `SandboxWorkerDied` counts, and a start-up failure raises again.
 - `DEFAULT_ITEM_TIMEOUT_S` (60 s) bounds the whole official-EX item: two vetting runs plus the gold
   and the prediction on every `.sqlite` in the folder. With Spider's one database per folder that is
   about the evaluator's 60 s per query, but once the test-suite databases land (FG-508) an item runs
   2N queries under the one deadline, so it must scale with the file count then (FG-196, ADR-0014).
+- Known limits after the Phase 1 re-verification (FG-197), each in ADR-0014's "Known limits"
+  with its measurements (Apple M4 laptop):
+  - `SqliteExecutor.run`'s deadline is soft and its overrun has no bound; it is for trusted SQL.
+  - A statement whose slow work all falls in its final step (a slow `WHERE` that matches no
+    row) can come back ok after its deadline: 0.34 s against 100 ms in process in one of two
+    runs, at most `KILL_GRACE_MS` late through a pool.
+  - The official-EX vet refuses only empty and denied SQL, so one prediction can hold an item
+    for `item_timeout_s` (60 s); the evaluator's own 60 s is a progress handler.
+  - No limit bounds what a query allocates inside SQLite: JSON aggregates grew 328 to 655 MiB in
+    a 100 ms run, and an official EX item reached 707 MiB in 0.5 s. FG-503 should cap the memory
+    of each worker before reward workers run long batches.
+  - Results take a constant factor more than `row_size` counts: 1.5 times in process for a
+    62 MiB result, whose pool worker peaked at 262 MiB.
+  - Without its `DISTINCT`, `spider-train-01297` (soccer_1) returns 93,475 rows, within 7% of
+    the evaluator's `MAX_ROWS`; val's largest is 10,507 rows and dev's 20,662.
+  - FG-508 must scale `item_timeout_s` with the number of `.sqlite` files in a folder; the FG-508
+    story doesn't say so yet.
+  - `make_run_id` reads `runs/ckpt@v2` as repo `runs/ckpt` at `v2` (slug `ckpt`),
+    `org/model@feature/x` as a path (slug `x`), and keeps a trailing slash's revision
+    (`qwen3-4b-main`); only slugs change.
+- Tests that time a batch call `SandboxPool.start()` first, which waits until every worker is
+  ready. A two-query warm-up could leave one worker still starting (1 of 20 rounds), and the
+  rest of its start-up then landed in the timed batch (FG-197).

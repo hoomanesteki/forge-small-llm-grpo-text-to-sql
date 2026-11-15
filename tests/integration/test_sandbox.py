@@ -12,7 +12,13 @@ import pytest
 
 from forge.core.types import ExecResult
 from forge.sql import sandbox
-from forge.sql.sandbox import KILL_GRACE_MS, SandboxError, SandboxPool, SandboxTimeout
+from forge.sql.sandbox import (
+    KILL_GRACE_MS,
+    SandboxError,
+    SandboxPool,
+    SandboxTimeout,
+    SandboxWorkerDied,
+)
 from tests import sandbox_jobs as jobs
 from tests.sandbox_jobs import review_query
 
@@ -35,14 +41,13 @@ def _timed(
 def test_pool_kills_queries_that_overrun_inside_one_row(
     spider_mini: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The hard deadline on its own: with FG-191's limits these ran 8.7 s and 18.5 s on the
-    # laptop in process, against 300 ms and 2,000 ms timeouts.
+    # The hard deadline on its own: with FG-191's limits these run for seconds in process,
+    # against 300 ms and 2,000 ms timeouts (ADR-0014).
     monkeypatch.setattr(sandbox, "_run_job", jobs.run_with_fg191_limits)
     caplog.set_level(logging.DEBUG, logger="forge.sql.sandbox")
     with SandboxPool(2) as pool:
-        # Warm both workers first: one job would start only one, and the second worker's
-        # start-up would then land inside the timed run below.
-        assert [r.rows for r in pool.run_many([(DB, "SELECT 1")] * 2)] == [[(1,)], [(1,)]]
+        # Both workers up and ready first, so no start-up lands inside the timed run.
+        pool.start()
         results, elapsed_ms = _timed(pool, [(DB, review_query(100)), (DB, review_query(200))], 300)
 
         for result in results:
@@ -64,8 +69,8 @@ def test_pool_kills_queries_that_overrun_inside_one_row(
 @pytest.mark.phase(1)
 def test_pool_stops_runaway_and_cartesian_queries(spider_mini: Path) -> None:
     with SandboxPool(2) as pool:
-        # Warm both workers, so the timed runs below don't pay for a worker start-up.
-        assert [r.rows for r in pool.run_many([(DB, "SELECT 1")] * 2)] == [[(1,)], [(1,)]]
+        # Both workers ready first, so the timed runs below don't pay for a start-up.
+        pool.start()
         # With today's limits the review's queries stop before they do any work.
         reviewed = [(DB, review_query(100)), (DB, review_query(200))]
         results, elapsed_ms = _timed(pool, reviewed, 300)
@@ -87,7 +92,7 @@ def test_pool_replaces_a_worker_that_dies(
     spider_mini: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with SandboxPool(1) as pool:
-        with pytest.raises(SandboxError, match="died with exit code 3"):
+        with pytest.raises(SandboxWorkerDied, match="died with exit code 3"):
             pool.call(jobs.exit_with_three, timeout_s=5)
         assert pool.restarts == 1
 
@@ -149,15 +154,42 @@ def test_pool_reports_a_result_it_cannot_send_back(spider_mini: Path) -> None:
 
 
 @pytest.mark.phase(1)
+def test_pool_reports_a_result_it_cannot_read_back(spider_mini: Path) -> None:
+    with SandboxPool(1) as pool:
+        pid = pool.call(jobs.worker_pid, timeout_s=5)
+        # The result pickles in the worker but can't be rebuilt here. That used to raise a
+        # bare TypeError and kill a healthy worker; the whole reply was read, so only the
+        # reply is lost.
+        with pytest.raises(
+            SandboxError,
+            match=r"reply could not be read back: TypeError: .*missing 1 required positional",
+        ) as raised:
+            pool.call(jobs.returns_unloadable, timeout_s=5)
+        assert not isinstance(raised.value, SandboxWorkerDied)
+        assert pool.call(jobs.worker_pid, timeout_s=5) == pid
+        assert pool.restarts == 0
+
+
+@pytest.mark.phase(1)
 def test_pool_starts_workers_for_work_and_stops_them_on_close(spider_mini: Path) -> None:
     with pytest.raises(ValueError, match="workers must be at least 1"):
         SandboxPool(0)
     pool = SandboxPool(4)
     assert pool.run_many([]) == []
     assert multiprocessing.active_children() == []
-    # One query needs one worker.
+    # One query needs one worker; start brings up the rest, and waits until they're ready.
     assert pool.run(DB, "SELECT 1").rows == [(1,)]
     assert len(multiprocessing.active_children()) == 1
+    pool.start()
+    assert len(multiprocessing.active_children()) == 4
+    assert all(worker is not None and worker.ready for worker in pool._slots)
+    # A worker that can't start fails start itself, not a later job.
+    with (
+        SandboxPool(1, imports=("forge_no_such_module",)) as broken,
+        pytest.raises(SandboxError, match="exited while starting, with exit code 1"),
+    ):
+        broken.start()
+    assert len(multiprocessing.active_children()) == 4
     # Round trips stay cheap: about 0.2 ms each on the laptop; the bound is for slow CI.
     start = time.perf_counter()
     for _ in range(100):

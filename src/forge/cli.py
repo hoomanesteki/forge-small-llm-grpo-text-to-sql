@@ -325,7 +325,7 @@ def eval_gold(
             raise ValueError(f"the {split} split has no questions in {data_dir}")
         scores = score(gold_mutations(kept), data_dir=data_dir, pred_timeout_ms=GOLD_TIMEOUT_MS)
     # ValueError covers GoldQueryFailed, a gold query that fails on its database;
-    # SandboxError a sandbox pool that can't start or keep its workers.
+    # SandboxError a sandbox pool that can't start its workers.
     except (DataNotFound, OfficialEvalTimeout, RepoRootNotFound, SandboxError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
