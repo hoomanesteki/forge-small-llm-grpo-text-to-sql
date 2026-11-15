@@ -13,7 +13,7 @@ Which path for which SQL (ADR-0014):
 
 - Untrusted SQL, anything a model wrote or a reward or evaluation scores, runs through
   ``SandboxPool.run``, ``SandboxPool.run_many`` or ``SqliteExecutor.run_many``, which
-  starts a pool.
+  starts a pool. Official EX runs each item in a pool too (``forge.eval.testsuite``).
 - Trusted SQL, Spider's gold queries, schema reads and tests, may call
   ``SqliteExecutor.run`` in process, whose deadline is soft.
 
