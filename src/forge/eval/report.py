@@ -22,9 +22,13 @@ ones. The executor's error message isn't stored, so a failure shows its class.
 A dev run's report shows the model's answers on dev, which belongs to the look the run
 logged (ADR-0004): it needs the run's row in ``docs/dev-usage.md`` and adds none.
 
-One line changes between renderings: ``Generated:`` and the time. The chart draws the
-by-hardness table; its bytes are the same on every rendering on one machine, so a
-committed chart changes only with its numbers.
+One line changes between renderings: ``Generated:`` and the time. ``rebuild`` renders a
+run's report, and each compare report in its folder, again from the stored files and
+compares each with the stored one, that line aside. The chart draws the by-hardness
+table; its bytes are the same on every rendering on one machine, so a committed chart
+changes only with its numbers. ``rebuild`` doesn't compare it: its pixels can change with
+the matplotlib version and aren't known to match between machines, while the table holds
+every number it draws.
 
 Each kind of number has one format, so FG-207's I4 check can find every number in the
 stored files: a rate as a percentage with one decimal and its 95% interval in brackets
@@ -36,6 +40,7 @@ how many failures are shown, and Spider's citation) appear in prose lines only.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import io
 import os
@@ -96,6 +101,7 @@ UNCLASSIFIED_NOTE = (
 )
 
 _ORDER = (*ERROR_CLASSES, UNCLASSIFIED)
+_GENERATED_LINE = re.compile(rf"^{GENERATED}.*$", re.MULTILINE)
 # What markdown could read as markup in a question, escaped where it shows as text.
 _MARKUP = re.compile(r"([\\`*_\[\]<>|~&])")
 _BACKTICKS = re.compile(r"`+")
@@ -145,6 +151,14 @@ class RunReport:
 
     report: Path
     chart: Path
+
+
+@dataclass(frozen=True)
+class Check:
+    """A stored report against its rebuild: their unified diff, empty when they match."""
+
+    path: Path
+    diff: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -208,6 +222,29 @@ def write_compare_report(
     return path
 
 
+def rebuild(
+    run_id: str, *, runs_root: Path | None = None, data_dir: Path | None = None
+) -> list[Check]:
+    """Render the run's report and each ``compare-<a>.md`` in its ``eval`` folder again,
+    and compare each with the stored file, its ``Generated:`` line aside. Writes nothing.
+    """
+    data, root = _data(data_dir), runs_root or runs_dir()
+    run = _load(run_id, data, root)
+    report = run.stored.paths.report
+    if not report.is_file():
+        raise FileNotFoundError(
+            f"run {run_id} has no report to rebuild: write it with `forge report run {run_id}`"
+        )
+    now = datetime.now(UTC)
+    checks = [_check(report, render_run(run, generated=now))]
+    for path in sorted(report.parent.glob(f"{COMPARE_PREFIX}*.md")):
+        a = path.name.removeprefix(COMPARE_PREFIX).removesuffix(".md")
+        checks.append(
+            _check(path, render_compare(_load(a, data, root), run, out=path, generated=now))
+        )
+    return checks
+
+
 def compare_path(b: ReportRun, a: str) -> Path:
     return b.stored.paths.report.parent / f"{COMPARE_PREFIX}{a}.md"
 
@@ -220,8 +257,8 @@ def render_run(run: ReportRun, *, generated: datetime) -> str:
         "",
         _generated(generated),
         "",
-        f"Written by `forge report run {run.run_id}` from the run's stored files; don't edit",
-        "it by hand.",
+        f"Written by `forge report run {run.run_id}` from the run's stored files and checked",
+        f"against them by `forge report rebuild {run.run_id}`; don't edit it by hand.",
         "",
         SPIDER,
         "",
@@ -292,6 +329,8 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
     written = (
         f"Written by `forge report compare {a.run_id} {b.run_id}` from both runs' stored files"
     )
+    if out.absolute() == compare_path(b, a.run_id).absolute():
+        written += f" and checked against them by `forge report rebuild {b.run_id}`"
     samples = b.options.generation.n
     lines = [
         title,
@@ -492,6 +531,23 @@ def _check_score(run_id: str, score: Score) -> None:
         raise RunCorrupt(f"{sample} matches by fast EX but has the error class {score.error_class}")
     if not score.ex_fast and score.error_class is None:
         raise RunCorrupt(f"{sample} misses by fast EX but has no error class")
+
+
+def _check(path: Path, rebuilt: str) -> Check:
+    stored = path.read_bytes().decode("utf-8")
+    diff = difflib.unified_diff(
+        _masked(stored).split("\n"),
+        _masked(rebuilt).split("\n"),
+        fromfile=str(path),
+        tofile="rebuilt from the stored files",
+        lineterm="",
+    )
+    return Check(path, tuple(diff))
+
+
+def _masked(text: str) -> str:
+    """``text`` with its first ``Generated:`` line, the one that changes, made constant."""
+    return _GENERATED_LINE.sub(f"{GENERATED}(any time)", text, count=1)
 
 
 def _generated(at: datetime) -> str:
