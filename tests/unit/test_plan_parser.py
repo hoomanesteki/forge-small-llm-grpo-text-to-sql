@@ -51,7 +51,7 @@ def test_parses_story_blocks() -> None:
 @pytest.mark.phase(0)
 def test_totals_match_plan() -> None:
     plan = load_plan()
-    assert plan.totals() == {"stories": 56, "points": 190, "phases": 9, "gpu": 11}
-    assert sum(e.points for e in plan.epics.values()) == 190
+    assert plan.totals() == {"stories": 57, "points": 193, "phases": 9, "gpu": 11}
+    assert sum(e.points for e in plan.epics.values()) == 193
     for story in plan.stories:
         assert story.epic in plan.epics, story.id

@@ -37,6 +37,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-205 | Report generator | 3 | done |  |  | `forge report run`, `compare` and `rebuild` (`forge.eval.report`) from a finished run's stored files (`read_run`) and its split's questions in data with the manifest's hash; official EX leads, with fast EX and the valid rate beside it, 95% intervals over gold clusters, a by-hardness table and PNG, the error classes of official EX failures, and 5 failures from each of the 3 most common classes; compare gives the paired change, McNemar's table and p, and changes by hardness and class; rebuild renders the run's reports again and diffs them, the `Generated:` line aside |
 | FG-206 | Execution-guided retry | 3 | done |  |  | `--retry 1` asks once more, with the executor's error, for each query that fails to run (never one that ran), in the same `SandboxPool`, and scores the second reply; `Score` gains `attempts` and `first_try_ex` (ADR-0015); first replies kept in `eval/<split>-first-tries.jsonl` and judged in the one official batch; each retry drawn with its own seed; reports show EX with and without retry and the paired change |
 | FG-207 | CPU smoke pipeline in CI | 3 | done |  |  | `make smoke` (`scripts/smoke/pipeline.sh`) runs `tests/smoke`, then `forge eval run` with the pinned tiny model on the fixture's 20 val questions and `forge report run`, in a scratch runs folder; a pass on a clean commit writes the git-ignored `.smoke-ok-<sha>`, and uncommitted work passes without one; CI `smoke` job on 3.12, Hugging Face cache keyed on the tiny revision, 10-minute bound, a required check; `forge eval run --workers`; I4 traces every number of a run report to its stored files (`tests/report_trace.py`); `scripts/smoke/phase_2.sh` |
+| FG-291 | Local pilot baseline on Apple silicon | 3 | done |  | 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7 | `local-mps` platform (ADR-0016), counted in neither the Kaggle quota nor GPU hours; `forge eval run --device` (`cpu` by default, `mps` refused on dev) and `--config` for `configs/eval/*.yaml`; Qwen2.5-Coder-0.5B-Instruct pinned as `pilot`; the full val run on the M4's GPU is in `docs/runs/` with its generated report, val only; a plan story since FG-294 |
 
 ## Phase 3: Free-GPU ops and baselines (v0.3.0)
 
@@ -119,9 +120,9 @@ Work discovered along the way that is not a plan story.
 | FG-195 | Gate 1 fixes: review follow-ups | done | `forge data fetch` reports hf_xet's bare `RuntimeError` with the retry hint, `canonical_json` sorts keys as the strings JSON writes so a manifest's copy of an int-keyed config hashes like it, and a `/` after the `@` outside `refs/` makes a model ref a path; the FG-192 note on `extract_sql` no longer claims short sentences that parse as a SELECT are passed over |
 | FG-196 | Gate 1 fixes: sandbox polish | done | A watchdog test that fails if the watchdog is removed (a query the progress handler never checks); a worker that dies under an official EX item counts as no match instead of aborting the run, and both eval CLIs catch `SandboxError`; a job whose result can't be pickled reports the type instead of killing its worker; the executor, ADR-0014 and progress narrowed to say the in-process few-hundredths bound was measured for four functions only and the item timeout covers the whole item (FG-508) |
 | FG-197 | Gate 1 fixes: final polish | done | Official EX counts only a worker's death as a miss, so a pool that can't start raises again; a reply the parent can't unpickle keeps its worker; `statement_keyword` reads byte order marks, Tcl-style parameters, ASCII keywords and the `WITH` grammar as SQLite does; a forced Hub download that fails shows its cause, the bad zip and the hint; the timing tests assert the kill and use the worst rows the limits allow, gold is measured as the evaluator runs it, and ADR-0014 lists the known limits |
-| FG-291 | Local pilot baseline on Apple silicon | done | `local-mps` platform (ADR-0016), counted in neither the Kaggle quota nor GPU hours; `forge eval run --device` (`cpu` by default, `mps` refused on dev) and `--config` for `configs/eval/*.yaml`; Qwen2.5-Coder-0.5B-Instruct pinned as `pilot`; the full val run on the M4's GPU is in `docs/runs/` with its generated report, val only |
 | FG-292 | Gate 2 fixes: run provenance | done | A run's commit and dirty check cover the whole checkout `FORGE_ROOT` names, wherever the run starts, and outside a checkout `forge eval run` prints one `error:` line; run locks are gitignored under `docs/runs`; `make smoke` prints its report and writes the marker only with every phase (PHASE unset or 8); `--split train --limit N` takes the first N in file order, train_spider before the rowless train_others, while val and dev stay in id order; `HfBackend` checks adapter and dtype before loading, and a test ends rows of one batch at different steps; `forge eval run --help` names the first-tries file |
 | FG-293 | Gate 2 fixes: statistics and reports | done | McNemar's exact test pairs gold clusters, which key on gold queries with whitespace collapsed; the taxonomy reads a whole ORDER BY alias as SQLite does and drops derived-table and CTE qualifiers; `rebuild` masks only the Generated line's time, fails without the chart and compares its bytes where the renderer its PNG names is this machine's; `compare --out` that resolves to the default path is the default; a spy shows retried SQL runs in `SandboxPool`; the pilot's report regenerated |
+| FG-294 | Gate 2 fixes: plan and pilot notes | done | FG-291 gets a Phase 2 story block whose Tests line names its 15 tests, so traceability covers 22 Phase 0 to 2 stories, and moves to the Phase 2 table; section 5.5 lets a pilot or found story hold `FG-N91`, with gate fixes from the next free number; the pilot's unfenced replies and rule-3 cuts counted; the Phase 2 demo says `make smoke` prints its report from a scratch folder |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -585,11 +586,19 @@ Work discovered along the way that is not a plan story.
 - A pilot's numbers are a 0.5B model's in float32 on MPS through transformers, so they say
   roughly where a small model starts, not where the T4 baselines (float16, vLLM) will
   (ADR-0016, FG-291).
-- The pilot ran on MPS with no fallback to the CPU, in well under the hour the story allowed;
-  its ledger row has the hours, taken from the manifest's start and end (FG-291).
+- The pilot ran on MPS with no fallback to the CPU; its ledger row has the hours, taken from
+  the manifest's start and end (FG-291).
 - In the pilot's report `schema_link` is the most common class of official EX failures, well
   ahead of `wrong_tables`: the 0.5B model mostly names tables and columns its database
   doesn't have. Worth watching in FG-307's baselines and in what SFT and GRPO change (FG-291).
+- Counted from the pilot's committed generations and scores: 763 of its 872 replies have no
+  ```` ```sql ```` block although p1 asks for one, so `extract_sql` read them by rule 3, the
+  last line that starts with SELECT or WITH and parses as a query. In 12 the query ran over
+  several lines and rule 3 kept only the first, the select list without its FROM, so all 12
+  fail as `schema_link`: 12 of that class's 266 come from extraction, not from names the
+  database lacks. A prompt or model that leaves the fence off loses multi-line queries this
+  way, which FG-307's p1/p2 choice (ADR-0007) should count apart from schema errors. The
+  extraction rules are unchanged (FG-294).
 - `docs/runs/<run_id>/` holds a run whole (manifest, config, generations, scores, report and
   chart), so `FORGE_RUNS_DIR=docs/runs forge report rebuild <run_id>` checks it, and
   `tests/integration/test_artifacts.py` checks the pilot offline and, with the full data, its

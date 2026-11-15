@@ -660,7 +660,7 @@ gh pr checks --watch && gh pr merge --squash --delete-branch
    git switch main && git pull && git tag -a v0.N.0 -m "Phase N: <name>" && git push origin v0.N.0
    gh release create v0.N.0 --notes-file docs/gates/phase-N.md
    ```
-   On FAIL, write fix stories `FG-N91` onward and stop.
+   On FAIL, write fix stories and stop. They start at `FG-N91`, but a phase's planned pilot or found story may take `FG-N91` (FG-291, FG-491, FG-591, FG-891); gate fix stories then start at the next free number, and the gate report lists them. Phase 2's gate fixes are FG-292 to FG-294.
 
 ```markdown
 # Phase N gate: <name>
@@ -759,7 +759,8 @@ Gatekeeper for Forge Phase N. No feature code during a gate.
 Follow docs/PLAN.md section 5.5 and the "Phase gate N" checklist. Run every command yourself.
 For each run this phase: verify the manifest, the ledger row, dev-usage entries, and rebuild its report
 from stored scores to confirm the numbers. Update the section 3.8 budget table if estimates were off.
-Write docs/gates/phase-N.md. On failure, write fix stories FG-N91.. and stop.
+Write docs/gates/phase-N.md. On failure, write fix stories from FG-N91, or from the next free
+number when a pilot or found story holds FG-N91, list them in the report, and stop.
 On success, share the demo steps; open the release PR only after the product owner's OK.
 ```
 
@@ -816,7 +817,7 @@ Write docs/gates/final-review.md, ranked by severity.
 | E03 | Data and splits | T1 | 1 | 10 |
 | E04 | Schema and prompts | T1 | 1 | 5 |
 | E05 | SQL sandbox and scoring | T1 | 1 | 13 |
-| E06 | Evaluation harness | T2 | 2 | 25 |
+| E06 | Evaluation harness | T2 | 2 | 28 |
 | E07 | Kaggle and Hub operations | T3 | 3 | 22 |
 | E08 | Baselines and model choice | T2 | 3 | 3 |
 | E09 | Supervised fine-tuning | T4 | 4 | 16 |
@@ -824,7 +825,7 @@ Write docs/gates/final-review.md, ranked by severity.
 | E11 | Integrity, audit and ablations | T5 | 6 | 21 |
 | E12 | Packaging and demo | T6 | 7 | 16 |
 | E13 | Results and release | T6 | 8 | 11 |
-| | **Total** | | | **190** |
+| | **Total** | | | **193** |
 
 ### 6.3 Phase summary
 
@@ -832,14 +833,14 @@ Write docs/gates/final-review.md, ranked by severity.
 |---|---|---|---|---|---|---|
 | 0 | Foundation | 6 | 18 | 0 | v0.0.1 | CI green; `forge doctor` confirms accounts; backlog imported |
 | 1 | Data and SQL environment | 8 | 28 | 0 | v0.1.0 | Gold SQL scores 100% fast EX on val; a write attempt is denied; comparator agrees with the official evaluator |
-| 2 | Evaluation harness | 7 | 25 | 0 | v0.2.0 | `make smoke` runs the whole eval pipeline on CPU and renders a report |
+| 2 | Evaluation harness | 8 | 28 | 0 | v0.2.0 | `make smoke` runs the whole eval pipeline on CPU and renders a report |
 | 3 | Free-GPU ops and baselines | 7 | 25 | 4.5 | v0.3.0 | One command runs a GPU eval on Kaggle and pulls the report; model chosen |
 | 4 | Supervised fine-tuning | 5 | 16 | 4.5 | v0.4.0 | SFT adapter beats base on val |
 | 5 | Rewards and GRPO | 8 | 30 | 17.5 | v0.5.0 | GRPO adapter beats SFT on val; dev evaluated once |
 | 6 | Integrity and ablations | 6 | 21 | 11 | v0.6.0 | Audit report with 3+ hacks fixed; ablation table |
 | 7 | Packaging and demo | 5 | 16 | 0 | v0.7.0 | `ollama run forge-sql` answers locally; public Space works |
 | 8 | Results and release | 4 | 11 | 0 | v1.0.0 | Results page from manifests; fresh-clone smoke passes |
-| | **Total** | **56** | **190** | **about 37.5 + 6 reserve** | | |
+| | **Total** | **57** | **193** | **about 37.5 + 6 reserve** | | |
 
 Velocity assumption: about 12 to 18 points per working day, plus waiting for GPU runs, so about 3 to 4 weeks part-time. GPU phases overlap with CPU work on the next phase's stories while runs are going.
 
@@ -866,7 +867,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 **Demo at the end.**
 - CI is green on a PR to `dev`.
 - `uv run forge doctor` prints a table with Python, uv, Kaggle auth, Hugging Face auth, the run store repo and free disk space, all OK.
-- `scripts/import_backlog.py --dry-run` lists 56 stories and 190 points.
+- `scripts/import_backlog.py --dry-run` lists 57 stories and 193 points.
 - `uv run forge ledger summary` shows 0 GPU hours and $0.
 
 **Entry criteria.** A GitHub account with `gh` authenticated, `uv` installed, and Docker not required.
@@ -949,7 +950,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
   - `scripts/import_backlog.py`: creates milestones, labels and one issue per story. Idempotent by story ID. Options `--dry-run` and `--phase`.
   - `scripts/check_story_tests.py --phase N`: confirms each named test exists, using `ast` for Python.
 - **Acceptance criteria:**
-  - [ ] The dry run shows 56 stories, 190 points, 9 phases, and 11 stories labeled GPU.
+  - [ ] The dry run shows 57 stories, 193 points, 9 phases, and 11 stories labeled GPU.
   - [ ] A second import run creates nothing new.
 - **Tests:** `tests/unit/test_plan_parser.py::test_parses_story_blocks`, `tests/unit/test_plan_parser.py::test_totals_match_plan`, `tests/unit/test_check_story_tests.py::test_reports_missing_test`
 - **Files:** `scripts/plan_parser.py`, `scripts/import_backlog.py`, `scripts/check_story_tests.py`
@@ -1204,8 +1205,8 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 **Goal.** One command evaluates any model and backend on any split. It produces scores, confidence intervals, a difficulty breakdown, an error taxonomy and a report, and the whole pipeline runs on CPU in CI.
 
 **Demo at the end.**
-- `make smoke` generates with a tiny model, executes, scores and writes `runs/<id>/eval/val-report.md` with every section filled in. The accuracy is about 0%, as expected for random weights.
-- `forge report compare <gold-run> <smoke-run>` renders a paired comparison.
+- `make smoke` generates with the tiny model on the fixture's 20 val questions, executes, scores, renders the run report with every section filled in and prints it. The run lives in a scratch runs folder that the pipeline removes at the end. The accuracy is about 0%, as expected for random weights. Only a smoke of every phase (`PHASE` unset or 8) on a clean commit writes `.smoke-ok-<sha>`.
+- `forge report compare <gold-run> <smoke-run>` renders a paired comparison (`scripts/smoke/phase_2.sh` makes both runs).
 
 **Entry criteria.** Phase 1 gate passed.
 
@@ -1218,6 +1219,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 | FG-205 | Report generator | E06 | 3 |
 | FG-206 | Execution-guided retry | E06 | 3 |
 | FG-207 | CPU smoke pipeline in CI | E06 | 3 |
+| FG-291 | Local pilot baseline on Apple silicon | E06 | 3 |
 
 #### FG-201 · Inference backend protocol and CPU backend
 - **Epic:** E06 · **Points:** 3 · **Branch:** `feat/fg-201-hf-backend` · **Depends on:** FG-105, FG-107
@@ -1338,6 +1340,25 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
   - [ ] I4 passes.
 - **Tests:** `tests/smoke/test_smoke_eval.py::test_eval_pipeline_on_tiny_model`, `tests/integration/test_invariants.py::test_i4_report_numbers_trace_to_manifest`
 - **Files:** `Makefile`, `.github/workflows/ci.yml`, `configs/models.yaml`
+
+#### FG-291 · Local pilot baseline on Apple silicon
+- **Epic:** E06 · **Points:** 3 · **Branch:** `exp/fg-291-local-pilot-baseline` · **Depends on:** FG-205, FG-207
+- **Story:** As the product owner, with the Kaggle and Hugging Face accounts still pending, I want a real model scored on val on the laptop's GPU, so the harness meets real replies before any GPU hour is spent.
+- **Build:** as ADR-0016 decides:
+  - `core/types.py`: `RunManifest.platform` gains `local-mps`, a run on Apple silicon's GPU through PyTorch's MPS backend. This story changes the contract, with ADR-0016. `forge.ops.manifest.Platform` and `forge.ops.ledger.PLATFORMS` take it too, and a `local-mps` ledger row counts toward neither the Kaggle weekly quota nor the project's GPU hours.
+  - `forge eval run --device cpu|mps`, `cpu` by default, picks where the hf backend runs the model. The manifest's config records the device, the manifest's platform follows it (`local-mps` for `mps`), and the report header names the platform. `mps` is refused with `--split dev` and with the fake backend, and where torch can't use it the run is refused rather than moved to the CPU.
+  - `forge eval run --config <yaml>` takes options from a file in `configs/eval/`, and the command line overrides them. A file sets only options that change a score; the run id, store and dev reason stay on the command line.
+  - `configs/models.yaml` pins `Qwen/Qwen2.5-Coder-0.5B-Instruct` (Apache-2.0, not gated) to a commit under `pilot`, and `configs/eval/pilot-qwen25coder05b-val.yaml` runs it on the full val split: greedy, prompt p1, no retry, on `mps`.
+  - Run the pilot from a clean commit, write its report with `forge report run`, add its ledger row, and commit the run whole under `docs/runs/<run_id>/` with a README that says what a pilot is. Pilot numbers are val only and never stand beside a T4 number as the same measurement; FG-307 still chooses the model from the T4 runs.
+- **Acceptance criteria:**
+  - [ ] A `--device mps` run is `local-mps` in its manifest and its report header, and a run on the default `cpu` stays `local-cpu`.
+  - [ ] `--device mps` is refused with `--split dev`, with the fake backend, and where torch can't use MPS.
+  - [ ] A `local-mps` ledger row is accepted and counts toward neither the Kaggle quota nor the GPU hours.
+  - [ ] A config file gives defaults that the command line overrides, and a file that sets any other option (run id, store, dev reason) or a value of the wrong kind is refused before anything runs.
+  - [ ] The pilot model is pinned to a commit, and every config in `configs/eval/` passes the eval checks and stays off dev.
+  - [ ] The pilot run is committed whole: finished, made from the clean commit its id ends with, every val question once, a `local-mps` ledger row, and a report that rebuilds from its files with every number traced (I4).
+- **Tests:** `tests/unit/test_core_types.py::test_manifest_names_a_run_on_apple_silicon_gpu`, `tests/unit/test_eval_config.py::test_platform_follows_the_device`, `tests/integration/test_eval_runner.py::test_mps_run_is_labeled_a_local_mps_pilot`, `tests/unit/test_eval_config.py::test_config_refused_before_anything_runs`, `tests/unit/test_hf_backend.py::test_mps_by_name_is_refused_where_torch_cant_use_it`, `tests/unit/test_ledger.py::test_local_mps_counts_in_neither_quota_nor_gpu_total`, `tests/unit/test_ledger.py::test_ledger_takes_every_manifest_platform`, `tests/unit/test_eval_config.py::test_config_file_gives_defaults_the_command_line_overrides`, `tests/unit/test_eval_config.py::test_config_file_refused_unless_it_holds_options`, `tests/unit/test_eval_config.py::test_cli_refuses_a_bad_config_file_before_anything_runs`, `tests/unit/test_eval_config.py::test_config_file_options_are_eval_run_options`, `tests/unit/test_models_config.py::test_pilot_model_is_pinned_and_its_config_runs_it_on_val`, `tests/unit/test_models_config.py::test_every_eval_config_is_runnable`, `tests/integration/test_artifacts.py::test_pilot_run_is_committed_whole`, `tests/integration/test_artifacts.py::test_pilot_report_rebuilds_and_traces_to_its_files`
+- **Files:** `core/types.py`, `ops/manifest.py`, `ops/ledger.py`, `eval/config.py`, `infer/hf_backend.py`, `eval/report.py`, `cli.py`, `configs/models.yaml`, `configs/eval/*.yaml`, `docs/runs/**`, `docs/adr/0016-local-mps-pilot.md`
 
 ### Integration checkpoint 2
 - `make gate PHASE=2`: all tests, I1, I2, I4 and I5. The smoke pipeline passes in CI.
@@ -2269,7 +2290,7 @@ Gap closed (M3) = (GRPO − base) / (reference − base).
 | Base model already near ceiling (contamination) | Medium | Medium | Model choice requires headroom; BIRD OOD check; claim relative uplift |
 | Reward hacking slips through | Medium | High | Adversarial tests, audit detectors, official-evaluator agreement on rewarded samples |
 | A token leaks through a notebook or log | Low | High | Secrets only via Kaggle Secrets or env; doctor canary test; gitleaks; never print env |
-| Executor drift across 56 stories | Medium | Medium | Contract-drift check at each gate; small stories; CONTRIBUTING.md rules |
+| Executor drift across 57 stories | Medium | Medium | Contract-drift check at each gate; small stories; CONTRIBUTING.md rules |
 
 ### 9.2 Assumptions
 
