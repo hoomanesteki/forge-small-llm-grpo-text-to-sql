@@ -2,11 +2,11 @@
 
 Decision: PASS
 Date: 2026-11-15
-Commit: 5a47c69 (top of the Phase 1 stack, after fix stories FG-191 to FG-197)
+Commit: the top of the Phase 1 stack, after fix stories FG-191 to FG-197 (tagged v0.1.0 on main)
 
 ## Tests (passed / failed / skipped for later phases)
 
-Fresh clone at d00d6c5 (the last code change; 5a47c69 after it only corrects docs and a docstring, and `make check` passes on it):
+Fresh clone of the final stack:
 
 | Run | Result |
 |---|---|
@@ -15,7 +15,9 @@ Fresh clone at d00d6c5 (the last code change; 5a47c69 after it only corrects doc
 | `scripts/check_story_tests.py --phase 1` | all 46 planned tests exist across 14 stories |
 | `gitleaks` over every commit since Phase 0 | 63 commits scanned, no leaks |
 
-CI on GitHub ran lint-type, unit and integration on Python 3.11 and 3.12, and security, for every story branch.
+CI on GitHub runs lint-type, unit and integration on Python 3.11 and 3.12, and security, on every pushed branch and PR.
+
+Before landing, CI showed two failures that local runs on Python 3.12 couldn't. Typer forces a rich terminal when `GITHUB_ACTIONS` is set, so one CLI test saw styled output. The fix is in `tests/conftest.py`, on FG-105's branch. Python 3.11 words a local-object pickling error differently from 3.12. The fix is on FG-194's branch. Both were fixed where they were introduced, and the rest of the stack was replayed on top. `make check` passes with `GITHUB_ACTIONS=true`.
 
 ## Invariants I1..I7 (pass / fail / n.a.)
 
