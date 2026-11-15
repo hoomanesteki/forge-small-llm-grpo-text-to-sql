@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import forge.eval.report as report_module
 from forge import cli
 
 
@@ -19,7 +20,9 @@ def runs(spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev
 
 
 @pytest.mark.phase(2)
-def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> None:
+def test_reports_on_eval_runs_through_the_cli(
+    runs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cli_runner = CliRunner()
     for model, run_id in (("gold", "gold-run"), ("select-1", "select-one")):
         args = ["eval", "run", "--backend", "fake", "--model", model, "--run-id", run_id]
@@ -48,9 +51,10 @@ def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> Non
     path = runs / "select-one" / "eval" / "compare-gold-run.md"
     assert compared.stdout == f"report: {path}\n"
     text = path.read_text()
+    # Run a gets more right in each of the 12 clusters: p = 2 / 2**12.
     assert text.startswith(
         "# Official EX on val, run b against run a: -100.0 points [-100.0, -100.0], "
-        "McNemar p < 0.0001\n"
+        "McNemar p = 0.0005 on clusters\n"
     )
     assert "| run a right | 0 | 20 |\n| run a wrong | 0 | 0 |" in text
     assert "\n| wrong_tables | 0 | 20 | +20 |\n" in text
@@ -65,8 +69,19 @@ def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> Non
     assert rebuilt.exit_code == 0, rebuilt.output
     assert rebuilt.stdout == (
         f"{runs / 'select-one' / 'eval' / 'val-report.md'}: matches its rebuild\n"
+        f"{runs / 'select-one' / 'eval' / 'val-hardness.png'}: matches its rebuild\n"
         f"{path}: matches its rebuild\n"
     )
+    # Where another renderer draws, the chart isn't compared, and the output says why.
+    chart, here = runs / "select-one" / "eval" / "val-hardness.png", report_module.chart_renderer()
+    with monkeypatch.context() as patched:
+        patched.setattr(report_module, "chart_renderer", lambda: "another renderer")
+        elsewhere = cli_runner.invoke(cli.app, ["report", "rebuild", "select-one"])
+    assert elsewhere.exit_code == 0, elsewhere.output
+    assert (
+        f"\n{chart}: not compared, as it was drawn with {here}, and this machine draws with "
+        "another renderer\n"
+    ) in elsewhere.stdout
 
     # A number edited by hand fails the rebuild, which shows where.
     report = runs / "select-one" / "eval" / "val-report.md"
@@ -76,7 +91,7 @@ def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> Non
     assert f"{report}: differs from its rebuild\n" in edited.stdout
     assert "\n-| wrong_tables | 19 | 100.0% |\n+| wrong_tables | 20 | 100.0% |\n" in edited.stdout
     assert f"{path}: matches its rebuild\n" in edited.stdout
-    assert edited.stderr == "error: 1 of 2 reports differ from their rebuild\n"
+    assert edited.stderr == "error: 1 of 3 files differ from their rebuild\n"
 
     missing = cli_runner.invoke(cli.app, ["report", "run", "no-such-run"])
     assert missing.exit_code == 1

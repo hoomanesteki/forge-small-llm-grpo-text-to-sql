@@ -692,8 +692,10 @@ def report_compare(
 def report_rebuild(
     run_id: Annotated[str, typer.Argument(help="The run, a folder in runs/ (FORGE_RUNS_DIR).")],
 ) -> None:
-    """Render the run's report, and each compare report in its eval folder, again from
-    the stored files; exit 1 unless each matches the stored one, its Generated line aside.
+    """Render the run's report and chart, and each compare report in its eval folder,
+    again from the stored files; exit 1 unless each matches the stored one, a report's
+    Generated line aside. A chart drawn on another platform, or with other releases of
+    what draws it, isn't compared, and the output says so.
     """
     from forge.eval.report import rebuild
 
@@ -707,11 +709,13 @@ def report_rebuild(
             typer.echo(f"{check.path}: differs from its rebuild")
             for line in check.diff:
                 typer.echo(line)
+        elif check.skipped:
+            typer.echo(f"{check.path}: not compared, as {check.skipped}")
         else:
             typer.echo(f"{check.path}: matches its rebuild")
     differ = sum(bool(check.diff) for check in checks)
     if differ:
-        typer.echo(f"error: {differ} of {len(checks)} reports differ from their rebuild", err=True)
+        typer.echo(f"error: {differ} of {len(checks)} files differ from their rebuild", err=True)
         raise typer.Exit(1)
 
 

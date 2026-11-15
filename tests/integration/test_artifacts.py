@@ -63,6 +63,10 @@ def test_pilot_run_is_committed_whole() -> None:
 def test_pilot_report_rebuilds_and_traces_to_its_files() -> None:
     data = resolve_data_dir()
     checks = rebuild(PILOT_RUN, runs_root=RUNS, data_dir=data)
-    assert [check.diff for check in checks] == [()]
+    # The report and its chart, both as the stored files render them.
+    assert [(check.path.name, check.diff) for check in checks] == [
+        ("val-report.md", ()),
+        ("val-hardness.png", ()),
+    ]
     report = (RUNS / PILOT_RUN / "eval" / "val-report.md").read_text(encoding="utf-8")
     assert untraced(report, RUNS / PILOT_RUN, data_dir=data) == []

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,6 +28,7 @@ from forge.eval.retry import (
 from forge.eval.run_files import read_run
 from forge.eval.runner import BATCH_SIZE, EvalRun, run_eval
 from forge.infer.base import FakeBackend, ReplyFn, sample_seed
+from forge.sql.sandbox import SandboxPool
 
 NO_SQL_REPLY = "There are some aircraft."
 # First replies whose queries fail to run, and the error each one is told.
@@ -131,7 +133,7 @@ def test_retry_uses_error_message(runs: Path) -> None:
 
 
 @pytest.mark.phase(2)
-def test_retry_only_on_error(runs: Path) -> None:
+def test_retry_only_on_error(runs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     val = _val()
     first_replies = {
         # Ran, with wrong rows: never retried.
@@ -156,9 +158,27 @@ def test_retry_only_on_error(runs: Path) -> None:
             return _block(second_replies[prompt.example_id])
         return _block(first_replies.get(prompt.example_id, val[prompt.example_id].gold_sql))
 
+    # Every query a model wrote runs in the run's sandbox pool (ADR-0014), second replies
+    # included; gold runs in process and official EX through the pool's call.
+    pooled: list[tuple[str, str]] = []
+    run_many = SandboxPool.run_many
+
+    def recording(
+        pool: SandboxPool, items: Sequence[tuple[str, str]], **kwargs: Any
+    ) -> list[ExecResult]:
+        pooled.extend(items)
+        return run_many(pool, items, **kwargs)
+
+    monkeypatch.setattr(SandboxPool, "run_many", recording)
     run = _run("only-errors", reply, retry=1)
     scores = {score.example_id: score for score in run.scores}
     assert asked_again == ["spider-train-00010", "spider-train-00022"]
+    firsts = [
+        first_replies.get(example_id, example.gold_sql) for example_id, example in val.items()
+    ]
+    assert sorted(pooled) == sorted(
+        ("flight_1", sql) for sql in [*firsts, *second_replies.values()]
+    )
     stored = read_run(run.paths.root)
     for example_id in ("spider-train-00013", "spider-train-00017", "spider-train-00024"):
         score = scores[example_id]

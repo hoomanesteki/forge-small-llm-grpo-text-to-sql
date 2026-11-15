@@ -1,6 +1,6 @@
-# Run 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7: official EX 47.2% [42.8%, 51.2%] on val
+# Run 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7: official EX 47.2% [43.1%, 51.1%] on val
 
-Generated: 2026-11-15 16:14:45 UTC
+Generated: 2026-11-15 18:51:53 UTC
 
 Written by `forge report run 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7` from the run's stored files and checked
 against them by `forge report rebuild 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7`; don't edit it by hand.
@@ -25,20 +25,20 @@ Questions and gold queries are quoted from Spider 1.0 (Yu et al., EMNLP 2018), l
 
 | | right | of | rate [95% interval] |
 |---|---:|---:|---:|
-| valid SQL | 590 | 872 | 67.7% [63.7%, 71.5%] |
-| fast EX | 413 | 872 | 47.4% [43.0%, 51.3%] |
-| official EX | 412 | 872 | 47.2% [42.8%, 51.2%] |
+| valid SQL | 590 | 872 | 67.7% [63.8%, 71.4%] |
+| fast EX | 413 | 872 | 47.4% [43.1%, 51.3%] |
+| official EX | 412 | 872 | 47.2% [43.1%, 51.1%] |
 
 The checkers disagree on 5 samples: only fast EX matches 3, and only official EX 2.
 
-Intervals are 95% percentile bootstraps over 1,000 resamples (seed 0) that draw whole questions, with the questions that share a gold query drawn together: 872 questions in 456 clusters.
+Intervals are 95% percentile bootstraps over 1,000 resamples (seed 0) that draw whole questions, with the questions that share a gold query drawn together: 872 questions in 455 clusters.
 
 ## By hardness
 
 | hardness | questions | fast EX [95% interval] | official EX [95% interval] |
 |---|---:|---:|---:|
 | easy | 204 | 77.5% [70.1%, 84.5%] | 77.9% [70.5%, 85.1%] |
-| medium | 361 | 45.4% [39.4%, 51.7%] | 44.9% [39.0%, 51.0%] |
+| medium | 361 | 45.4% [39.4%, 51.4%] | 44.9% [38.7%, 50.7%] |
 | hard | 150 | 37.3% [28.9%, 46.6%] | 37.3% [28.9%, 46.6%] |
 | extra | 157 | 22.3% [15.3%, 29.9%] | 22.3% [15.3%, 29.9%] |
 

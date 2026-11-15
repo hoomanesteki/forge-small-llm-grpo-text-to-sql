@@ -12,7 +12,8 @@ comes from a run's memory: ``load_run`` reads
 
 Rates are official EX unless labeled fast (ADR-0008), so every sample needs an official
 verdict. Intervals come from ``forge.eval.metrics``, with the questions that share a gold
-query drawn together (``gold_clusters``). Error classes count the failures of official
+query drawn together (``gold_clusters``), and McNemar's test in a compare report pairs
+those clusters, under the question table. Error classes count the failures of official
 EX. A run classifies the failures of fast EX (``forge.eval.scoring``), so a failure that
 only official EX finds has no class and counts as ``unclassified``. The report shows
 ``SHOWN_FAILURES`` failures of each of the ``TOP_CLASSES`` most common classes, picked by
@@ -29,29 +30,44 @@ shown that was retried shows both of its queries.
 A dev run's report shows the model's answers on dev, which belongs to the look the run
 logged (ADR-0004): it needs the run's row in ``docs/dev-usage.md`` and adds none.
 
-One line changes between renderings: ``Generated:`` and the time. ``rebuild`` renders a
-run's report, and each compare report in its folder, again from the stored files and
-compares each with the stored one, that line aside. The chart draws the by-hardness
-table; its bytes are the same on every rendering on one machine, so a committed chart
-changes only with its numbers. ``rebuild`` doesn't compare it: its pixels can change with
-the matplotlib version and aren't known to match between machines, while the table holds
-every number it draws.
+One line changes between renderings: ``Generated:`` and the time, as ``_generated``
+writes it. ``rebuild`` renders a run's report and chart, and each compare report in its
+folder, again from the stored files and compares each with the stored one: a report line
+for line, with only a ``Generated:`` line of exactly that form masked, so anything more
+on it is a difference, and the chart byte for byte. The chart draws the by-hardness table
+on Agg, in matplotlib's default style whatever a matplotlibrc says, so its bytes change
+only with its numbers and with what draws and compresses it, which machines don't share:
+with the same releases, CI's Linux writes other bytes than macOS. So the PNG's
+``Software`` text names the releases and the platform that drew it (``chart_renderer``),
+and ``rebuild`` compares the chart only where they are the same, and says so of one drawn
+elsewhere instead of failing it. A chart that names no renderer is compared.
 
 Each kind of number has one format, so FG-207's I4 check can find every number in the
 stored files: a rate as a percentage with one decimal and its 95% interval in brackets
 (``45.2% [41.8%, 48.6%]``), a change in percentage points with its sign and interval
 (``+5.2 [+1.0, +9.4]``), counts with thousands separators, and a p-value to four
-decimals (``< 0.0001`` below that). Constants (the interval level, resamples and seed,
-how many failures are shown, and Spider's citation) appear in prose lines only.
+decimals (``< 0.0001`` below that). Numbers from the stored files are in the title, the
+table rows and the headings over the example failures, and in these prose lines: in a run
+report, the checkers' disagreement and the questions and clusters in the line on
+intervals; in a compare report, the questions and samples both runs answered, the
+questions and clusters in the line on intervals, the questions they disagree on, the
+clusters each wins and McNemar's p-value. Table headers hold the interval level (95%), and
+the other prose lines hold only constants: the interval level, resamples and seed, how many
+failures are shown, and Spider's citation. Question lines and code blocks quote the data
+and the replies.
 """
 
 from __future__ import annotations
 
 import difflib
+import functools
 import hashlib
 import io
 import os
+import platform
 import re
+import struct
+import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -71,6 +87,7 @@ from forge.eval.metrics import (
     RESAMPLES,
     SEED,
     Estimate,
+    McNemar,
     Rate,
     Summary,
     compare,
@@ -110,7 +127,11 @@ UNCLASSIFIED_NOTE = (
 )
 
 _ORDER = (*ERROR_CLASSES, UNCLASSIFIED)
-_GENERATED_LINE = re.compile(rf"^{GENERATED}.*$", re.MULTILINE)
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# The Generated line as _generated writes it, and nothing else.
+_GENERATED_LINE = re.compile(
+    rf"^{GENERATED}\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}:\d{{2}} UTC$", re.MULTILINE
+)
 # What markdown could read as markup in a question, escaped where it shows as text.
 _MARKUP = re.compile(r"([\\`*_\[\]<>|~&])")
 _BACKTICKS = re.compile(r"`+")
@@ -165,10 +186,14 @@ class RunReport:
 
 @dataclass(frozen=True)
 class Check:
-    """A stored report against its rebuild: their unified diff, empty when they match."""
+    """A stored file against its rebuild: what differs, nothing when they match. A report
+    gives a unified diff, and the chart, which has no lines, its sizes and hashes."""
 
     path: Path
     diff: tuple[str, ...]
+    # Why the file wasn't compared, for a chart another renderer drew (``chart_renderer``);
+    # None for a file that was.
+    skipped: str | None = None
 
 
 @dataclass(frozen=True)
@@ -235,18 +260,27 @@ def write_compare_report(
 def rebuild(
     run_id: str, *, runs_root: Path | None = None, data_dir: Path | None = None
 ) -> list[Check]:
-    """Render the run's report and each ``compare-<a>.md`` in its ``eval`` folder again,
-    and compare each with the stored file, its ``Generated:`` line aside. Writes nothing.
+    """Render the run's report, its chart and each ``compare-<a>.md`` in its ``eval``
+    folder again, and compare each with the stored file, a report's ``Generated:`` line
+    aside, and the chart only where its ``chart_renderer`` drew it. Writes nothing.
     """
     data, root = _data(data_dir), runs_root or runs_dir()
     run = _load(run_id, data, root)
-    report = run.stored.paths.report
+    report, chart = run.stored.paths.report, run.stored.paths.chart
     if not report.is_file():
         raise FileNotFoundError(
             f"run {run_id} has no report to rebuild: write it with `forge report run {run_id}`"
         )
+    if not chart.is_file():
+        raise FileNotFoundError(
+            f"run {run_id}'s report shows {chart}, which is missing: write both again with "
+            f"`forge report run {run_id}`"
+        )
     now = datetime.now(UTC)
-    checks = [_check(report, render_run(run, generated=now))]
+    checks = [
+        _check(report, render_run(run, generated=now)),
+        _check_chart(chart, render_chart(run)),
+    ]
     for path in sorted(report.parent.glob(f"{COMPARE_PREFIX}*.md")):
         a = path.name.removeprefix(COMPARE_PREFIX).removesuffix(".md")
         checks.append(
@@ -321,6 +355,10 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
             f"run {a.run_id} answered {split} and run {b.run_id} {b.options.split}; "
             "compare runs on one split"
         )
+    # ``out`` can name the file rebuild checks another way, through '..' or a symlink.
+    # It is still that file, so it is written as rebuild renders it.
+    default = compare_path(b, a.run_id)
+    page = default if out.resolve() == default.resolve() else out
     overall = compare(a.stored.scores, b.stored.scores, clusters=a.clusters)
     levels = {
         level: compare(
@@ -336,11 +374,11 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
         f"[{_points(delta.low)}, {_points(delta.high)}]"
     )
     if table.pvalue is not None:
-        title += f", McNemar {_p(table.pvalue)}"
+        title += f", McNemar {_p(table.pvalue)} on {table.unit}s"
     written = (
         f"Written by `forge report compare {a.run_id} {b.run_id}` from both runs' stored files"
     )
-    if out.absolute() == compare_path(b, a.run_id).absolute():
+    if page == default:
         written += f" and checked against them by `forge report rebuild {b.run_id}`"
     samples = b.options.generation.n
     retried = _retried(a) or _retried(b)
@@ -360,7 +398,7 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
         *(
             f"| {name} | {value_a} | {value_b} |"
             for (name, value_a), (_, value_b) in zip(
-                _header(a, out, shared=False), _header(b, out, shared=False), strict=True
+                _header(a, page, shared=False), _header(b, page, shared=False), strict=True
             )
         ),
         "",
@@ -390,7 +428,7 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
         "",
         f"The runs disagree on {table.only_a + table.only_b:,} of {_count(overall.n, unit)}: "
         f"run b alone is right on {table.only_b:,}, run a alone on {table.only_a:,}.",
-        _mcnemar(table.pvalue),
+        *_mcnemar(table),
         "",
         "## By hardness",
         "",
@@ -420,9 +458,29 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
     return "\n".join(lines) + "\n"
 
 
+@functools.cache
+def chart_renderer() -> str:
+    """What draws and compresses a chart here: a chart's bytes are the same wherever this
+    is, and can differ where it isn't."""
+    import matplotlib
+    import numpy
+    import PIL
+    from matplotlib import ft2font
+    from PIL import features
+
+    # Pillow's wheels deflate with zlib-ng, whose output can differ from zlib's.
+    zlib_ng = features.version("zlib_ng")
+    deflate = f"zlib-ng {zlib_ng}" if zlib_ng else f"zlib {features.version('zlib')}"
+    return (
+        f"matplotlib {matplotlib.__version__} (FreeType {ft2font.__freetype_version__}), "
+        f"numpy {numpy.__version__}, Pillow {PIL.__version__} ({deflate}), "
+        f"{sys.platform} {platform.machine()}"
+    )
+
+
 def render_chart(run: ReportRun) -> bytes:
     """Official EX at each hardness level with its interval, as PNG bytes that are the same
-    on every rendering on one machine."""
+    on every rendering with one ``chart_renderer``, which the file names."""
     # matplotlib takes about half a second to import, and only the chart needs it.
     import matplotlib.style
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -486,9 +544,11 @@ def render_chart(run: ReportRun) -> bytes:
             va="top",
         )
         buffer = io.BytesIO()
-        # Without the Software entry the file doesn't name matplotlib's version, so its
-        # bytes change only with the drawing.
-        figure.savefig(buffer, format="png", dpi=_CHART_DPI, metadata={"Software": None})
+        # In place of matplotlib's own Software text, what rebuild needs to know whether it
+        # can compare the bytes.
+        figure.savefig(
+            buffer, format="png", dpi=_CHART_DPI, metadata={"Software": chart_renderer()}
+        )
     return buffer.getvalue()
 
 
@@ -572,8 +632,47 @@ def _check(path: Path, rebuilt: str) -> Check:
     return Check(path, tuple(diff))
 
 
+def _check_chart(path: Path, rebuilt: bytes) -> Check:
+    stored = path.read_bytes()
+    if stored == rebuilt:
+        return Check(path, ())
+    # Another renderer's bytes can differ for the same numbers, so they show nothing; a
+    # chart that names this machine's renderer, or none, is compared.
+    drawn_with, here = _software(stored), chart_renderer()
+    if drawn_with is not None and drawn_with != here:
+        return Check(
+            path, (), skipped=f"it was drawn with {drawn_with}, and this machine draws with {here}"
+        )
+    return Check(
+        path,
+        (
+            f"--- {path}",
+            "+++ rebuilt from the stored files",
+            f"stored: {len(stored):,} bytes, sha256 {hashlib.sha256(stored).hexdigest()}",
+            f"rebuilt: {len(rebuilt):,} bytes, sha256 {hashlib.sha256(rebuilt).hexdigest()}",
+        ),
+    )
+
+
+def _software(png: bytes) -> str | None:
+    """The ``Software`` text of a PNG file, or None when it has none or isn't one."""
+    if not png.startswith(_PNG_SIGNATURE):
+        return None
+    at = len(_PNG_SIGNATURE)
+    # Each chunk: its data's length, its type, the data, then a 4-byte checksum.
+    while at + 8 <= len(png):
+        size, kind = struct.unpack_from(">I4s", png, at)
+        if kind == b"tEXt":
+            key, _, text = png[at + 8 : at + 8 + size].partition(b"\0")
+            if key == b"Software":
+                return text.decode("latin-1")
+        at += 12 + size
+    return None
+
+
 def _masked(text: str) -> str:
-    """``text`` with its first ``Generated:`` line, the one that changes, made constant."""
+    """``text`` with its first ``Generated:`` line that holds only the time, the one line
+    that changes, made constant."""
     return _GENERATED_LINE.sub(f"{GENERATED}(any time)", text, count=1)
 
 
@@ -708,13 +807,20 @@ def _without_retry_row(a: ReportRun, b: ReportRun) -> str:
     return f"| official EX without retry | {rates} | {_change(change.delta)} |"
 
 
-def _mcnemar(pvalue: float | None) -> str:
-    if pvalue is None:
-        return (
+def _mcnemar(table: McNemar) -> list[str]:
+    if table.pvalue is None:
+        return [
             "There is no p-value: each question has several samples, which are not "
             "independent pairs. The interval of the change draws whole questions, so it holds."
-        )
-    return f"Exact two-sided McNemar test: {_p(pvalue)}."
+        ]
+    unit = table.unit
+    # The questions that share a gold query aren't independent pairs either, so the test
+    # pairs what the intervals draw, and says so.
+    return [
+        f"The test pairs whole {unit}s, as the intervals draw them: run b gets more right in "
+        f"{_count(table.wins_b, unit)}, run a in {table.wins_a:,}, and the rest tie.",
+        f"Exact two-sided McNemar test on those {unit}s: {_p(table.pvalue)}.",
+    ]
 
 
 def _failures(scores: Iterable[Score]) -> Counter[str]:

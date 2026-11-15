@@ -229,6 +229,57 @@ def test_order_that_cannot_change_the_rows_does_not_count() -> None:
 
 
 @pytest.mark.phase(2)
+def test_an_order_by_alias_wins_over_a_column_as_in_sqlite() -> None:
+    # A whole ORDER BY term that names a select alias is the alias, though a table in scope
+    # has a column by that name: SQLite orders these by max(distance) and by -aid.
+    gold = "SELECT aid, max(distance) FROM Flight GROUP BY aid ORDER BY max(distance) DESC LIMIT 1"
+    pred = (
+        "SELECT aid, max(distance) AS distance FROM flight GROUP BY aid "
+        "ORDER BY distance DESC LIMIT 3"
+    )
+    assert _classify(gold, pred) == "value"
+    gold = "SELECT aid, -aid AS distance FROM Aircraft ORDER BY distance LIMIT 3"
+    assert _classify(gold, "SELECT aid, -aid AS distance FROM aircraft ORDER BY -aid LIMIT 5") == (
+        "value"
+    )
+    # Qualified, or inside an expression, the name is the column, as it is in WHERE.
+    pred = "SELECT aid, -aid AS distance FROM aircraft ORDER BY aircraft.distance LIMIT 5"
+    assert _classify(gold, pred) == "group_order"
+    gold = "SELECT aid, -aid AS distance FROM Aircraft ORDER BY distance + 1 LIMIT 3"
+    pred = "SELECT aid, -aid AS distance FROM aircraft ORDER BY aircraft.distance + 1 LIMIT 5"
+    assert _classify(gold, pred) == "value"
+    gold = "SELECT aid, -aid AS distance FROM Aircraft WHERE distance > 1000"
+    pred = "SELECT aid, -aid AS distance FROM aircraft WHERE aircraft.distance > 2000"
+    assert _classify(gold, pred) == "value"
+
+
+@pytest.mark.phase(2)
+def test_derived_tables_and_ctes_lose_their_names() -> None:
+    # The columns of a derived table or a common table expression drop its name, as a
+    # table's columns drop its alias, so here only a literal differs.
+    gold = "SELECT T1.origin FROM (SELECT origin FROM Flight WHERE price > 100) AS T1"
+    pred = "SELECT sub.origin FROM (SELECT origin FROM flight WHERE price > 200) AS sub"
+    assert _classify(gold, pred) == "value"
+    pred = "SELECT origin FROM (SELECT origin FROM Flight WHERE price > 200) AS T1"
+    assert _classify(gold, pred) == "value"
+    gold = "WITH c AS (SELECT origin FROM Flight WHERE price > 100) SELECT c.origin FROM c"
+    pred = "WITH d AS (SELECT origin FROM Flight WHERE price > 200) SELECT d.origin FROM d"
+    assert _classify(gold, pred) == "value"
+    pred = "WITH d AS (SELECT origin FROM Flight WHERE price > 200) SELECT x.origin FROM d AS x"
+    assert _classify(gold, pred) == "value"
+    # A qualified column still isn't the select alias by its name: gold orders by the
+    # derived table's n, and the prediction by its alias, n + 1.
+    derived = "(SELECT count(*) AS n FROM Flight GROUP BY origin)"
+    gold = f"SELECT T1.n + 1 AS n FROM {derived} AS T1 ORDER BY T1.n"
+    assert _classify(gold, f"SELECT sub.n + 1 AS n FROM {derived} AS sub ORDER BY n") == (
+        "group_order"
+    )
+    assert _classify(gold, f"SELECT sub.n + 2 AS n FROM {derived} AS sub ORDER BY sub.n") == (
+        "value"
+    )
+
+
+@pytest.mark.phase(2)
 def test_constants_alone_make_a_value_error() -> None:
     assert _classify(GOLD_14, "SELECT aid FROM Aircraft WHERE distance > 1500") == "value"
     assert _classify(GOLD_24, GOLD_24.replace("LIMIT 1", "LIMIT 3")) == "value"

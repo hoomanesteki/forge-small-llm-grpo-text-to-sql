@@ -67,4 +67,7 @@ def test_eval_pipeline_on_tiny_model(
     assert untraced(report, run_dir, data_dir=spider_mini) == []
     rebuilt = cli_runner.invoke(cli.app, ["report", "rebuild", "smoke"])
     assert rebuilt.exit_code == 0, rebuilt.output
-    assert rebuilt.stdout == f"{run_dir / 'eval' / 'val-report.md'}: matches its rebuild\n"
+    assert rebuilt.stdout == (
+        f"{run_dir / 'eval' / 'val-report.md'}: matches its rebuild\n"
+        f"{run_dir / 'eval' / 'val-hardness.png'}: matches its rebuild\n"
+    )

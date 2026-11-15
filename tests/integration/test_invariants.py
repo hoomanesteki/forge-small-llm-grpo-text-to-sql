@@ -385,6 +385,11 @@ def test_i4_report_numbers_trace_to_manifest(spider_mini: Path, tmp_path: Path) 
         ("### no_sql: 5 of 7 shown", "### no_sql: 5 of 8 shown"),
         ("\n## By hardness\n", "\n## By hardness\n\nEasy questions gained 12 points.\n"),
         ("\n| value |", "\n| best guess | 3 |\n| value |"),
+        # The prose lines that hold numbers from the stored files.
+        ("only fast EX matches 0, and only official EX 1.", "only fast EX matches 0, and 2."),
+        ("20 questions in 12 clusters.", "20 questions in 11 clusters."),
+        # The Generated line holds the time and nothing more.
+        ("00:00:00 UTC\n", "00:00:00 UTC, official EX 87.5% on dev\n"),
         ("has an id of 12?", "has an id of 21?"),
         ("WHERE aid  =  12", "WHERE aid  =  21"),
     ):

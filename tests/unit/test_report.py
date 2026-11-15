@@ -7,16 +7,24 @@ questions (``spider-train-00010`` to ``00029`` on flight_1, five of each hardnes
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
+import platform
 import shutil
 import struct
+import subprocess
+import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import matplotlib
 import pytest
+from PIL import Image
 
+import forge.eval.report as report_module
 from forge.core.hashing import canonical_json
 from forge.core.types import Generation, RunManifest, Score, Split
 from forge.data.manifest import data_manifest_hash
@@ -24,7 +32,14 @@ from forge.data.spider import load_raw
 from forge.data.splits import split_examples
 from forge.eval.config import EvalConfig
 from forge.eval.metrics import Estimate, Rate, compare, gold_clusters, summarize
-from forge.eval.report import load_run, rebuild, write_compare_report, write_run_report
+from forge.eval.report import (
+    Check,
+    chart_renderer,
+    load_run,
+    rebuild,
+    write_compare_report,
+    write_run_report,
+)
 from forge.eval.run_files import RunCorrupt, RunUnfinished
 from forge.ops.dev_usage import log_dev_use, read_uses
 from forge.ops.manifest import config_hash
@@ -222,6 +237,18 @@ def _png_chunks(data: bytes) -> list[bytes]:
     return kinds
 
 
+def _without_text(data: bytes) -> bytes:
+    """The PNG ``data`` without its text chunks. Each chunk carries its own checksum, so
+    what is left is still a PNG."""
+    kept, at = [data[:8]], 8
+    while at < len(data):
+        (size,) = struct.unpack(">I", data[at : at + 4])
+        if data[at + 4 : at + 8] != b"tEXt":
+            kept.append(data[at : at + 12 + size])
+        at += 12 + size
+    return b"".join(kept)
+
+
 @pytest.mark.phase(2)
 def test_report_renders_from_scores(runs: Path) -> None:
     root = _store(runs, "mixed", MIXED)
@@ -312,23 +339,33 @@ def test_report_renders_from_scores(runs: Path) -> None:
     assert "Error: no_sql. There is no query to execute." in failures
 
     chart = written.chart.read_bytes()
-    # No Software text chunk, so the bytes don't name matplotlib's version.
-    assert _png_chunks(chart) == [b"IHDR", b"pHYs", b"IDAT", b"IEND"]
-    assert struct.unpack(">II", chart[16:24]) == (640, 360)
+    # Its one text names what drew it, so rebuild knows whether it can compare the bytes.
+    assert _png_chunks(chart) == [b"IHDR", b"tEXt", b"pHYs", b"IDAT", b"IEND"]
+    with Image.open(io.BytesIO(chart)) as image:
+        assert image.size == (640, 360)
+        assert image.text == {"Software": chart_renderer()}
+    assert chart_renderer().startswith(f"matplotlib {matplotlib.__version__} (FreeType ")
+    assert chart_renderer().endswith(f"{sys.platform} {platform.machine()}")
 
 
 @pytest.mark.phase(2)
 def test_rebuild_matches_original(runs: Path) -> None:
     root = _store(runs, "mixed", MIXED)
     _store(runs, "base", dict.fromkeys(VAL, RIGHT))
-    report = write_run_report("mixed", runs_root=runs, now=AT).report
+    written = write_run_report("mixed", runs_root=runs, now=AT)
+    report, chart = written.report, written.chart
     compared = write_compare_report("base", "mixed", runs_root=runs, now=AT)
     assert compared == root / "eval" / "compare-base.md"
-    original = report.read_bytes()
+    original, drawn = report.read_bytes(), chart.read_bytes()
 
     checks = rebuild("mixed", runs_root=runs)
-    assert [(check.path, check.diff) for check in checks] == [(report, ()), (compared, ())]
-    assert report.read_bytes() == original  # a rebuild writes nothing
+    assert [(check.path, check.diff) for check in checks] == [
+        (report, ()),
+        (chart, ()),
+        (compared, ()),
+    ]
+    # A rebuild writes nothing.
+    assert (report.read_bytes(), chart.read_bytes()) == (original, drawn)
 
     # Written again later, the report differs from the first in its Generated line only.
     write_run_report("mixed", runs_root=runs, now=LATER)
@@ -341,25 +378,63 @@ def test_rebuild_matches_original(runs: Path) -> None:
     assert changed == [
         (b"Generated: 2026-11-15 09:30:00 UTC", b"Generated: 2026-12-01 18:45:12 UTC")
     ]
-    assert [check.diff for check in rebuild("mixed", runs_root=runs)] == [(), ()]
+    assert [check.diff for check in rebuild("mixed", runs_root=runs)] == [(), (), ()]
 
     # A number edited in the stored report is a difference.
     report.write_bytes(again.replace(b"| no_sql | 6 | 54.5% |", b"| no_sql | 5 | 54.5% |"))
-    run_check, compare_check = rebuild("mixed", runs_root=runs)
+    run_check, chart_check, compare_check = rebuild("mixed", runs_root=runs)
     assert [line for line in run_check.diff if line.startswith(("-|", "+|"))] == [
         "-| no_sql | 5 | 54.5% |",
         "+| no_sql | 6 | 54.5% |",
     ]
-    assert not compare_check.diff
+    assert not chart_check.diff and not compare_check.diff
+
+    # Only the time the Generated line holds is masked, so a number typed after it is a
+    # difference too.
+    stamp = b"Generated: 2026-12-01 18:45:12 UTC"
+    claim = stamp + b". Official EX on dev is 87.5% [80.1%, 92.3%]"
+    report.write_bytes(again.replace(stamp, claim))
+    run_check, chart_check, compare_check = rebuild("mixed", runs_root=runs)
+    assert [line for line in run_check.diff if line.startswith(("-Gen", "+Gen"))] == [
+        f"-{claim.decode()}",
+        "+Generated: (any time)",
+    ]
+    assert not chart_check.diff and not compare_check.diff
+    # So is a second Generated line: only the first is the time of writing.
+    report.write_bytes(again.replace(b"\n## By hardness\n", b"\n" + stamp + b"\n## By hardness\n"))
+    run_check = rebuild("mixed", runs_root=runs)[0]
+    assert [line for line in run_check.diff if line.startswith(("-Gen", "+Gen"))] == [
+        f"-{stamp.decode()}"
+    ]
     report.write_bytes(again)
 
+    # The chart is compared byte for byte: one drawn for another run's numbers differs.
+    _store(runs, "other", dict.fromkeys(VAL, NO_SQL))
+    chart.write_bytes(write_run_report("other", runs_root=runs, now=AT).chart.read_bytes())
+    run_check, chart_check, compare_check = rebuild("mixed", runs_root=runs)
+    assert not run_check.diff and not compare_check.diff
+    assert chart_check.path == chart
+    other = chart.read_bytes()
+    assert chart_check.diff == (
+        f"--- {chart}",
+        "+++ rebuilt from the stored files",
+        f"stored: {len(other):,} bytes, sha256 {hashlib.sha256(other).hexdigest()}",
+        f"rebuilt: {len(drawn):,} bytes, sha256 {hashlib.sha256(drawn).hexdigest()}",
+    )
+    # A missing chart fails the rebuild.
+    chart.unlink()
+    with pytest.raises(FileNotFoundError, match=r"report shows .*val-hardness\.png, which is"):
+        rebuild("mixed", runs_root=runs)
+    chart.write_bytes(drawn)
+
     # So is a score changed after the reports were written: a right answer that official
-    # EX now rejects shows in both.
+    # EX now rejects shows in all three.
     _edit_first_score(root, ex_official=False)
-    run_check, compare_check = rebuild("mixed", runs_root=runs)
+    run_check, chart_check, compare_check = rebuild("mixed", runs_root=runs)
     assert "-| official EX | 9 | 20 |" in "\n".join(run_check.diff)
     assert "+| official EX | 8 | 20 |" in "\n".join(run_check.diff)
     assert "+| unclassified | 2 | 16.7% |" in run_check.diff
+    assert chart_check.diff
     assert "+| run a right | 8 | 12 |" in compare_check.diff
 
 
@@ -377,12 +452,16 @@ def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
     comparison = compare(_scores(runs / "base"), _scores(root), clusters=_clusters())
     assert comparison.metric == "ex_official"
     assert comparison.delta.value == pytest.approx(0.4)
-    # The exact binomial test on the 10 discordant pairs: 2 * (1 + 10) / 2**10.
-    assert comparison.mcnemar.pvalue == pytest.approx(0.021484375)
+    # The test pairs the 12 clusters, not the 20 questions: run a gets more right only
+    # where 00018, which b gets wrong, shares 00017's gold query; run b in the 6 clusters
+    # from 00019 to 00027; the other 5 tie. The exact binomial test of 1 against 6 is
+    # 2 * (1 + 7) / 2**7, where the 10 discordant questions would give 0.0215.
+    assert (comparison.mcnemar.wins_a, comparison.mcnemar.wins_b) == (1, 6)
+    assert comparison.mcnemar.pvalue == pytest.approx(0.125)
     delta = comparison.delta
     assert text.startswith(
         "# Official EX on val, run b against run a: +40.0 points "
-        f"[{_signed(delta.low)}, {_signed(delta.high)}], McNemar p = 0.0215\n"
+        f"[{_signed(delta.low)}, {_signed(delta.high)}], McNemar p = 0.1250 on clusters\n"
     )
     assert "\n| Run | `base` | `tuned` |\n| Model | `gold` | `tuned` |\n" in text
     links = "[manifest.json](../../base/manifest.json) | [manifest.json](../manifest.json)"
@@ -394,7 +473,11 @@ def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
     assert "disagree on 10 of 20 questions: run b alone is right on 9, run a alone on 1." in (
         mcnemar
     )
-    assert "Exact two-sided McNemar test: p = 0.0215." in mcnemar
+    assert (
+        "\nThe test pairs whole clusters, as the intervals draw them: run b gets more right in "
+        "6 clusters, run a in 1, and the rest tie.\n"
+        "Exact two-sided McNemar test on those clusters: p = 0.1250.\n"
+    ) in mcnemar
 
     accuracy = _section(text, "Execution accuracy")
     rates = f"{_ci(_official(runs / 'base'))} | {_ci(_official(root))}"
@@ -430,6 +513,29 @@ def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
     assert f"| Manifest | {links} |" in elsewhere
     assert "forge report rebuild" not in elsewhere
     assert _section(elsewhere, "McNemar's test") == mcnemar
+
+
+@pytest.mark.phase(2)
+def test_compare_report_out_can_name_its_default_path(runs: Path, tmp_path: Path) -> None:
+    _store(runs, "base", dict.fromkeys(VAL, RIGHT))
+    root = _store(runs, "tuned", MIXED, model="tuned")
+    write_run_report("tuned", runs_root=runs, now=AT)
+    default = write_compare_report("base", "tuned", runs_root=runs, now=AT)
+    text = default.read_text()
+    assert "checked against them by `forge report rebuild tuned`" in text
+    # Through '..' or a symlink, out still names the file rebuild checks, so it is written
+    # as the default is, and its rebuild matches.
+    link = tmp_path / "linked-runs"
+    link.symlink_to(runs, target_is_directory=True)
+    for out in (
+        runs / "base" / ".." / "tuned" / "eval" / "compare-base.md",
+        link / "tuned" / "eval" / "compare-base.md",
+    ):
+        default.unlink()
+        assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == out
+        assert default.read_text() == text
+        assert [(c.path, c.diff) for c in rebuild("tuned", runs_root=runs)][2:] == [(default, ())]
+    assert root / "eval" / "compare-base.md" == default
 
 
 @pytest.mark.phase(2)
@@ -529,13 +635,84 @@ def test_model_text_cannot_break_the_markdown(
     assert "\n| Model | `` m\\|`x` `` |\n" in text
 
 
+# What a matplotlibrc could change in the chart, were it read.
+MATPLOTLIBRC = """\
+font.family: monospace
+font.size: 14
+text.antialiased: False
+figure.dpi: 300
+savefig.dpi: 50
+savefig.transparent: True
+"""
+# A fresh interpreter's rendering of a stored run's chart: what it read from the
+# matplotlibrc, then the chart's hash.
+RENDER = """\
+import hashlib, sys
+from pathlib import Path
+import matplotlib
+from forge.eval.report import load_run, render_chart
+chart = render_chart(load_run(sys.argv[1], runs_root=Path(sys.argv[2])))
+print(matplotlib.rcParams["font.family"], hashlib.sha256(chart).hexdigest())
+"""
+
+
 @pytest.mark.phase(2)
-def test_chart_is_the_same_bytes_each_time(runs: Path) -> None:
+def test_chart_is_the_same_bytes_each_time(runs: Path, tmp_path: Path) -> None:
     _store(runs, "mixed", MIXED)
     first = write_run_report("mixed", runs_root=runs, now=AT).chart.read_bytes()
     assert write_run_report("mixed", runs_root=runs, now=LATER).chart.read_bytes() == first
     _store(runs, "other", dict.fromkeys(VAL, RIGHT))
     assert write_run_report("other", runs_root=runs, now=AT).chart.read_bytes() != first
+    # Another process draws the same bytes, with other hash seeds and a matplotlibrc that
+    # changes matplotlib's defaults, as when rebuild runs where the report was written.
+    # Only on one machine: CI's Linux draws other bytes than macOS with the same releases,
+    # so a chart names its renderer, and rebuild compares it only where that is the same.
+    rc = tmp_path / "matplotlibrc"
+    rc.write_text(MATPLOTLIBRC)
+    outputs = {
+        subprocess.run(
+            [sys.executable, "-c", RENDER, "mixed", str(runs)],
+            env={**os.environ, "PYTHONHASHSEED": hash_seed, "MATPLOTLIBRC": str(rc)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for hash_seed in ("1", "2")
+    }
+    assert outputs == {f"['monospace'] {hashlib.sha256(first).hexdigest()}\n"}
+
+
+@pytest.mark.phase(2)
+def test_rebuild_skips_a_chart_drawn_elsewhere(runs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _store(runs, "mixed", MIXED)
+    chart = write_run_report("mixed", runs_root=runs, now=AT).chart
+    drawn, here = chart.read_bytes(), chart_renderer()
+    # Where another renderer draws, the chart's bytes can't be compared, and the check
+    # says why instead of failing.
+    with monkeypatch.context() as patched:
+        patched.setattr(report_module, "chart_renderer", lambda: "another renderer")
+        chart_check = rebuild("mixed", runs_root=runs)[1]
+    assert chart_check == Check(
+        chart, (), skipped=f"it was drawn with {here}, and this machine draws with another renderer"
+    )
+    # Back here, it is compared again.
+    assert rebuild("mixed", runs_root=runs)[1] == Check(chart, ())
+
+    # A chart that names no renderer, like those drawn before charts named theirs, is
+    # compared, and differs from its rebuild.
+    bare = _without_text(drawn)
+    with Image.open(io.BytesIO(bare)) as image:
+        assert image.text == {}
+    chart.write_bytes(bare)
+    assert rebuild("mixed", runs_root=runs)[1] == Check(
+        chart,
+        (
+            f"--- {chart}",
+            "+++ rebuilt from the stored files",
+            f"stored: {len(bare):,} bytes, sha256 {hashlib.sha256(bare).hexdigest()}",
+            f"rebuilt: {len(drawn):,} bytes, sha256 {hashlib.sha256(drawn).hexdigest()}",
+        ),
+    )
 
 
 # SQLite can't parse it, but official EX drops DISTINCT first and runs count(*).
@@ -624,7 +801,7 @@ def test_report_shows_ex_with_and_without_retry(runs: Path) -> None:
     assert "gets a change, with retry and without it: each sample of run b" in compared
     plain = write_compare_report("base", "calm", runs_root=runs, now=AT).read_text()
     assert "without retry" not in plain
-    assert [check.diff for check in rebuild("retried", runs_root=runs)] == [(), ()]
+    assert [check.diff for check in rebuild("retried", runs_root=runs)] == [(), (), ()]
 
 
 @pytest.mark.phase(2)
