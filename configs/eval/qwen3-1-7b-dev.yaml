@@ -1,0 +1,14 @@
+# FG-307 baseline on Spider dev, for the chosen model only, once ADR-0012 names it: one of
+# the six dev looks, pushed with --reason baseline, which logs it (ADR-0004, docs/runbook.md
+# "Baselines"). The model is configs/models.yaml's candidates.qwen3-1-7b, pinned to the same
+# commit.
+model: Qwen/Qwen3-1.7B@70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+backend: vllm
+split: dev
+limit: null
+prompt_version: p1
+n: 1
+temperature: 0.0
+retry: 0
+ops:
+  est_gpu_hours: 0.35

@@ -10,7 +10,49 @@ tiny:
 
 pilot:
   # The local pilot on Apple silicon's GPU (FG-291, ADR-0016), evaluated on val only:
-  # Apache-2.0, not gated, 494M parameters, about 1 GB of safetensors. Its eval config is
+  # about 1 GB of safetensors. Its eval config is
   # configs/eval/pilot-qwen25coder05b-val.yaml, which names this same commit.
   repo: Qwen/Qwen2.5-Coder-0.5B-Instruct
   revision: ea3f2471cf1b1f0db85067f1ef93848e38e88c25
+  license: apache-2.0
+  gated: false
+  params: 494032768
+
+# FG-307's baselines (ADR-0012). The candidates are the open instruct models of about 1.5B
+# to 4B that training could start from; the reference is one larger model, measured beside
+# them and never trained. license and gated are what the Hub says, and params its count of
+# safetensors parameters: scripts/check_models.py checks each again at its commit, reading
+# metadata only. Each has configs/eval/<name>-val.yaml (p1) and <name>-dev.yaml, and each
+# candidate <name>-val-p2.yaml; names are spelled as run ids are, which take no dots.
+# The plan's Qwen2.5-Coder-3B-Instruct is left out: its license is the Qwen Research
+# license, for non-commercial use only, and Qwen2.5-Coder-1.5B-Instruct takes its place.
+candidates:
+  qwen3-1-7b:
+    repo: Qwen/Qwen3-1.7B
+    revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+    license: apache-2.0
+    gated: false
+    params: 2031739904
+  qwen3-4b:
+    repo: Qwen/Qwen3-4B
+    revision: 1cfa9a7208912126459214e8b04321603b3df60c
+    license: apache-2.0
+    gated: false
+    params: 4022468096
+  qwen2-5-coder-1-5b:
+    repo: Qwen/Qwen2.5-Coder-1.5B-Instruct
+    revision: 2e1fd397ee46e1388853d2af2c993145b0f1098a
+    license: apache-2.0
+    gated: false
+    params: 1543714304
+
+reference:
+  # About 16 GB of weights in 16 bits, past a T4's memory, so vLLM loads it in 4-bit with
+  # bitsandbytes: its eval configs set quantization, which the manifest records.
+  qwen3-8b:
+    repo: Qwen/Qwen3-8B
+    revision: b968826d9c46dd6066d109eabc6255188de91218
+    license: apache-2.0
+    gated: false
+    params: 8190735360
+    quantization: bitsandbytes

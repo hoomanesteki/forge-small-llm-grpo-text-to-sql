@@ -1,0 +1,14 @@
+# FG-307's I6 check: Qwen2.5-Coder-1.5B-Instruct on the first 100 val questions, as
+# configs/eval/qwen2-5-coder-1-5b-val.yaml but for the limit. Its scores must agree with the
+# first 100 of that run within 0.5 points of official EX
+# (forge.eval.reproducibility.compare_runs).
+model: Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a
+backend: vllm
+split: val
+limit: 100
+prompt_version: p1
+n: 1
+temperature: 0.0
+retry: 0
+ops:
+  est_gpu_hours: 0.15

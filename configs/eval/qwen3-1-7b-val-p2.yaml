@@ -1,0 +1,13 @@
+# FG-307 baseline: Qwen3-1.7B on the whole val split with the p2 prompt, which adds sample
+# rows to the schema. Run for the top candidate of the p1 runs only (ADR-0007). The model is
+# configs/models.yaml's candidates.qwen3-1-7b, pinned to the same commit.
+model: Qwen/Qwen3-1.7B@70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+backend: vllm
+split: val
+limit: null
+prompt_version: p2
+n: 1
+temperature: 0.0
+retry: 0
+ops:
+  est_gpu_hours: 0.3
