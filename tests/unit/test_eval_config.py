@@ -113,6 +113,20 @@ def test_manifest_config_records_what_changes_a_score() -> None:
     assert "reason" not in dev and dev == {**config, "split": "dev"}
 
 
+@pytest.mark.phase(3)
+def test_platform_is_the_host_of_a_kernel_job() -> None:
+    # kaggle/entry.py names the machine it runs on; the manifest's config doesn't change.
+    on_kaggle = dataclasses.replace(BASE, host="kaggle")
+    check_config(on_kaggle)
+    assert on_kaggle.platform == "kaggle"
+    assert dataclasses.replace(BASE, host="colab").platform == "colab"
+    assert on_kaggle.manifest_config() == BASE.manifest_config()
+    with pytest.raises(ValueError, match="host must be one of kaggle, colab, got 'modal'"):
+        check_config(dataclasses.replace(BASE, host="modal"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Apple silicon's GPU, which kaggle has not"):
+        check_config(dataclasses.replace(on_kaggle, device="mps"))
+
+
 @pytest.mark.phase(2)
 def test_platform_follows_the_device() -> None:
     # A run on Apple silicon's GPU is a local-mps pilot; every other local run is local-cpu.

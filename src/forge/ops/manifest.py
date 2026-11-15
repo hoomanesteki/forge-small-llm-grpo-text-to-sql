@@ -3,13 +3,19 @@
 A manifest from uncommitted code can't be reproduced, so building one on a dirty
 tree is refused unless the caller passes ``allow_dirty``. When allowed, the SHA gets
 a ``-dirty`` suffix, so a gate check that the SHA is on dev fails loudly.
+
+A Kaggle kernel runs the wheel from the code dataset and has no checkout to ask, so
+there ``code_sha`` takes the commit the dataset was built from, which the kernel's entry
+script passes in ``FORGE_CODE_SHA``. Inside a checkout the variable is never read.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -23,13 +29,22 @@ from forge.ops.paths import RepoRootNotFound, dev_usage_path, ledger_path, repo_
 # Mirrors RunManifest.platform; a unit test keeps the two in step.
 Platform = Literal["local-cpu", "local-mps", "kaggle", "colab", "modal"]
 
+# Set by kaggle/entry.py from the code dataset's GIT_SHA (forge.ops.kaggle).
+CODE_SHA_ENV = "FORGE_CODE_SHA"
+# A full commit: publish-code refuses a dirty tree, so a dataset never names a -dirty one.
+_COMMIT = re.compile(r"[0-9a-f]{40}")
+
 
 class DirtyTreeError(RuntimeError):
-    pass
+    """The code's commit can't be named: the tree has changes no commit holds."""
 
 
 class GitError(RuntimeError):
     """git can't name the commit: no checkout it can read holds the folder, or git is missing."""
+
+
+class NoCommitError(GitError):
+    """No checkout to ask, and no ``FORGE_CODE_SHA`` to say which commit the code is."""
 
 
 def _git(args: list[str], where: Path) -> subprocess.CompletedProcess[str]:
@@ -153,6 +168,40 @@ def _path_in_checkout(path: Path, top: Path) -> str | None:
     return prefix + "/".join(missing)
 
 
+def code_sha(
+    repo: Path | None = None, *, allow_dirty: bool = False, env: Mapping[str, str] | None = None
+) -> str:
+    """The commit a run's code comes from.
+
+    In a git checkout this is ``git_sha``, whatever ``FORGE_CODE_SHA`` says, so the variable
+    can never stand in for the code that is really there. Outside one it is
+    ``FORGE_CODE_SHA``, which must be a full commit. Raises ``NoCommitError`` when neither
+    names one, and ``ValueError`` when the variable isn't a full commit.
+    """
+    if _in_checkout(repo):
+        return git_sha(repo, allow_dirty=allow_dirty)
+    where = Path.cwd() if repo is None else repo
+    sha = (os.environ if env is None else env).get(CODE_SHA_ENV, "")
+    if not sha:
+        raise NoCommitError(
+            f"{where} is not in a git checkout, and {CODE_SHA_ENV} doesn't name the commit "
+            "the code was built from; a run records its commit, so run it inside a Forge "
+            "checkout or set FORGE_ROOT to one"
+        )
+    if not _COMMIT.fullmatch(sha):
+        raise ValueError(f"{CODE_SHA_ENV} must be a full 40-character commit, got {sha!r}")
+    return sha
+
+
+def _in_checkout(repo: Path | None) -> bool:
+    where = Path.cwd() if repo is None else repo
+    try:
+        done = _git(["rev-parse", "--is-inside-work-tree"], where)
+    except GitError:  # no git on the machine
+        return False
+    return done.returncode == 0 and done.stdout.strip() == "true"
+
+
 def config_hash(config: dict[str, Any]) -> str:
     return sha256_hex(canonical_json(config))
 
@@ -176,14 +225,14 @@ def build_manifest(
     """Describe a run starting now. Pass ``run_id`` only to keep an id, as a resumed run does.
 
     ``data_dir`` is the data the run reads, which its data manifest hash describes; the
-    default is ``FORGE_DATA_DIR``'s, as everywhere else.
+    default is ``FORGE_DATA_DIR``'s, as everywhere else. The commit is ``code_sha``'s.
     """
     # Kaggle runs in UTC and laptops don't, so a naive time can't be compared. A tzinfo
     # without an offset is naive too: astimezone would read it in the machine's zone.
     if now is not None and now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     started_at = now or datetime.now(UTC)
-    sha = git_sha(repo, allow_dirty=allow_dirty)
+    sha = code_sha(repo, allow_dirty=allow_dirty)
     if run_id is None:
         run_id = make_run_id(kind, model_ref, sha, on=started_at.astimezone(UTC).date())
     # The manifest keeps the config as hashed, in a copy of its own, so editing the
