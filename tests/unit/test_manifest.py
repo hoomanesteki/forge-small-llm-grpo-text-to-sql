@@ -30,8 +30,17 @@ def _fixture_data(spider_mini: Path) -> None:
     """build_manifest hashes the data, so give it the small committed subset."""
 
 
+def _forge_root(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``root`` the Forge root, so the append-only logs are under its docs folder."""
+    monkeypatch.setenv("FORGE_ROOT", str(root))
+    monkeypatch.delenv("FORGE_LEDGER", raising=False)
+    monkeypatch.delenv("FORGE_DEV_USAGE", raising=False)
+
+
 @pytest.fixture
-def repo(tmp_path: Path) -> Path:
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A one-commit checkout that is the Forge root."""
+    _forge_root(tmp_path, monkeypatch)
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "test@example.com")
     _git(tmp_path, "config", "user.name", "Test")
@@ -228,6 +237,38 @@ def test_appended_dev_log_is_clean_from_a_subdirectory(
         monkeypatch.chdir(where)
         assert git_sha() == head
         assert git_sha(where) == head
+
+
+@pytest.mark.phase(2)
+def test_appended_logs_are_clean_with_the_forge_root_below_the_top(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Forge root one level below the top of the checkout that holds it, as in a bigger
+    # repository. The top has a docs/dev-usage.md of its own, which is no Forge log.
+    top, forge = tmp_path / "mono", tmp_path / "mono" / "forge"
+    for rel in ("docs/dev-usage.md", "forge/docs/PLAN.md"):
+        (top / rel).parent.mkdir(parents=True, exist_ok=True)
+        (top / rel).write_text("one\n")
+    _git(top, "init", "-q")
+    _git(top, "config", "user.email", "test@example.com")
+    _git(top, "config", "user.name", "Test")
+    _git(top, "add", ".")
+    _forge_root(forge, monkeypatch)
+    head = _commit_layout(forge)
+    for log in ("compute-ledger.md", "dev-usage.md"):
+        with (forge / "docs" / log).open("a") as appended:
+            appended.write("| 2026-11-15 | row |\n")
+    # The run appended only to the Forge logs, so the tree is clean, from wherever git
+    # starts, and with the root found from the working directory as without FORGE_ROOT.
+    assert git_sha(forge) == head
+    monkeypatch.delenv("FORGE_ROOT")
+    monkeypatch.chdir(forge / "src")
+    assert git_sha() == head
+    assert git_sha(top) == head
+    # The rest of the checkout still counts, the top's own docs/dev-usage.md too.
+    (top / "docs" / "dev-usage.md").write_text("two\n")
+    with pytest.raises(DirtyTreeError):
+        git_sha(forge)
 
 
 @pytest.mark.phase(2)

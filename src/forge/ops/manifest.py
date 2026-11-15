@@ -17,7 +17,7 @@ from forge.core.hashing import canonical_json, sha256_hex
 from forge.core.ids import RunKind, make_run_id
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
-from forge.ops.paths import APPEND_ONLY_LOGS
+from forge.ops.paths import RepoRootNotFound, dev_usage_path, ledger_path
 
 # Mirrors RunManifest.platform; a unit test keeps the two in step.
 Platform = Literal["local-cpu", "local-mps", "kaggle", "colab", "modal"]
@@ -55,7 +55,9 @@ def git_sha(repo: Path | None = None, *, allow_dirty: bool = False) -> str:
     """HEAD's commit in the checkout that holds ``repo`` (by default the current directory).
 
     The dirty check covers that whole checkout, from its top, whichever of its folders
-    ``repo`` is. Raises ``GitError`` when no checkout holds it.
+    ``repo`` is, except the append-only logs where ``forge.ops.paths`` puts them, so a
+    Forge root below the top still leaves them out. Raises ``GitError`` when no checkout
+    holds ``repo``.
     """
     where = Path.cwd() if repo is None else repo
     found = _git(["rev-parse", "--show-toplevel"], where)
@@ -69,7 +71,7 @@ def git_sha(repo: Path | None = None, *, allow_dirty: bool = False) -> str:
     # Untracked files count (whatever status.showUntrackedFiles says): a new module that
     # isn't committed still changes results. The append-only logs don't. Pathspecs are
     # anchored at the top, so where git starts can't narrow the check or move the logs.
-    excludes = [f":(top,exclude){log}" for log in APPEND_ONLY_LOGS]
+    excludes = _log_excludes(top)
     status = _output(["status", "--porcelain", "--untracked-files=all", "--", ":/", *excludes], top)
     if status:
         if not allow_dirty:
@@ -78,6 +80,21 @@ def git_sha(repo: Path | None = None, *, allow_dirty: bool = False) -> str:
             )
         return f"{sha}-dirty"
     return sha
+
+
+def _log_excludes(top: Path) -> list[str]:
+    """Pathspecs that leave out each append-only log the CLI writes (``ledger_path``,
+    ``dev_usage_path``) that is in the checkout at ``top``."""
+    checkout, excludes = top.resolve(), []
+    for log_path in (ledger_path, dev_usage_path):
+        try:
+            log = log_path().resolve()
+        except RepoRootNotFound:
+            # With no Forge root to put it in, the CLI can't have appended to this log.
+            continue
+        if log.is_relative_to(checkout):
+            excludes.append(f":(top,exclude,literal){log.relative_to(checkout).as_posix()}")
+    return excludes
 
 
 def config_hash(config: dict[str, Any]) -> str:
