@@ -33,7 +33,9 @@ Around that call:
 - Each item, the checks above and the evaluator's call alike, runs in a
   ``forge.sql.sandbox.SandboxPool`` worker that is killed when the item takes longer
   than ``item_timeout_s``: the evaluator's own timeout can't stop work inside one row,
-  or its column-permutation search in Python. A killed item is not a match. The
+  or its column-permutation search in Python. A killed item is not a match, and neither
+  is one whose worker crashes (a SQLite fault, or the evaluator's own code): the crash
+  is logged and scoring goes on, rather than one bad item aborting the run. The
   evaluator calls ``asyncio.run`` for every query, which raises inside a running event
   loop such as a notebook cell's; a worker has none.
 
@@ -58,7 +60,7 @@ from test_suite_eval.parse import remove_distinct
 from forge.core.types import ErrorKind
 from forge.data.spider import db_path, resolve_data_dir
 from forge.sql.executor import SqliteExecutor, strip_leading
-from forge.sql.sandbox import SandboxPool, SandboxTimeout
+from forge.sql.sandbox import SandboxError, SandboxPool, SandboxTimeout
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +140,13 @@ def official_exec_match(
                 log.debug(
                     "official EX item %d on %s killed after %g s", number, job.db_id, item_timeout_s
                 )
+                verdicts.append(False)
+            except SandboxError as exc:
+                # A worker that crashed under one item (a SQLite fault, or the evaluator's
+                # own code) must not abort the whole evaluation. Count the item as no
+                # match, as run_many does for a worker death, and go on; the pool has
+                # already started a fresh worker for the next item.
+                log.warning("official EX item %d on %s: %s", number, job.db_id, exc)
                 verdicts.append(False)
     return verdicts
 
