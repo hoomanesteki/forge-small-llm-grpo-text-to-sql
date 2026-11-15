@@ -249,13 +249,17 @@ def write_compare_report(
     data_dir: Path | None = None,
     now: datetime | None = None,
 ) -> Path:
-    """Write run b against run a to ``out``, by default ``eval/compare-<a>.md`` in b's folder.
+    """Write run b against run a to ``out``, by default ``eval/compare-<a>.md`` in b's
+    folder, and return where it went: that file, also for an ``out`` that names it another
+    way.
 
     Raises ``ValueError`` unless both runs answered the same samples of one split.
     """
     data, root = _data(data_dir), runs_root or runs_dir()
     run_a, run_b = _load(a, data, root), _load(b, data, root)
-    path = out or compare_path(run_b, a)
+    default = compare_path(run_b, a)
+    # The file rebuild reads is written, not a copy in the place of a symlink to it.
+    path = default if out is None or _same_file(out, default) else out
     text = render_compare(run_a, run_b, out=path, generated=now or datetime.now(UTC))
     # Run b's lock keeps a second writer of its reports from sharing the temporary file.
     with hold(run_b.stored.paths):
@@ -361,10 +365,11 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
             f"run {a.run_id} answered {split} and run {b.run_id} {b.options.split}; "
             "compare runs on one split"
         )
-    # ``out`` can name the file rebuild checks another way, through '..' or a symlink.
-    # It is still that file, so it is written as rebuild renders it.
+    # ``out`` can name the file rebuild checks another way: through '..', a symlink, or in
+    # other letter case where the file system ignores case. It is rendered as rebuild
+    # renders that file.
     default = compare_path(b, a.run_id)
-    page = default if out.resolve() == default.resolve() else out
+    page = default if _same_file(out, default) else out
     overall = compare(a.stored.scores, b.stored.scores, clusters=a.clusters)
     levels = {
         level: compare(
@@ -658,6 +663,15 @@ def _check_chart(path: Path, rebuilt: bytes) -> Check:
             f"rebuilt: {len(rebuilt):,} bytes, sha256 {hashlib.sha256(rebuilt).hexdigest()}",
         ),
     )
+
+
+def _same_file(path: Path, other: Path) -> bool:
+    """Whether ``path`` names the file ``other`` does: the same file where both exist,
+    as ``os.path.samefile`` sees through letter case on a file system that ignores it, and
+    otherwise the same path once both are resolved."""
+    if path.exists() and other.exists():
+        return os.path.samefile(path, other)
+    return path.resolve() == other.resolve()
 
 
 def _software(png: bytes) -> str | None:

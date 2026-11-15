@@ -532,10 +532,56 @@ def test_compare_report_out_can_name_its_default_path(runs: Path, tmp_path: Path
         link / "tuned" / "eval" / "compare-base.md",
     ):
         default.unlink()
-        assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == out
+        assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == default
         assert default.read_text() == text
         assert [(c.path, c.diff) for c in rebuild("tuned", runs_root=runs)][2:] == [(default, ())]
     assert root / "eval" / "compare-base.md" == default
+
+    # An out that is a symlink to that file writes the file itself, and the link stays.
+    out = tmp_path / "elsewhere" / "my-compare.md"
+    out.parent.mkdir()
+    out.symlink_to(default)
+    assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=LATER) == default
+    assert out.is_symlink()
+    assert out.resolve() == default.resolve()
+    later = default.read_text()
+    assert "\nGenerated: 2026-12-01 18:45:12 UTC\n" in later
+    assert later.replace("2026-12-01 18:45:12", "2026-11-15 09:30:00") == text
+    assert [(c.path, c.diff) for c in rebuild("tuned", runs_root=runs)][2:] == [(default, ())]
+    assert sorted(path.name for path in out.parent.iterdir()) == ["my-compare.md"]
+
+
+def _ignores_case(folder: Path) -> bool:
+    probe = folder / "case-probe"
+    probe.touch()
+    try:
+        return (folder / "CASE-PROBE").exists()
+    finally:
+        probe.unlink()
+
+
+@pytest.mark.phase(2)
+def test_compare_report_out_in_other_letter_case_is_its_default_path(
+    runs: Path, tmp_path: Path
+) -> None:
+    if not _ignores_case(tmp_path):
+        pytest.skip(f"{tmp_path} is on a file system that tells letter case apart")
+    _store(runs, "base", dict.fromkeys(VAL, RIGHT))
+    _store(runs, "tuned", MIXED, model="tuned")
+    write_run_report("tuned", runs_root=runs, now=AT)
+    default = write_compare_report("base", "tuned", runs_root=runs, now=AT)
+    text = default.read_text()
+    # Where the file system ignores case, this out is the default file, so it says rebuild
+    # checks it and is rendered as rebuild renders it.
+    out = runs / "TUNED" / "eval" / "Compare-Base.md"
+    assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == default
+    assert default.read_text() == text
+    # The file keeps its name, so rebuild still finds the compare report of run base.
+    assert sorted(path.name for path in default.parent.glob("*.md")) == [
+        "compare-base.md",
+        "val-report.md",
+    ]
+    assert [(c.path, c.diff) for c in rebuild("tuned", runs_root=runs)][2:] == [(default, ())]
 
 
 @pytest.mark.phase(2)
