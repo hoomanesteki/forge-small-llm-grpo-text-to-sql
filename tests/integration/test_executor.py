@@ -192,15 +192,19 @@ def test_run_many_keeps_order_across_workers(executor: SqliteExecutor) -> None:
         ("dorm_1", "SELECT 1; SELECT 2"),
         (DB, _counting(30)),
     ] * 4
-    inline = executor.run_many(items, workers=1, timeout_ms=100, max_rows=20)
-    pooled = executor.run_many(items, workers=2, timeout_ms=100, max_rows=20)
+    one = executor.run_many(items, workers=1, timeout_ms=100, max_rows=20)
+    two = executor.run_many(items, workers=2, timeout_ms=100, max_rows=20)
 
     def outcome(result: Any) -> tuple[Any, ...]:
         return (result.ok, result.error_kind, result.columns, result.rows, result.truncated)
 
-    assert [outcome(r) for r in pooled] == [outcome(r) for r in inline]
-    assert [r.error_kind for r in inline[:6]] == [None, None, "denied", "timeout", "denied", None]
-    assert inline[5].truncated
+    # The same as running them here, one at a time.
+    assert [outcome(r) for r in one] == [
+        outcome(executor.run(*item, timeout_ms=100, max_rows=20)) for item in items
+    ]
+    assert [outcome(r) for r in two] == [outcome(r) for r in one]
+    assert [r.error_kind for r in one[:6]] == [None, None, "denied", "timeout", "denied", None]
+    assert one[5].truncated
 
     # A worker's error reaches the caller rather than becoming a result.
     with pytest.raises(DataNotFound, match="no_such_db"):

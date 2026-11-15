@@ -1,8 +1,8 @@
 """The integrity invariants of plan section 4, run at every gate.
 
 I1: no ``db_id`` is in more than one split, and training code raises on val or dev.
-I2: running any SQL leaves every database file byte-identical, and non-SELECT statements
-are denied.
+I2: running any SQL leaves every database file byte-identical, killed workers included, and
+non-SELECT statements are denied.
 I5: the fast comparator agrees with the official evaluator on at least 98% of predictions.
 """
 
@@ -38,7 +38,10 @@ from forge.data.splits import (
 from forge.eval.agreement import AGREEMENT_TARGET, agreement_mutations, agreement_rate, score
 from forge.eval.mutations import CHANGES
 from forge.eval.testsuite import official_exec_match
+from forge.sql import sandbox
 from forge.sql.executor import SqliteExecutor
+from forge.sql.sandbox import SandboxPool
+from tests.sandbox_jobs import review_query, run_with_fg191_limits
 
 
 @pytest.mark.phase(1)
@@ -217,6 +220,14 @@ def test_i2_db_files_unchanged(
     assert not mismatches, mismatches[:5]
     counts = Counter(got)
     assert counts[None] > 100 and counts["denied"] > 600, counts
+
+    # Workers killed in the middle of a query, one on each database, leave no trace either.
+    databases = sorted({db_id for db_id, _, _ in targets})
+    monkeypatch.setattr(sandbox, "_run_job", run_with_fg191_limits)
+    with SandboxPool(len(databases), data_dir=spider_mini) as pool:
+        killed = pool.run_many([(db_id, review_query(100)) for db_id in databases], timeout_ms=50)
+        assert all((r.error or "").startswith("killed after") for r in killed), killed
+        assert pool.restarts == len(databases)
 
     assert _file_hashes(spider_mini / "database") == before
     assert list(tmp_path.iterdir()) == []

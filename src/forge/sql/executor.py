@@ -30,6 +30,11 @@ Each failure comes back as an ``ExecResult`` with an ``ErrorKind``:
 - ``empty_sql``: nothing but whitespace, comments and semicolons.
 - ``other``: any other error, such as an unknown function, a ``?`` placeholder, a value
   or SQL text over a limit, or rows whose values pass ``MAX_RESULT_BYTES``.
+
+So the deadline of ``run`` is soft, and ``run`` is for trusted SQL: gold queries, schema
+reads, tests. Untrusted SQL, anything a model wrote, goes through ``run_many`` or a
+``forge.sql.sandbox.SandboxPool``, whose worker processes are killed at a hard deadline
+(ADR-0014).
 """
 
 from __future__ import annotations
@@ -39,8 +44,6 @@ import sqlite3
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import get_context
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import Any, Protocol, Self
@@ -338,36 +341,19 @@ class SqliteExecutor:
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         max_rows: int = DEFAULT_MAX_ROWS,
     ) -> list[ExecResult]:
-        """Run ``(db_id, sql)`` pairs across ``workers`` processes; results keep their order.
+        """Run ``(db_id, sql)`` pairs in a ``SandboxPool`` of ``workers`` processes.
 
-        Each item gets its own ``timeout_ms``, enforced by ``run`` wherever it runs. One
-        worker runs them here, on this executor's connections. More start a process pool
-        with the spawn method on every platform, because forking a process that holds
-        SQLite connections (or CUDA, in a trainer) is unsafe. Each worker builds its own
-        executor from the data directory, so only that path and the queries go to the
-        workers, and plain ``ExecResult`` values come back. Spawn imports the calling
-        script again in each worker, so a script must call this under
-        ``if __name__ == "__main__":``.
+        Results keep their order. This is the path for untrusted SQL: each query has a
+        hard deadline, ``timeout_ms`` plus ``forge.sql.sandbox.KILL_GRACE_MS``, after
+        which its worker is killed. The pool lives for this call only; code that runs
+        batches again and again keeps its own ``SandboxPool``.
         """
+        # Imported here because the sandbox builds on this module.
+        from forge.sql.sandbox import SandboxPool
+
         check_run_args(timeout_ms, max_rows)
-        if workers < 1:
-            raise ValueError(f"workers must be at least 1, got {workers}")
-        if workers == 1:
-            return [
-                self.run(db_id, sql, timeout_ms=timeout_ms, max_rows=max_rows)
-                for db_id, sql in items
-            ]
-        jobs = [(db_id, sql, timeout_ms, max_rows) for db_id, sql in items]
-        # Big enough chunks to keep pickling overhead down, small enough to share the
-        # work evenly when some queries run to their timeout.
-        chunksize = max(1, len(jobs) // (workers * 8))
-        with ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=get_context("spawn"),
-            initializer=_start_worker,
-            initargs=(self.data_dir,),
-        ) as pool:
-            return list(pool.map(_run_job, jobs, chunksize=chunksize))
+        with SandboxPool(workers, data_dir=self.data_dir) as pool:
+            return pool.run_many(items, timeout_ms=timeout_ms, max_rows=max_rows)
 
     def close(self) -> None:
         for conn in self._connections.values():
@@ -431,19 +417,3 @@ def check_run_args(timeout_ms: int, max_rows: int) -> None:
 
 def _ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000
-
-
-# Pool workers: each process builds one executor in _start_worker and keeps it.
-_worker: SqliteExecutor | None = None
-
-
-def _start_worker(data_dir: Path) -> None:
-    global _worker
-    _worker = SqliteExecutor(data_dir)
-
-
-def _run_job(job: tuple[str, str, int, int]) -> ExecResult:
-    if _worker is None:
-        raise RuntimeError("_run_job runs only in a pool started by SqliteExecutor.run_many")
-    db_id, sql, timeout_ms, max_rows = job
-    return _worker.run(db_id, sql, timeout_ms=timeout_ms, max_rows=max_rows)
