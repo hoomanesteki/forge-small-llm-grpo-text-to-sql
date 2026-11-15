@@ -23,8 +23,8 @@ from forge.data.manifest import data_manifest_hash
 from forge.data.spider import load_raw
 from forge.data.splits import split_examples
 from forge.eval.config import EvalConfig
-from forge.eval.metrics import Rate, gold_clusters, summarize
-from forge.eval.report import load_run, write_run_report
+from forge.eval.metrics import Estimate, Rate, compare, gold_clusters, summarize
+from forge.eval.report import load_run, write_compare_report, write_run_report
 from forge.eval.run_files import RunCorrupt, RunUnfinished
 from forge.ops.dev_usage import log_dev_use, read_uses
 from forge.ops.manifest import config_hash
@@ -166,6 +166,10 @@ def _clusters() -> dict[str, str]:
     return gold_clusters(e for e in split_examples(load_raw())["val"] if e.id in VAL)
 
 
+def _official(root: Path) -> Rate | None:
+    return summarize(_scores(root), clusters=_clusters()).ex_official
+
+
 def _pct(share: float) -> str:
     return f"{100 * share:.1f}%"
 
@@ -173,6 +177,14 @@ def _pct(share: float) -> str:
 def _ci(rate: Rate | None) -> str:
     assert rate is not None
     return f"{_pct(rate.value)} [{_pct(rate.low)}, {_pct(rate.high)}]"
+
+
+def _signed(change: float) -> str:
+    return f"{round(100 * change, 1) + 0.0:+.1f}"
+
+
+def _change(change: Estimate) -> str:
+    return f"{_signed(change.value)} [{_signed(change.low)}, {_signed(change.high)}]"
 
 
 def _section(text: str, heading: str) -> str:
@@ -282,6 +294,100 @@ def test_report_renders_from_scores(runs: Path) -> None:
     # No Software text chunk, so the bytes don't name matplotlib's version.
     assert _png_chunks(chart) == [b"IHDR", b"pHYs", b"IDAT", b"IEND"]
     assert struct.unpack(">II", chart[16:24]) == (640, 360)
+
+
+@pytest.mark.phase(2)
+def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
+    # Official EX in run a and run b: 8 right in both, 1 only in a, 9 only in b, and 2
+    # in neither. Run a fails with 1 syntax error and 10 wrong filters, run b on values.
+    _store(runs, "base", dict(zip(VAL, [RIGHT] * 9 + [SYNTAX] + [WHERE] * 10, strict=True)))
+    tuned = [RIGHT] * 8 + [VALUE] + [RIGHT] * 9 + [VALUE] * 2
+    root = _store(runs, "tuned", dict(zip(VAL, tuned, strict=True)), model="tuned")
+    path = write_compare_report("base", "tuned", runs_root=runs, now=AT)
+    assert path == root / "eval" / "compare-base.md"
+    text = path.read_text()
+
+    comparison = compare(_scores(runs / "base"), _scores(root), clusters=_clusters())
+    assert comparison.metric == "ex_official"
+    assert comparison.delta.value == pytest.approx(0.4)
+    # The exact binomial test on the 10 discordant pairs: 2 * (1 + 10) / 2**10.
+    assert comparison.mcnemar.pvalue == pytest.approx(0.021484375)
+    delta = comparison.delta
+    assert text.startswith(
+        "# Official EX on val, run b against run a: +40.0 points "
+        f"[{_signed(delta.low)}, {_signed(delta.high)}], McNemar p = 0.0215\n"
+    )
+    assert "\n| Run | `base` | `tuned` |\n| Model | `gold` | `tuned` |\n" in text
+    links = "[manifest.json](../../base/manifest.json) | [manifest.json](../manifest.json)"
+    assert f"| Manifest | {links} |" in text
+
+    mcnemar = _section(text, "McNemar's test")
+    assert "| run a right | 8 | 1 |\n| run a wrong | 9 | 2 |" in mcnemar
+    assert "disagree on 10 of 20 questions: run b alone is right on 9, run a alone on 1." in (
+        mcnemar
+    )
+    assert "Exact two-sided McNemar test: p = 0.0215." in mcnemar
+
+    accuracy = _section(text, "Execution accuracy")
+    rates = f"{_ci(_official(runs / 'base'))} | {_ci(_official(root))}"
+    assert f"| official EX | {rates} | {_change(delta)} |" in accuracy
+
+    hardness = _section(text, "By hardness")
+    for level in ("easy", "medium", "hard", "extra"):
+        on_level = compare(
+            [score for score in _scores(runs / "base") if score.hardness == level],
+            [score for score in _scores(root) if score.hardness == level],
+            clusters=_clusters(),
+        )
+        row = f"| {level} | 5 | {_pct(on_level.ex_a)} | {_pct(on_level.ex_b)} |"
+        assert f"{row} {_change(on_level.delta)} |" in hardness
+
+    classes = _section(text, "By error class")
+    for row in (
+        "| no_sql | 0 | 0 | +0 |",
+        "| syntax | 1 | 0 | -1 |",
+        "| where | 10 | 0 | -10 |",
+        "| value | 0 | 3 | +3 |",
+    ):
+        assert f"\n{row}\n" in classes
+    assert "unclassified" not in classes
+
+    # Written elsewhere, its links work from there.
+    out = tmp_path / "docs" / "base-vs-tuned.md"
+    assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == out
+    elsewhere = out.read_text()
+    links = (
+        "[manifest.json](../runs/base/manifest.json) | [manifest.json](../runs/tuned/manifest.json)"
+    )
+    assert f"| Manifest | {links} |" in elsewhere
+    assert _section(elsewhere, "McNemar's test") == mcnemar
+
+
+@pytest.mark.phase(2)
+def test_compare_with_several_samples_has_no_pvalue(runs: Path) -> None:
+    _store(runs, "base", dict.fromkeys(VAL, NO_SQL), samples=2)
+    _store(runs, "tuned", dict.fromkeys(VAL, RIGHT), samples=2)
+    text = write_compare_report("base", "tuned", runs_root=runs, now=AT).read_text()
+    assert text.startswith(
+        "# Official EX on val, run b against run a: +100.0 points [+100.0, +100.0]\n"
+    )
+    assert "| Generation | sampled at temperature 0.7, top-p 1, seed 0, at most 256" in text
+    assert "Both runs answered the same 20 questions of val, 2 samples each" in text
+    assert "| run a right | 0 | 0 |\n| run a wrong | 40 | 0 |" in text
+    assert "The runs disagree on 40 of 40 samples" in text
+    assert "There is no p-value: each question has several samples" in text
+
+
+@pytest.mark.phase(2)
+def test_compare_needs_the_same_samples(runs: Path) -> None:
+    _store(runs, "base", dict.fromkeys(VAL, RIGHT))
+    _store(runs, "fewer", dict.fromkeys(VAL[:10], RIGHT))
+    _store(runs, "train", {"spider-train-00000": RIGHT}, split="train")
+    with pytest.raises(ValueError, match="scored different samples, so they can't be paired"):
+        write_compare_report("base", "fewer", runs_root=runs)
+    with pytest.raises(ValueError, match="run base answered val and run train train"):
+        write_compare_report("base", "train", runs_root=runs)
+    assert not list((runs / "fewer" / "eval").glob("compare-*"))
 
 
 @pytest.mark.phase(2)
