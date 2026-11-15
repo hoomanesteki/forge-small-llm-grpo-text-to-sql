@@ -54,7 +54,6 @@ pending:
     blocked_on:
       - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
       - both datasets published once (FG-302's pending publish)
-      - the vllm backend (FG-306), which an eval job on a T4 runs with
     how: docs/runbook.md, "Kaggle jobs", with an eval config of 50 val questions (limit 50, backend vllm)
     fills:
       - the FG-303 PR description, the push, wait and output of the job (acceptance criterion 4)

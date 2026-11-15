@@ -16,6 +16,7 @@ import httpx2
 import pytest
 from huggingface_hub.errors import HfHubHTTPError, RemoteEntryNotFoundError
 
+from forge.core.types import Example
 from forge.sql.executor import SqliteExecutor
 
 
@@ -99,6 +100,18 @@ class FakeLoRARequest:
 
 # A fake model: (the prompt as the engine decodes it, sample index) -> reply text.
 VllmReply = Callable[[str, int], str]
+
+
+def gold_reply(examples: Sequence[Example]) -> VllmReply:
+    """A ``VllmReply`` that answers each question with its gold query in a sql block, by
+    the question the prompt ends with."""
+    gold = {" ".join(example.question.split()): example.gold_sql for example in examples}
+
+    def reply(text: str, sample_idx: int) -> str:
+        question = text.rsplit("Question:", 1)[-1].rsplit("<|assistant|>", 1)[0].strip()
+        return f"```sql\n{gold[question]}\n```"
+
+    return reply
 
 
 @dataclass

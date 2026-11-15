@@ -116,6 +116,16 @@ marks a manifest left `running` as failed. It exits 0 even when the job fails, s
 kernel that ends in an error might not keep its output, so a COMPLETE kernel is not yet a
 finished job: `forge kaggle wait` reads `status.json` and exits 0 only for `finished`.
 
+vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
+(`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the
+GPU's memory, and LoRA (rank up to 64) only when the config names an `adapter`, a folder or
+a Hub repo fetched at its `@revision`. Qwen3 prompts go through `LLM.chat` with thinking off;
+other templates are rendered by `render_chat`, as on the laptop. Decoding takes only the
+config's settings, never a checkpoint's `generation_config.json` defaults, and each question
+has a seed of its own. The preflight and the job share one engine, loaded once, since a
+second might not fit beside the first. `forge eval run --backend vllm` on the laptop is
+refused: its manifest would call a GPU run `local-cpu` (ADR-0016).
+
 Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
 kernel, which only the web editor can do. Without them the job still runs, nothing is
 uploaded, and `forge kaggle output <run_id>` is how its results come back: the run's files

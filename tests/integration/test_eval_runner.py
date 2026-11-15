@@ -33,7 +33,7 @@ from forge.ops.hub import LocalRunStore
 from forge.ops.ledger import run_hours
 from forge.ops.manifest import accelerator
 from forge.ops.timeguard import Deadline
-from tests.fakes import WordTokenizer
+from tests.fakes import FakeVllm, WordTokenizer, gold_reply
 from tests.report_trace import untraced
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -296,12 +296,14 @@ def test_dev_requires_reason(
     assert "error: --split dev needs --reason" in refused.stderr
     blank = cli_runner.invoke(cli.app, [*dev, "--reason", "  "])
     assert blank.exit_code == 1 and "needs --reason" in blank.stderr
-    # A backend that isn't built yet is refused before dev is read, so it spends no look.
-    later = cli_runner.invoke(
-        cli.app,
-        [*dev[:2], "--model", "some/model", "--backend", "vllm", "--split", "dev", "--reason", "x"],
-    )
-    assert later.exit_code == 1 and "comes with FG-306" in later.stderr
+    # A backend that isn't built yet, or can't run here, is refused before dev is read, so
+    # it spends no look.
+    for backend, message in (("llamacpp", "comes with FG-702"), ("vllm", "runs on a CUDA GPU")):
+        refused_backend = cli_runner.invoke(
+            cli.app,
+            [*dev[:2], "--model", "org/m", "--backend", backend, "--split", "dev", "--reason", "x"],
+        )
+        assert refused_backend.exit_code == 1 and message in refused_backend.stderr
     assert not dev_log.exists()
     assert not runs.exists()
 
@@ -453,8 +455,11 @@ def test_time_guard_stops_between_batches_then_resumes(
 def test_later_options_are_refused_up_front(spider_mini: Path, runs: Path) -> None:
     cli_runner = CliRunner()
     for options, message in (
-        (["--backend", "vllm"], "the vllm backend is not available yet: it comes with FG-306"),
-        (["--backend", "llamacpp"], "comes with FG-702"),
+        (
+            ["--backend", "llamacpp"],
+            "the llamacpp backend is not available yet: it comes with FG-702",
+        ),
+        (["--backend", "vllm"], "backend vllm runs on a CUDA GPU, which Forge uses in kernel jobs"),
         (["--n", "2"], "needs a temperature above 0"),
         (["--run-id", "../escape"], "names a folder"),
     ):
@@ -516,6 +521,41 @@ def test_hf_backend_is_built_from_the_options(
     assert not dev_log.exists()
     failed = RunManifest.model_validate_json((runs / "no-model" / "manifest.json").read_bytes())
     assert failed.status == "failed"
+
+
+@pytest.mark.phase(3)
+def test_vllm_backend_is_built_from_the_options(
+    spider_mini: Path, runs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # vLLM faked: a kernel job's eval, from the config to stored scores, off the GPU.
+    vllm = FakeVllm(gold_reply(_val())).install(monkeypatch)
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    config = EvalConfig(
+        model="org/model@abc123",
+        adapter=str(adapter),
+        backend="vllm",
+        limit=3,
+        run_id="vllm",
+        host="kaggle",
+    )
+    run = run_eval(config, allow_dirty=True, workers=1)
+
+    [engine] = vllm.engines
+    assert (engine["model"], engine["revision"], engine["dtype"]) == ("org/model", "abc123", "half")
+    assert engine["enable_lora"] is True
+    manifest, generations, scores = _stored(runs / "vllm")
+    assert (manifest.status, manifest.platform, manifest.config["backend"]) == (
+        "finished",
+        "kaggle",
+        "vllm",
+    )
+    assert (manifest.model_ref, manifest.adapter_ref) == ("org/model@abc123", str(adapter))
+    # Prompts were measured with the engine's tokenizer, and vLLM counted what it was sent.
+    measured = [kwargs for _, kwargs in vllm.tokenizer.calls if kwargs.get("tokenize", True)]
+    assert len(measured) == 3 and all(kwargs["add_generation_prompt"] for kwargs in measured)
+    assert [g.tokens_in for g in generations] == [len(text.split()) for text in vllm.prompts]
+    assert all(s.ex_fast and s.ex_official for s in scores) and len(run.scores) == 3
 
 
 @pytest.mark.phase(2)
