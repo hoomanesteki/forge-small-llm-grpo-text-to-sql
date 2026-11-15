@@ -29,7 +29,10 @@ def _encode(obj: Any) -> Any:
             raise TypeError(f"cannot hash a set of mixed types: {obj!r}") from exc
     model_dump = getattr(obj, "model_dump", None)
     if callable(model_dump):
-        return model_dump(mode="json")
+        # Python mode, so the fields come back through these same branches: JSON mode
+        # writes a UTC datetime with "Z" where isoformat gives "+00:00", and a model
+        # would hash unlike its own model_dump().
+        return model_dump()
     raise TypeError(f"{type(obj).__name__} is not JSON-serializable for hashing")
 
 
