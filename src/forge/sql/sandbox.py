@@ -3,7 +3,8 @@
 ``SqliteExecutor.run`` stops a query from inside the process, and SQLite only looks at
 its progress handler and interrupt flag at VM loop jumps, so it can't stop work packed
 into one row: under FG-191's limits a one-row ``SELECT`` adding up 100 ``instr`` calls on
-a 99 kB string ran 8.7 s against a 300 ms timeout. A ``SandboxPool`` keeps a few
+a 99 kB string ran for seconds against a 300 ms timeout, and today's limits keep each call
+small but not the number of calls in a row (ADR-0014). A ``SandboxPool`` keeps a few
 long-lived worker processes, each with its own ``SqliteExecutor``, and sends each one
 job at a time over a pipe. A job still running ``KILL_GRACE_MS`` past its deadline gets
 its worker killed with SIGKILL, comes back as a ``timeout``, and a fresh worker starts

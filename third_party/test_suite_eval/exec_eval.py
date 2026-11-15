@@ -44,7 +44,9 @@ LIMITS = {
 }
 # Forge: exec_on_db_ reads a result in batches and gives up past MAX_ROWS rows or
 # MAX_RESULT_BYTES of row objects, counted as forge.sql.executor counts them, where
-# upstream's fetchall kept everything. Spider's largest gold result is 20,662 rows.
+# upstream's fetchall kept everything. Run as eval_exec_match runs it, with DISTINCT
+# removed, Spider's largest gold result is 93,475 rows and 10.3 MB (a soccer_1 training
+# question); the largest in val is 10,507 rows and in dev 20,662.
 MAX_ROWS = 100_000
 MAX_RESULT_BYTES = 64 * 2**20
 MAX_VALUE_SIZE = 4 * LIMITS[sqlite3.SQLITE_LIMIT_LENGTH] + sys.getsizeof("\U00010000")

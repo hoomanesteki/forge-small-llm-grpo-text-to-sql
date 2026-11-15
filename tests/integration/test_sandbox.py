@@ -41,8 +41,8 @@ def _timed(
 def test_pool_kills_queries_that_overrun_inside_one_row(
     spider_mini: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The hard deadline on its own: with FG-191's limits these ran 8.7 s and 18.5 s on the
-    # laptop in process, against 300 ms and 2,000 ms timeouts.
+    # The hard deadline on its own: with FG-191's limits these run for seconds in process,
+    # against 300 ms and 2,000 ms timeouts (ADR-0014).
     monkeypatch.setattr(sandbox, "_run_job", jobs.run_with_fg191_limits)
     caplog.set_level(logging.DEBUG, logger="forge.sql.sandbox")
     with SandboxPool(2) as pool:
