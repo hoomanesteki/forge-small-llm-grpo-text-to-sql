@@ -222,8 +222,6 @@ def check_config(config: EvalConfig) -> None:
             f"the {config.backend} backend is not available yet: it comes with "
             f"{LATER_BACKENDS[config.backend]}"
         )
-    if config.store == "hub":
-        raise NotAvailable("--store hub is available after FG-304 (Hub run store)")
 
 
 def check_run_id(run_id: str) -> None:

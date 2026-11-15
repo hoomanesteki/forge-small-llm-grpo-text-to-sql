@@ -46,7 +46,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-301 | Spike: Kaggle, Unsloth and vLLM on a T4 | 3 | blocked: needs Kaggle account (phone verified) and API token |  |  | Built on CPU: the kernel metadata template and `check_kernel_metadata`, the self-contained spike `kaggle/spike/throughput.py` (env, secrets, downloads, installs, vLLM fp16 and GRPO benches, session-limit probe) and its bundler, candidate pins in `kaggle/requirements-gpu.txt`, `docs/spikes/kaggle-gpu.md` (research with sources; nothing measured), ADR-0005, ADR-0006 (proposed). Pending: the GPU session, its ledger row and the section 3.8 budget update (`docs/runs/pending.yaml`) |
 | FG-302 | Code and data packaging as Kaggle datasets | 3 | blocked: the real publish needs a Kaggle account, an API token and `FORGE_KAGGLE_USER` |  |  | Built and tested with the CLI mocked: `KaggleClient` runs kaggle as argument lists, `forge kaggle publish-code` (wheel at a clean HEAD, pinned `requirements-gpu.txt`, `GIT_SHA`; `version -m <sha> -r zip`, or `create` the first time) and `publish-data` (the 170 verified Spider files and `spider.sha256` as `<owner>/forge-spider`, CC BY-SA 4.0 attribution and citation, uploaded once). Both private, never `-u`. Pending: one real publish of each, output for the PR (`docs/runs/pending.yaml`). No `publish-wheels`: FG-301 hasn't measured install times |
 | FG-303 | Kaggle job runner CLI | 5 | blocked: the real 50-question eval job needs a phone-verified Kaggle account with an API token and `FORGE_KAGGLE_USER`, both datasets published, and the vllm backend (FG-306) |  |  | Built and tested with the kaggle CLI mocked: `forge kaggle run` (smoke marker and clean tree, config checked as the kernel will, code dataset pinned by version with HEAD's `GIT_SHA` or published, ledger and `kaggle quota` budget with `--allow-over-budget` in the eval run's config, confirm, T4 push with a timeout of the estimate and half again, `runs/<run_id>/kernels.json`, `--resume`, `--job spike`, `--emit-notebook`), `status`, `logs`, `wait` and `output`; `kaggle/entry.py` (env, code, install, data, secrets, preflight, job, upload; `status.json` always); `ops` section in eval configs; `code_sha` from `FORGE_CODE_SHA` outside a checkout; Python 3.13 in CI. Pending: the real job (`docs/runs/pending.yaml`) |
-| FG-304 | Hub run store and resume | 5 | todo |  |  |  |
+| FG-304 | Hub run store and resume | 5 | done |  |  | `forge.ops.hub`: `RunStore` (plan 3.5's methods plus `put_folder`, `runs` and `prune_checkpoints`), `LocalRunStore` and `HubRunStore` on the private model repo through huggingface_hub 2.4 (`upload_file`, `upload_folder`, `list_repo_files`, `hf_hub_download`, `snapshot_download`, `delete_files`), each call tried 3 more times, 2, 4 and 8 s apart, on network errors; `latest_checkpoint` by step number; retention keeps the latest 2 `step-NNNNNN` and `best/`; `forge runs list|show|pull|push`, `pull --store kaggle` being `forge kaggle output`; `forge eval run --store hub` fetches an earlier attempt to resume and stores the run when it ends; the kernel's upload stage goes through the store. Tested with the Hub client faked; no real Hub call yet, as the account doesn't exist (FG-303's pending job makes the first) |
 | FG-305 | Time guard and automatic ledger rows | 3 | todo |  |  |  |
 | FG-306 | vLLM inference backend | 3 | todo |  |  |  |
 | FG-307 | GPU baselines and model choice | 3 | todo |  |  |  |
@@ -700,3 +700,19 @@ Work discovered along the way that is not a plan story.
 - The entry script exits 0 when its job fails, as the spike does, because a kernel that ends in
   an error might not keep its output. `forge kaggle wait` therefore reads the run's `status.json`
   after `COMPLETE`, and exits 0 only for `finished` (FG-303).
+- `upload_folder` only adds files, so a finished run's Hub copy kept its failed attempt's
+  `error.txt`. `put_folder(..., replace=True)` passes `delete_patterns` and is used where the
+  folder holds the whole run: the end of `forge eval run --store hub` and `forge runs push`. The
+  kernel's upload stage only adds, since a kernel that failed early may hold part of a run (FG-304).
+- With hf_xet installed, huggingface_hub 2.4's `upload_folder` commits a large folder in parts
+  (256 files a commit to start, and a commit at least every 5 minutes while files go up), so a
+  folder is one commit only while it is small, as runs and LoRA checkpoints are. Calling it again
+  resumes (FG-304).
+- huggingface_hub reports a failed LFS or Xet upload as a bare `RuntimeError` (it wraps the cause),
+  so the run store retries `RuntimeError` along with transport errors, 408, 429 and 5xx (FG-304).
+- `RunStore` has three methods beyond plan 3.5's five, and takes `str | Path` for local paths.
+  FG-305's time guard and FG-504 should push a checkpoint with `put_folder(run_id, folder,
+  checkpoint_dir(step))`, then call `prune_checkpoints(run_id)` (FG-304).
+- The kernel writes `status.json` after its upload stage, so a run pulled from the Hub has none;
+  `forge kaggle wait` reads it from the kernel output. FG-305's ledger row comes from the manifest,
+  which the Hub copy has (FG-304).

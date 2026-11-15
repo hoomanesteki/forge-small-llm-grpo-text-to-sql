@@ -389,7 +389,13 @@ def eval_run(
         str | None,
         typer.Option("--run-id", help="Name the run, or resume the run of that name."),
     ] = None,
-    store: Annotated[StoreName, typer.Option(help="Where the run's files go.")] = "local",
+    store: Annotated[
+        StoreName,
+        typer.Option(
+            help="local keeps the run's files in runs/ only; hub also puts them in the Hub run "
+            "store (FORGE_RUN_STORE) when the run ends, and resumes a run from it."
+        ),
+    ] = "local",
     # Left out of the manifest: how many processes run the SQL changes no score.
     workers: Annotated[
         int | None,
@@ -410,7 +416,9 @@ def eval_run(
     runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
     eval/<split>-generations.jsonl and -scores.jsonl. With --retry 1,
     eval/<split>-first-tries.jsonl keeps the first reply of each retried sample, and the
-    generations file holds the reply each score is for. Exits 1 if the run fails.
+    generations file holds the reply each score is for. With --store hub the folder also
+    goes to the Hub run store when the run ends, finished or failed, and a --run-id that
+    runs/ lacks is fetched from it to resume. Exits 1 if the run fails.
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
@@ -476,6 +484,8 @@ def eval_run(
         f"backend {backend}, model {model}" + (f", adapter {adapter}" if adapter else "")
     )
     typer.echo(f"platform {run.manifest.platform}")
+    if run.stored:
+        typer.echo(f"run store {run.stored}: runs/{run.manifest.run_id}")
     if run.resumed:
         typer.echo(f"resumed: {run.resumed} scores were stored by an earlier attempt")
     if len(scores) > run.resumed:

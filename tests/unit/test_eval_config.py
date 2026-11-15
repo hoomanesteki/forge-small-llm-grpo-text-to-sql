@@ -65,7 +65,6 @@ BASE = EvalConfig(model="org/model")
         ({"n": 4}, ValueError, "n=4 needs a temperature above 0"),
         ({"backend": "vllm"}, NotAvailable, "the vllm backend is not available yet"),
         ({"backend": "llamacpp"}, NotAvailable, "comes with FG-702"),
-        ({"store": "hub"}, NotAvailable, "--store hub is available after FG-304"),
     ],
 )
 def test_config_refused_before_anything_runs(

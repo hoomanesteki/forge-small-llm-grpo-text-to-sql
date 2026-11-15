@@ -27,6 +27,9 @@ A run evaluates one model on one split:
    database's columns, which are read in process like gold.
 9. Each batch's first tries, generations and scores are stored before the next batch
    starts.
+10. With a run store (``--store hub``), an earlier attempt's files come from it when
+    this machine has none, and the run's folder goes to it when the run ends, finished
+    or failed (``forge.ops.hub``).
 
 The options and their checks are ``forge.eval.config``; the run's folder, its manifest
 and how a killed run resumes are ``forge.eval.run_files``.
@@ -63,6 +66,7 @@ from forge.eval.run_files import Key, RunFiles, RunPaths, finish, hold, key, sta
 from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
+from forge.ops.hub import RunNotFound, RunStore, hub_store
 from forge.ops.manifest import CODE_SHA_ENV, build_manifest
 from forge.ops.paths import RepoRootNotFound, cache_dir, repo_root, runs_dir
 from forge.sql.executor import SqliteExecutor
@@ -87,6 +91,7 @@ class EvalRun:
     # share its time as latency_ms, so summing the generations would count a batch once
     # per row.
     generate_s: float
+    stored: str | None = None  # the run store that holds the run's folder, by name
 
 
 class _TimedBackend:
@@ -139,13 +144,16 @@ def run_eval(
     workers: int = WORKERS,
     batch_size: int = BATCH_SIZE,
     progress: Callable[[int, int], None] | None = None,
+    store: RunStore | None = None,
 ) -> EvalRun:
     """Evaluate as ``config`` says, storing everything as the module docstring describes.
 
     ``backend`` replaces the one ``config`` names, such as a ``FakeBackend(fn)`` in a
     test; ``count_tokens`` measures its prompts, and counts words by default.
-    ``progress`` is called after each batch with the scores stored and the total.
-    Raises ``DirtyTreeError`` on uncommitted changes unless ``allow_dirty``.
+    ``store`` likewise replaces the run store ``config.store`` names, ``hub_store()`` for
+    ``hub``. ``progress`` is called after each batch with the scores stored and the total.
+    Raises ``DirtyTreeError`` on uncommitted changes unless ``allow_dirty``, and
+    ``OSError`` when a finished run can't be stored.
     """
     check_config(config)
     if batch_size < 1:
@@ -163,8 +171,12 @@ def run_eval(
         repo=_code_root(),
         data_dir=root,
     )
+    if store is None and config.store == "hub":
+        store = hub_store()
     paths = RunPaths((runs_root or runs_dir()) / fresh.run_id, config.split)
     with hold(paths):
+        if store is not None and not paths.manifest.is_file():
+            _fetch_earlier(store, paths)
         manifest = start(paths, fresh)
         try:
             questions, files, generate_s = _evaluate(
@@ -182,9 +194,48 @@ def run_eval(
         except BaseException as exc:
             # KeyboardInterrupt too: a run stopped by hand is failed, not still running.
             finish(paths, manifest, exc)
+            if store is not None:
+                _store_failed(store, paths)
             raise
         final = finish(paths, manifest, None)
-    return EvalRun(final, paths, questions, tuple(files.scores), files.resumed, generate_s)
+        if store is not None:
+            _store(store, paths)
+    stored = None if store is None else str(store)
+    return EvalRun(final, paths, questions, tuple(files.scores), files.resumed, generate_s, stored)
+
+
+def _fetch_earlier(store: RunStore, paths: RunPaths) -> None:
+    """Bring an earlier attempt's files from ``store``, so this attempt resumes it."""
+    try:
+        store.pull(paths.root.name, paths.root)
+    except RunNotFound:
+        return  # no earlier attempt: the run starts here
+    log.info("fetched run %s from %s to resume it", paths.root.name, store)
+
+
+def _store(store: RunStore, paths: RunPaths) -> None:
+    """Make ``store``'s copy of the run its folder, saying how to try again when that fails.
+
+    The folder is the whole run: an earlier attempt's files were fetched into it first.
+    """
+    run = paths.root.name
+    try:
+        store.put_folder(run, paths.root, replace=True)
+    except OSError as exc:
+        raise OSError(
+            f"run {run} is in {paths.root}, but storing it in {store} failed: {exc}; "
+            f"upload it with forge runs push {run}"
+        ) from exc
+
+
+def _store_failed(store: RunStore, paths: RunPaths) -> None:
+    """Store a failed run's folder, so another machine can resume it."""
+    try:
+        _store(store, paths)
+    # Whatever went wrong here is logged and not raised: the run's own error is the one
+    # its caller needs.
+    except Exception as exc:
+        log.warning("%s", exc)
 
 
 def _evaluate(
