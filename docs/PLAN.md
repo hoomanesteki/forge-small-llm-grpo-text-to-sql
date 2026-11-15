@@ -1205,8 +1205,8 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 **Goal.** One command evaluates any model and backend on any split. It produces scores, confidence intervals, a difficulty breakdown, an error taxonomy and a report, and the whole pipeline runs on CPU in CI.
 
 **Demo at the end.**
-- `make smoke` generates with a tiny model, executes, scores and writes `runs/<id>/eval/val-report.md` with every section filled in. The accuracy is about 0%, as expected for random weights.
-- `forge report compare <gold-run> <smoke-run>` renders a paired comparison.
+- `make smoke` generates with the tiny model on the fixture's 20 val questions, executes, scores, renders the run report with every section filled in and prints it. The run lives in a scratch runs folder that the pipeline removes at the end. The accuracy is about 0%, as expected for random weights. Only a smoke of every phase (`PHASE` unset or 8) on a clean commit writes `.smoke-ok-<sha>`.
+- `forge report compare <gold-run> <smoke-run>` renders a paired comparison (`scripts/smoke/phase_2.sh` makes both runs).
 
 **Entry criteria.** Phase 1 gate passed.
 
