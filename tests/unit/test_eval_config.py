@@ -117,14 +117,30 @@ def test_manifest_config_records_what_changes_a_score() -> None:
 def test_platform_is_the_host_of_a_kernel_job() -> None:
     # kaggle/entry.py names the machine it runs on; the manifest's config doesn't change.
     on_kaggle = dataclasses.replace(BASE, host="kaggle")
-    check_config(on_kaggle)
     assert on_kaggle.platform == "kaggle"
     assert dataclasses.replace(BASE, host="colab").platform == "colab"
     assert on_kaggle.manifest_config() == BASE.manifest_config()
+    check_config(dataclasses.replace(on_kaggle, backend="fake", model="gold"))
+    with pytest.raises(NotAvailable, match="comes with FG-306"):
+        check_config(dataclasses.replace(on_kaggle, backend="vllm"))
     with pytest.raises(ValueError, match="host must be one of kaggle, colab, got 'modal'"):
         check_config(dataclasses.replace(BASE, host="modal"))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="Apple silicon's GPU, which kaggle has not"):
-        check_config(dataclasses.replace(on_kaggle, device="mps"))
+        check_config(dataclasses.replace(on_kaggle, backend="vllm", device="mps"))
+    # The hf backend runs on the CPU or MPS, which would leave a T4 idle.
+    with pytest.raises(ValueError, match="backend hf runs on the CPU or MPS; a job on kaggle"):
+        check_config(on_kaggle)
+
+
+@pytest.mark.phase(3)
+def test_a_kernel_job_pushed_over_budget_says_so_in_its_config() -> None:
+    kernel = EvalConfig(model="gold", backend="fake", host="kaggle")
+    over = dataclasses.replace(kernel, allow_over_budget=True)
+    check_config(over)
+    assert over.manifest_config() == {**kernel.manifest_config(), "allow_over_budget": True}
+    # A laptop run spends no GPU budget, so it can't be over it.
+    with pytest.raises(ValueError, match="allow_over_budget is for a kernel job"):
+        check_config(dataclasses.replace(over, host=None))
 
 
 @pytest.mark.phase(2)

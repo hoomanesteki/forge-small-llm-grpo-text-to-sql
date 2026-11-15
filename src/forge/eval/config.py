@@ -116,6 +116,9 @@ class EvalConfig:
     store: Store = "local"
     # Set only by kaggle/entry.py, for a job in a kernel; no option or config file sets it.
     host: Host | None = None
+    # A kernel job that forge kaggle run pushed past the week's GPU budget says so in its
+    # manifest's config, as the plan asks; a resumed run has to say it again.
+    allow_over_budget: bool = False
 
     @property
     def params(self) -> GenParams:
@@ -132,9 +135,10 @@ class EvalConfig:
     def manifest_config(self) -> dict[str, Any]:
         """What the manifest records and hashes: everything that can change a score.
 
-        The reason is in the dev usage log, and the store says only where files go.
+        The reason is in the dev usage log, and the store says only where files go. A run
+        pushed over budget has ``allow_over_budget``, which no other run's config holds.
         """
-        return {
+        config: dict[str, Any] = {
             "backend": self.backend,
             "device": self.device,
             "model": self.model,
@@ -152,6 +156,9 @@ class EvalConfig:
                 "official_item_timeout_s": OFFICIAL_ITEM_TIMEOUT_S,
             },
         }
+        if self.allow_over_budget:
+            config["allow_over_budget"] = True
+        return config
 
 
 def check_config(config: EvalConfig) -> None:
@@ -185,6 +192,11 @@ def check_config(config: EvalConfig) -> None:
             raise ValueError(f"host must be one of {', '.join(HOSTS)}, got {config.host!r}")
         if config.device == "mps":
             raise ValueError(f"--device mps is Apple silicon's GPU, which {config.host} has not")
+        if config.backend == "hf":
+            # HfBackend runs on the CPU or MPS, so on a T4 host it would leave the GPU idle.
+            raise ValueError(f"backend hf runs on the CPU or MPS; a job on {config.host} uses vllm")
+    elif config.allow_over_budget:
+        raise ValueError("allow_over_budget is for a kernel job: only those spend GPU budget")
     check_version(config.prompt_version)
     if config.limit is not None and config.limit < 1:
         raise ValueError(f"limit must be at least 1, got {config.limit}")
@@ -261,10 +273,11 @@ def read_config_sections(path: Path) -> tuple[dict[str, Any], Ops]:
         # YAML reads true and false as booleans, which Python also counts as whole numbers.
         if isinstance(value, bool) or not isinstance(value, _KINDS[kind]):
             raise ValueError(f"{path}: {name} must be {kind}, got {value!r}")
-    return options, _read_ops(path, loaded.get(OPS_SECTION, {}))
+    return options, read_ops(path, loaded.get(OPS_SECTION, {}))
 
 
-def _read_ops(path: Path, section: object) -> Ops:
+def read_ops(path: Path, section: object) -> Ops:
+    """The ops section ``section`` of the config file at ``path``, checked."""
     if not isinstance(section, dict):
         raise ValueError(f"{path}: {OPS_SECTION} must be a mapping, such as 'est_gpu_hours: 0.5'")
     unknown = sorted(str(name) for name in section if name not in OPS_OPTIONS)
