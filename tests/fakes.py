@@ -1,14 +1,19 @@
-"""Stand-ins for what tests can't use for real: libraries that would reach the network,
-and worker processes that a test double in this process never reaches."""
+"""Stand-ins for what tests can't use for real: libraries that would reach the network
+or need a GPU, and worker processes that a test double in this process never reaches."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import functools
+import sys
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import httpx2
+import pytest
 from huggingface_hub.errors import HfHubHTTPError, RemoteEntryNotFoundError
 
 from forge.sql.executor import SqliteExecutor
@@ -39,6 +44,139 @@ class WordTokenizer:
         if not kwargs.get("tokenize", True):
             return text
         return {"input_ids": list(range(len(text.split())))}
+
+
+class VocabTokenizer(WordTokenizer):
+    """A ``WordTokenizer`` that also encodes and decodes, one id a distinct word, as vLLM's
+    engine turns a prompt into ids and back. ``encode`` puts ``<s>`` first unless told not
+    to, as a tokenizer with a BOS token does."""
+
+    def __init__(self, chat_template: str = "{{ role tag }} {{ content }}, per message") -> None:
+        super().__init__(chat_template)
+        self.vocab: dict[str, int] = {}
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        words = (["<s>"] if add_special_tokens else []) + text.split()
+        return [self.vocab.setdefault(word, len(self.vocab)) for word in words]
+
+    def decode(self, ids: Sequence[int]) -> str:
+        words = {i: word for word, i in self.vocab.items()}
+        return " ".join(words[i] for i in ids)
+
+
+@dataclass
+class FakeCompletion:
+    """``vllm.CompletionOutput``: one sample of a prompt."""
+
+    index: int
+    text: str
+    token_ids: list[int]
+
+
+@dataclass
+class FakeRequestOutput:
+    """``vllm.RequestOutput``: a prompt's ids and its samples."""
+
+    prompt_token_ids: list[int]
+    outputs: list[FakeCompletion]
+
+
+class FakeSamplingParams:
+    """``vllm.SamplingParams``, keeping the arguments it was made with."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+@dataclass(frozen=True)
+class FakeLoRARequest:
+    """``vllm.lora.request.LoRARequest``."""
+
+    lora_name: str
+    lora_int_id: int
+    lora_path: str
+
+
+# A fake model: (the prompt as the engine decodes it, sample index) -> reply text.
+VllmReply = Callable[[str, int], str]
+
+
+@dataclass
+class FakeVllm:
+    """vLLM as ``VllmBackend`` imports it, once ``install`` puts it in ``sys.modules``.
+
+    ``engines`` holds the keyword arguments of each ``LLM`` made, ``calls`` each request as
+    (method, keyword arguments), and ``prompts`` each prompt as the engine decoded it.
+    ``reply`` answers a prompt; ``reverse`` returns each prompt's samples last first.
+    """
+
+    reply: VllmReply
+    tokenizer: VocabTokenizer = field(default_factory=VocabTokenizer)
+    reverse: bool = False
+    engines: list[dict[str, Any]] = field(default_factory=list)
+    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    prompts: list[str] = field(default_factory=list)
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeVllm:
+        vllm, lora, request = (ModuleType(n) for n in ("vllm", "vllm.lora", "vllm.lora.request"))
+        vllm.LLM = functools.partial(FakeLLM, self)  # type: ignore[attr-defined]
+        vllm.SamplingParams = FakeSamplingParams  # type: ignore[attr-defined]
+        request.LoRARequest = FakeLoRARequest  # type: ignore[attr-defined]
+        for module in (vllm, lora, request):
+            monkeypatch.setitem(sys.modules, module.__name__, module)
+        return self
+
+
+class FakeLLM:
+    """``vllm.LLM``: renders and encodes a chat as vLLM does, then asks its ``FakeVllm``."""
+
+    def __init__(self, vllm: FakeVllm, **kwargs: Any) -> None:
+        vllm.engines.append(kwargs)
+        self.vllm = vllm
+
+    def get_tokenizer(self) -> VocabTokenizer:
+        return self.vllm.tokenizer
+
+    def chat(
+        self, messages: list[list[dict[str, str]]], sampling_params: list[Any], **kwargs: Any
+    ) -> list[FakeRequestOutput]:
+        tokenizer = self.vllm.tokenizer
+        options = kwargs.get("chat_template_kwargs") or {}
+        texts = [
+            tokenizer.apply_chat_template(
+                chat, tokenize=False, add_generation_prompt=True, **options
+            )
+            for chat in messages
+        ]
+        # vLLM leaves special tokens to the template when it encodes a chat.
+        ids = [tokenizer.encode(str(text), add_special_tokens=False) for text in texts]
+        return self._answer("chat", ids, sampling_params, kwargs)
+
+    def generate(
+        self, prompts: list[dict[str, list[int]]], sampling_params: list[Any], **kwargs: Any
+    ) -> list[FakeRequestOutput]:
+        ids = [prompt["prompt_token_ids"] for prompt in prompts]
+        return self._answer("generate", ids, sampling_params, kwargs)
+
+    def _answer(
+        self, method: str, ids: list[list[int]], sampling: list[Any], kwargs: dict[str, Any]
+    ) -> list[FakeRequestOutput]:
+        self.vllm.calls.append((method, {"sampling_params": sampling, **kwargs}))
+        tokenizer = self.vllm.tokenizer
+        outputs = []
+        for prompt_ids, params in zip(ids, sampling, strict=True):
+            text = tokenizer.decode(prompt_ids)
+            self.vllm.prompts.append(text)
+            samples = []
+            for i in range(params.kwargs["n"]):
+                reply = self.vllm.reply(text, i)
+                samples.append(
+                    FakeCompletion(i, reply, tokenizer.encode(reply, add_special_tokens=False))
+                )
+            if self.vllm.reverse:
+                samples.reverse()
+            outputs.append(FakeRequestOutput(prompt_ids, samples))
+        return outputs
 
 
 class InlineSandbox:
