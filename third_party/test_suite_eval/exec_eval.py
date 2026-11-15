@@ -1,11 +1,13 @@
 # Vendored from https://github.com/taoyds/test-suite-sql-eval at commit
 # e97acc546ecbee8fa27fa8dbf025ef61493a876c, Apache-2.0 (see LICENSE).
 # Changed for Forge, see CHANGES.md: relative import, raw-string regex, read-only
-# connection with an authorizer and limits, a timeout that interrupts sqlite, no prints.
+# connection with an authorizer and limits, a timeout that interrupts sqlite, a bounded
+# fetch, no prints.
 import os
 import re
 import asyncio
 import sqlite3
+import sys
 import threading
 from pathlib import Path
 from typing import Tuple, Any, List, Set
@@ -34,15 +36,50 @@ ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
 )
 LIMITS = {
-    sqlite3.SQLITE_LIMIT_LENGTH: 100_000,
-    sqlite3.SQLITE_LIMIT_LIKE_PATTERN_LENGTH: 1_000,
-    sqlite3.SQLITE_LIMIT_SQL_LENGTH: 100_000,
+    sqlite3.SQLITE_LIMIT_LENGTH: 4_096,
+    sqlite3.SQLITE_LIMIT_SQL_LENGTH: 8_192,
+    sqlite3.SQLITE_LIMIT_LIKE_PATTERN_LENGTH: 100,
+    sqlite3.SQLITE_LIMIT_COLUMN: 200,
     sqlite3.SQLITE_LIMIT_ATTACHED: 0,
 }
+# Forge: exec_on_db_ reads a result in batches and gives up past MAX_ROWS rows or
+# MAX_RESULT_BYTES of row objects, counted as forge.sql.executor counts them, where
+# upstream's fetchall kept everything. Spider's largest gold result is 20,662 rows.
+MAX_ROWS = 100_000
+MAX_RESULT_BYTES = 64 * 2**20
+MAX_VALUE_SIZE = 4 * LIMITS[sqlite3.SQLITE_LIMIT_LENGTH] + sys.getsizeof("\U00010000")
+
+
+class ResultTooBig(Exception):
+    """Forge: a result past MAX_ROWS rows or MAX_RESULT_BYTES of memory."""
 
 
 def _authorize(action, arg1, arg2, db_name, source):
     return sqlite3.SQLITE_OK if action in ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
+
+
+def row_size(row: Tuple) -> int:
+    # Forge: the tuple, its values and the row's slot in the result list
+    return sys.getsizeof(row) + 8 + sum(map(sys.getsizeof, row))
+
+
+def fetch_bounded(cursor) -> List[Tuple]:
+    # Forge: fetchall with the ceilings above; a batch holds at most a quarter of the
+    # byte ceiling however big its values are
+    width = len(cursor.description or ())
+    largest = sys.getsizeof((None,) * width) + 8 + width * MAX_VALUE_SIZE
+    batch = max(1, MAX_RESULT_BYTES // (4 * largest))
+    rows, size = [], 0
+    while True:
+        chunk = cursor.fetchmany(batch)
+        if not chunk:
+            return rows
+        rows.extend(chunk)
+        size += sum(map(row_size, chunk))
+        if len(rows) > MAX_ROWS:
+            raise ResultTooBig(f"more than {MAX_ROWS:,} rows")
+        if size > MAX_RESULT_BYTES:
+            raise ResultTooBig(f"rows take more than {MAX_RESULT_BYTES // 2**20} MiB")
 
 
 def permute_tuple(element: Tuple, perm: Tuple) -> Tuple:
@@ -178,7 +215,7 @@ async def exec_on_db_(sqlite_path: str, query: str, timeout: int = TIMEOUT) -> T
     cursor.connection.set_progress_handler(lambda: time.monotonic() > deadline, PROGRESS_STEPS)
     try:
         cursor.execute(query)
-        result = cursor.fetchall()
+        result = fetch_bounded(cursor)
         cursor.close()
         cursor.connection.close()
         return "result", result

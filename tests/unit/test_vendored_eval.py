@@ -44,6 +44,11 @@ def test_evaluator_connection_matches_the_executor() -> None:
 
     assert exec_eval.ALLOWED_ACTIONS == executor.ALLOWED_ACTIONS
     assert dict(executor.LIMITS) == exec_eval.LIMITS
+    # Results are bounded the same way, and their rows counted alike.
+    assert exec_eval.MAX_RESULT_BYTES == executor.MAX_RESULT_BYTES
+    assert exec_eval.MAX_VALUE_SIZE == executor.MAX_VALUE_SIZE
+    for row in [(), (None,), (1, 2.5, "text", b"\x00blob"), ("\U0001f600" * 3, 2**70)]:
+        assert exec_eval.row_size(row) == executor.row_size(row)
 
 
 @pytest.mark.phase(1)

@@ -64,6 +64,13 @@ def test_pool_kills_queries_that_overrun_inside_one_row(
 def test_pool_stops_runaway_and_cartesian_queries(spider_mini: Path) -> None:
     with SandboxPool(2) as pool:
         assert pool.run(DB, "SELECT 1").rows == [(1,)]
+        # With today's limits the review's queries stop before they do any work.
+        reviewed = [(DB, review_query(100)), (DB, review_query(200))]
+        results, elapsed_ms = _timed(pool, reviewed, 300)
+        too_big = ("other", "string or blob too big")
+        assert [(r.error_kind, r.error) for r in results] == [too_big] * 2
+        assert elapsed_ms < 300
+
         results, elapsed_ms = _timed(pool, [(DB, CARTESIAN), (DB, RUNAWAY)], 300)
         assert [(r.ok, r.error_kind) for r in results] == [(False, "timeout")] * 2
         assert all(300 <= r.ms < 300 + 1000 for r in results), [r.ms for r in results]

@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 from test_suite_eval.evaluation import isValidSQL
-from test_suite_eval.exec_eval import exec_on_db, get_cursor_from_path
+from test_suite_eval.exec_eval import MAX_ROWS, ResultTooBig, exec_on_db, get_cursor_from_path
+
+from tests.sandbox_jobs import review_query
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNAWAY = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r"
@@ -85,13 +87,37 @@ def test_values_are_capped(scratch_db: Path) -> None:
     for query in (
         "SELECT length(randomblob(900000000))",
         "SELECT count(*) FROM t WHERE length(randomblob(300000000)) > 0",
-        "SELECT printf('%.*c', 100000, 'a') LIKE ('%' || printf('%.*c', 20000, 'a') || 'b')",
+        "SELECT printf('%.*c', 4000, 'a') LIKE ('%' || printf('%.*c', 200, 'a') || 'b')",
+        # The FG-191 review's one-row query, 8.7 s under 100 kB values.
+        review_query(100),
     ):
         start = time.monotonic()
         flag, error = asyncio.run(exec_on_db(str(scratch_db), query))
         assert flag == "exception", query
         assert isinstance(error, sqlite3.Error), query
         assert time.monotonic() - start < 0.5, query
+
+
+@pytest.mark.phase(1)
+def test_results_are_capped(scratch_db: Path) -> None:
+    counting = (
+        "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < {n}) "
+        "SELECT n{columns} FROM r"
+    )
+    blobs = ", " + ", ".join(["zeroblob(4000)"] * 10)
+    for query, error in (
+        (counting.format(n=MAX_ROWS + 1, columns=""), "more than 100,000 rows"),
+        # About 40 kB a row, so 2,000 rows take some 81 MB.
+        (counting.format(n=2000, columns=blobs), "rows take more than 64 MiB"),
+    ):
+        flag, value = asyncio.run(exec_on_db(str(scratch_db), query))
+        assert (flag, type(value), str(value)) == ("exception", ResultTooBig, error)
+
+    # At the ceilings is not past them.
+    flag, rows = asyncio.run(exec_on_db(str(scratch_db), counting.format(n=MAX_ROWS, columns="")))
+    assert (flag, len(rows)) == ("result", MAX_ROWS)
+    flag, rows = asyncio.run(exec_on_db(str(scratch_db), counting.format(n=1000, columns=blobs)))
+    assert (flag, len(rows), len(rows[0])) == ("result", 1000, 11)
 
 
 @pytest.mark.phase(1)
