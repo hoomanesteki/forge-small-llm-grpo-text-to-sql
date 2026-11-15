@@ -71,6 +71,18 @@ def test_fallback_line_must_parse_as_a_query(reply: str, sql: str | None) -> Non
 
 @pytest.mark.phase(1)
 @pytest.mark.parametrize(
+    "sentence",
+    # sqlglot reads these as SELECT this AS one, SELECT it and SELECT DISTINCT values.
+    ["Select this one", "Select it", "select distinct values"],
+)
+def test_short_sentence_that_parses_as_a_query_still_wins(sentence: str) -> None:
+    # The rule is the last line that parses (plan 3.7), so a sentence short enough to parse
+    # still beats the real query above it. FG-204 can count such replies.
+    assert extract_sql(f"SELECT name FROM singer WHERE age > 30\n{sentence}") == sentence
+
+
+@pytest.mark.phase(1)
+@pytest.mark.parametrize(
     "reply",
     [
         "",
