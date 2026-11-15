@@ -53,6 +53,22 @@ def test_model_slug_is_last_segment_slugified(model_ref: str, slug: str) -> None
 
 
 @pytest.mark.phase(1)
+@pytest.mark.parametrize(
+    ("model_ref", "slug"),
+    [
+        ("./runs/x@y/ckpt", "ckpt"),
+        ("/kaggle/working/runs/a@b/checkpoints/best/", "best"),
+        ("../exports/qwen@2", "qwen-2"),
+        ("~/models/qwen3@base", "qwen3-base"),
+        ("runs/a/b@c", "b-c"),
+    ],
+)
+def test_at_sign_in_a_local_path_is_part_of_its_name(model_ref: str, slug: str) -> None:
+    # A path that can't be a hub repo id before its '@' has no revision to strip.
+    assert make_run_id("eval", model_ref, SHA, on=DAY) == f"2026-11-03-{slug}-eval-a1b2c3d"
+
+
+@pytest.mark.phase(1)
 def test_dirty_sha_uses_first_seven_hex() -> None:
     assert make_run_id("eval", "m", f"{SHA}-dirty", on=DAY).endswith("-eval-a1b2c3d")
 
