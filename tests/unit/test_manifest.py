@@ -151,6 +151,17 @@ def test_manifest_keeps_its_own_copy_of_the_config(repo: Path) -> None:
 
 
 @pytest.mark.phase(1)
+def test_manifest_hash_matches_a_config_with_int_keys(repo: Path) -> None:
+    config: dict[str, Any] = {"lr_schedule": {2: 1e-4, 10: 1e-5}}
+    m = build_manifest("sft", config, model_ref="m", seed=0, repo=repo)
+
+    # The copy has the keys as JSON writes them, and still hashes like the config.
+    assert m.config == {"lr_schedule": {"2": 1e-4, "10": 1e-5}}
+    assert m.config_hash == config_hash(config)
+    assert config_hash(m.config) == m.config_hash
+
+
+@pytest.mark.phase(1)
 def test_manifest_round_trips_through_json(repo: Path) -> None:
     m = build_manifest(
         "grpo",

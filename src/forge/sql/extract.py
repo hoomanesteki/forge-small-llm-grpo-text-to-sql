@@ -7,8 +7,9 @@
    count, through rule 3.
 3. Otherwise take the last line that starts with ``SELECT`` or ``WITH``, ignoring case and
    indentation, and that sqlglot reads as a query, so a sentence such as "With this query
-   you get..." after the query is passed over. Only that line is taken, so an unfenced
-   query split over several lines loses the lines after it.
+   you get..." after the query is passed over, though one short enough to parse, such as
+   "Select it", is not. Only that line is taken, so an unfenced query split over several
+   lines loses the lines after it.
 4. Otherwise there is no SQL: ``None``.
 
 The result has surrounding whitespace and one trailing semicolon removed. An empty

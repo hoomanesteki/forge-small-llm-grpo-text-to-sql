@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from forge.core.hashing import canonical_json, sha256_hex
 from forge.core.types import Example, RunManifest
+
+
+class _Schedule(BaseModel):
+    lr_by_step: dict[int, float]
 
 
 @pytest.mark.phase(0)
@@ -75,3 +82,34 @@ def test_model_hashes_like_its_own_dump() -> None:
     # A datetime reads as isoformat gives it wherever it sits, never with pydantic's "Z".
     assert b'"started_at":"2026-11-14T09:30:00+00:00"' in encoded
     assert b'"config":{"data":"data/spider","on":"2026-11-14"}' in encoded
+
+
+@pytest.mark.phase(1)
+@pytest.mark.parametrize(
+    "obj",
+    [
+        {"lr_schedule": {2: 1e-4, 10: 1e-5}},
+        {"buckets": [{1.5: "a", 10.0: "b"}], "flags": {True: 1, None: 0}},
+        # Mixed keys sort like any others once they are strings.
+        {10: "ten", "9": "nine", 1: "one"},
+        {"schedule": _Schedule(lr_by_step={500: 1e-4, 2000: 1e-5})},
+    ],
+)
+def test_canonical_json_survives_a_json_round_trip(obj: dict[Any, Any]) -> None:
+    # A manifest stores the config as this JSON read back, with every key a string, so
+    # both must give the same bytes: keys sort as the strings JSON writes.
+    encoded = canonical_json(obj)
+    assert canonical_json(json.loads(encoded)) == encoded
+
+
+@pytest.mark.phase(1)
+def test_int_keys_sort_as_their_json_strings() -> None:
+    assert canonical_json({2: "a", 10: "b"}) == b'{"10":"b","2":"a"}'
+    assert canonical_json({2: "a", 10: "b"}) == canonical_json({"2": "a", "10": "b"})
+
+
+@pytest.mark.phase(1)
+def test_keys_that_json_writes_alike_are_refused() -> None:
+    # Both would be written as "1", and reading the JSON back would keep only one of them.
+    with pytest.raises(TypeError, match="'1'"):
+        canonical_json({"x": {1: "int", "1": "str"}})
