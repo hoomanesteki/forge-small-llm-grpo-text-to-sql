@@ -271,7 +271,7 @@ Work discovered along the way that is not a plan story.
   string ran 8.7 s against 300 ms, 200 calls 18.5 s against 2,000 ms. FG-194 runs untrusted SQL in
   workers that are killed at the deadline. Its limits keep each call cheap but don't bound a row:
   FG-197 measured 8 kB of compact calls reading their arguments from a column at 0.07 s of `instr`,
-  0.34 to 0.38 s of `LIKE` or `GLOB`, 2.2 to 2.8 s of `ltrim` and 4.2 to 4.4 s of `unhex` on the
+  0.34 to 0.38 s of `LIKE` or `GLOB`, 2.2 to 2.8 s of `ltrim` and 4.3 to 5.5 s of `unhex` on the
   laptop (Apple M4), and nested CTEs multiply calls past the text: 1,000 `unhex` calls in 379 bytes
   ran 6.5 s against 100 ms. The in-process deadline has no bound; only the pool kill is a hard one
   (ADR-0014). The FG-194 and FG-196 figures (0.06 s, then a second or two) came from rows with
@@ -372,8 +372,9 @@ Work discovered along the way that is not a plan story.
 - Known limits after the Phase 1 re-verification (FG-197), each in ADR-0014's "Known limits"
   with its measurements (Apple M4 laptop):
   - `SqliteExecutor.run`'s deadline is soft and its overrun has no bound; it is for trusted SQL.
-  - A query with no loop that ends within about 1,000 VM steps can come back ok after its
-    deadline: 0.35 s against 100 ms in process, at most `KILL_GRACE_MS` late through a pool.
+  - A statement whose slow work all falls in its final step (a slow `WHERE` that matches no
+    row) can come back ok after its deadline: 0.34 s against 100 ms in process in one of two
+    runs, at most `KILL_GRACE_MS` late through a pool.
   - The official-EX vet refuses only empty and denied SQL, so one prediction can hold an item
     for `item_timeout_s` (60 s); the evaluator's own 60 s is a progress handler.
   - No limit bounds what a query allocates inside SQLite: JSON aggregates grew 328 to 655 MiB in

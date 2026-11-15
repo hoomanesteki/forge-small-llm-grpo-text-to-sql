@@ -27,11 +27,12 @@ Each failure comes back as an ``ExecResult`` with an ``ErrorKind``:
   thread interrupts SQLite at the deadline itself, for steps so slow that the handler's
   next check comes late or never: how soon the handler alone stops a query depends on
   what its steps cost. SQLite can't stop the work inside one row, so it runs to the end,
-  and a query with no loop that ends within about ``PROGRESS_STEPS`` steps can end after
-  its deadline and still come back ok. The limits keep each call small but not the number
-  of calls in a row: a common table expression referenced several times is copied into
-  each reference, so nesting multiplies them. So this deadline is soft and its overrun has
-  no bound (ADR-0014); only a ``SandboxPool`` kill is a hard bound.
+  and a statement whose slow work all falls in its final step (one whose slow ``WHERE``
+  matches no row, for example) can end after its deadline and still come back ok. The
+  limits keep each call small but not the number of calls in a row: a common table
+  expression referenced several times is copied into each reference, so nesting multiplies
+  them. So this deadline is soft and its overrun has no bound (ADR-0014); only a
+  ``SandboxPool`` kill is a hard bound.
 - ``syntax``, ``no_such_table``, ``no_such_column``: from SQLite's error message.
 - ``empty_sql``: nothing but whitespace, comments and semicolons.
 - ``other``: any other error, such as an unknown function, a ``?`` placeholder, a value

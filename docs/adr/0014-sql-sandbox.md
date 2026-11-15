@@ -58,7 +58,8 @@ Three layers, each of which holds on its own.
    holds. On the laptop (Apple M4, SQLite 3.53.1), one row of compact calls filling 8 kB,
    the long arguments in one-row materialized CTEs, ran 0.07 s with `instr`, 0.05 s with
    `replace`, 0.34 to 0.38 s with `LIKE` or `GLOB`, 2.2 to 2.8 s with `ltrim` (the length
-   limit holds its character set to 341 characters) and 4.2 to 4.4 s with `unhex`. Nested
+   limit holds its character set to 341 characters) and 4.3 to 5.5 s with `unhex` (731 calls
+   joined with `+`, the densest packing; 670 calls joined with `||` ran 4.7 to 4.9 s). Nested
    CTEs turned 397 bytes of SQL into 10,000 `instr` calls that ran 0.9 to 1.0 s, and 379
    bytes into 1,000 `unhex` calls that ran 6.5 s, each against a 100 ms timeout. So the
    in-process deadline is soft, with no bound on its overrun, and only layer 3 bounds it
@@ -146,10 +147,12 @@ lists them too. Timings are from the laptop (Apple M4, 16 GB, Python 3.12.13, SQ
   bound (layer 2). That matters only if untrusted SQL reaches `run` instead of a pool. The
   FG-191 recipe now fails at once with `string or blob too big`; under FG-191's limits a
   pool kills it 552 ms into a 300 ms timeout.
-- **Late but ok.** A query with no loop that ends within about 1,000 VM steps can end after
-  its deadline and still come back ok: a `SELECT` of 60 `unhex` calls and no `FROM` came
-  back ok after 0.35 s against a 100 ms timeout. How late depends on what those steps cost
-  and has no measured bound. Through a pool such a result is at most `KILL_GRACE_MS` late.
+- **Late but ok.** A statement whose slow work all falls in its final step can end after its
+  deadline and still come back ok, because nothing checks the deadline once that step has
+  produced its last row. A `SELECT` whose `WHERE` runs 60 `unhex` calls and matches no row
+  came back ok after 0.34 s against a 100 ms timeout in one of two runs (the other timed
+  out). The same 60 calls in a one-row `SELECT` with no `FROM` time out. How late has no
+  measured bound. Through a pool such a result is at most `KILL_GRACE_MS` late.
 - **The official-EX vet.** `VET_TIMEOUT_MS` (100 ms) refuses only empty and denied SQL. A
   prediction that times out there still goes to the evaluator, so one adversarial
   prediction can hold an item for `item_timeout_s` (60 s by default) before it is killed
