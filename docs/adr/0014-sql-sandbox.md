@@ -46,11 +46,16 @@ Three layers, each of which holds on its own.
    query, so the schema text, not the data, sets the floor: every gold query runs at
    1,191 bytes, and soccer_1's fail one byte under it. 4,096 leaves more than three times
    that. The cost of `instr`, `LIKE`, `GLOB` or `replace` grows with the product of their
-   inputs' lengths, so the length and statement limits together bound the work in one row:
-   the slowest rows that fit, each call on the longest values and as many calls as 8 kB
-   holds, take 37 ms (`instr`) to 58 ms (`LIKE` with a 100-character pattern) on the
+   inputs' lengths, so for those the length and statement limits together bound the work in
+   one row: the slowest rows that fit, each call on the longest values and as many calls as
+   8 kB holds, take 37 ms (`instr`) to 58 ms (`LIKE` with a 100-character pattern) on the
    laptop, against 18.5 s under FG-191's 100 kB
-   (`test_executor.py::test_limits_bound_the_work_in_one_row`). `SQLITE_LIMIT_ATTACHED` 0
+   (`test_executor.py::test_limits_bound_the_work_in_one_row`). This was measured for those
+   four functions only (FG-196). Others are slower: a row of `ltrim` calls with a large
+   character set, or `unhex` with a large ignore set, runs a second or two, so the
+   in-process deadline is soft and only layer 3 bounds it
+   (`test_executor.py::test_in_process_deadline_is_soft_for_one_row`).
+   `SQLITE_LIMIT_ATTACHED` 0
    stays, which stops `ATTACH` and `VACUUM INTO` on any connection. The result budget
    counts what rows take in memory (`row_size`: the tuple, `sys.getsizeof` of each value
    and the list slot), where FG-191 counted 8 bytes a number and a character a byte, so a
@@ -67,8 +72,13 @@ Three layers, each of which holds on its own.
    counts the replacements, and each one is logged at debug level with the count so far.
    `SandboxPool.call` runs any module-level function in a worker under the same kind of
    deadline. Official EX runs each item, the vetting and the evaluator's call together,
-   that way, with `item_timeout_s` (60 s, the evaluator's own per-query timeout) and the
-   overall deadline on top (ADR-0008); a killed item is not a match.
+   that way, with `item_timeout_s` (60 s) and the overall deadline on top (ADR-0008); a
+   killed item is not a match, and neither is one whose worker crashes (FG-196). The 60 s
+   bounds the whole item — two vetting runs and the gold and the prediction on every
+   `.sqlite` in the folder — which with Spider's one database per folder is about the
+   evaluator's own 60 s per query (`exec_eval.TIMEOUT`). Once the test-suite databases sit
+   beside it (FG-508) an item runs 2N queries under the one deadline, so it must be
+   revisited then (see "Revisit if").
 
 Which path for which SQL:
 
@@ -77,9 +87,10 @@ Which path for which SQL:
   call. `forge.eval.agreement.score` runs predictions and official items on one pool.
   The eval runner (FG-202) and the reward functions (FG-501, FG-503) must do the same.
 - **Trusted SQL**, Spider's gold queries, schema reads and tests, may use
-  `SqliteExecutor.run` in process; its deadline is soft, and layer 2 keeps the overrun
-  to a few hundredths of a second. `forge sql run` is in process too: it runs what the
-  person at the terminal typed.
+  `SqliteExecutor.run` in process; its deadline is soft. Layer 2 holds the overrun to a
+  few hundredths of a second for `instr`, `replace`, `LIKE` and `GLOB`, the functions
+  measured, but not in general (FG-196). `forge sql run` is in process too: it runs what
+  the person at the terminal typed.
 
 ## Measured cost
 
@@ -101,10 +112,11 @@ gold queries they take less than half the time.
 
 - A runaway query costs its timeout plus at most the grace, and a kill costs a restart
   of about 0.2 s, so a batch full of pathological predictions stays bounded.
-- With layer 2, no query through the executor has been seen to need a kill: loops stop at
-  its in-process deadline and rows stay short. The kill is for what that misses: the
-  evaluator, whose own deadline is 60 s and whose column-permutation search on wide
-  results runs in Python (upstream issue #12), a SQLite path not found yet, or a crash.
+- Layer 2 stops loops at the in-process deadline, but it is soft: a single row of the
+  slower string functions (FG-196) runs a second or two past it, and the evaluator's own
+  deadline is 60 s and its column-permutation search on wide results runs in Python
+  (upstream issue #12). The kill bounds all of that, and a crash, at the timeout plus the
+  grace.
 - `SqliteExecutor.run_many` starts a pool for every call (about 0.2 s). FG-503 keeps one
   long-lived pool for a training run; `official_exec_match` accepts it as `pool`.
 - Each worker imports what its jobs need at start (`imports`), so module loading doesn't
@@ -120,4 +132,7 @@ gold queries they take less than half the time.
 
 A legitimate query (gold, or a correct prediction) fails on a limit; restarts show up in
 a reward or eval run often enough to cost real time; or a later SQLite changes where it
-checks for interrupts.
+checks for interrupts. Also when the test-suite databases land (FG-508): `item_timeout_s`
+then covers the gold and the prediction on every database, so a correct but slow
+prediction could be killed where upstream's 60 s per query would pass it, and the item
+timeout should scale with the number of `.sqlite` files in the folder (FG-196).

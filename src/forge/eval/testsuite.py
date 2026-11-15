@@ -65,8 +65,11 @@ from forge.sql.sandbox import SandboxError, SandboxPool, SandboxTimeout
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 3600.0
-# The evaluator's own timeout for one query (exec_eval.TIMEOUT); a prediction that runs
-# that long is no match whichever deadline stops it.
+# The deadline for one whole item: the two vetting runs and eval_exec_match, which runs
+# the gold and the prediction on every .sqlite in the database's folder. With only
+# Spider's own database per folder that is about the evaluator's 60 s per query
+# (exec_eval.TIMEOUT). Once the test-suite databases sit beside it (FG-508) an item runs
+# 2N queries under this one deadline, so it has to be revisited then (ADR-0014).
 DEFAULT_ITEM_TIMEOUT_S = 60.0
 VET_TIMEOUT_MS = 100
 REFUSED: frozenset[ErrorKind] = frozenset({"empty_sql", "denied"})
