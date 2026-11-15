@@ -781,22 +781,20 @@ def kaggle_publish_code() -> None:
     as a new version noted with the SHA, or as the first one. The owner is
     FORGE_KAGGLE_USER, else the Kaggle credentials' username. A dirty tree is refused.
     """
-    import subprocess
-
     from forge.ops.kaggle import KaggleClient, KaggleError, publish_code
-    from forge.ops.manifest import DirtyTreeError
+    from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound, repo_root
 
     try:
         bundle, published = publish_code(repo_root(), _kaggle_owner(), KaggleClient())
     # OSError covers a missing requirements file and a bundle that can't be written,
-    # ValueError an unpinned requirement, CalledProcessError a root that isn't a checkout.
+    # ValueError an unpinned requirement, GitError a root that isn't a checkout.
     except (
         DirtyTreeError,
+        GitError,
         KaggleError,
         OSError,
         RepoRootNotFound,
-        subprocess.CalledProcessError,
         ValueError,
     ) as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -850,23 +848,21 @@ KaggleJobName = Literal["eval", "sft", "grpo", "spike"]
 def _kaggle_job_errors() -> tuple[type[Exception], ...]:
     """What a Kaggle job command can raise: a refused check, a failed kaggle call, a bad
     config (ValueError) or one a later story builds (NotAvailable), a file that can't be
-    read (OSError), and a root that isn't a checkout (CalledProcessError)."""
-    import subprocess
-
+    read (OSError), and a root that isn't a checkout (GitError)."""
     from forge.eval.config import NotAvailable
     from forge.ops.kaggle import KaggleError
     from forge.ops.kaggle_job import JobRefused
-    from forge.ops.manifest import DirtyTreeError
+    from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound
 
     return (
         DirtyTreeError,
+        GitError,
         JobRefused,
         KaggleError,
         NotAvailable,
         OSError,
         RepoRootNotFound,
-        subprocess.CalledProcessError,
         ValueError,
     )
 

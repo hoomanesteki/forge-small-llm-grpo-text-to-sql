@@ -580,3 +580,21 @@ def _baked_argv(source: str) -> list[str]:
 def load_script_text(code: str, path: Path) -> Any:
     path.write_text(code, encoding="utf-8")
     return load_script(path, "forge_notebook_entry")
+
+
+@pytest.mark.phase(3)
+def test_run_outside_a_checkout_is_one_error_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = tmp_path / "plain"
+    (plain / "configs" / "eval").mkdir(parents=True)
+    (plain / "configs" / "eval" / "job.yaml").write_text(
+        "model: m\nbackend: fake\nsplit: val\nops:\n  est_gpu_hours: 0.5\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setenv("FORGE_ROOT", str(plain))
+    monkeypatch.setenv("FORGE_KAGGLE_USER", OWNER)
+    result = _run("--job", "eval", "--config", str(plain / "configs/eval/job.yaml"))
+    assert result.exit_code == 1, result.output
+    assert f"error: {plain} is not in a git checkout" in result.stderr
+    assert isinstance(result.exception, SystemExit)

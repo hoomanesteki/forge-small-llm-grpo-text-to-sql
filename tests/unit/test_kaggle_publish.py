@@ -433,3 +433,16 @@ def test_publish_data_cli_refuses_data_that_is_not_the_full_download(
     assert "differ from spider.sha256" in result.stderr
     assert "forge data fetch" in result.stderr
     assert [c[2] for c in fake.commands] == ["status"]
+
+
+@pytest.mark.phase(3)
+def test_publish_code_outside_a_checkout_is_one_error_line(
+    cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Keeps git from finding a checkout that happens to hold the temp folder.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(cli_env.parent))
+    monkeypatch.setenv("FORGE_KAGGLE_USER", OWNER)
+    result = CliRunner().invoke(cli.app, ["kaggle", "publish-code"])
+    assert result.exit_code == 1, result.output
+    assert f"error: {cli_env} is not in a git checkout" in result.stderr
+    assert isinstance(result.exception, SystemExit)

@@ -466,10 +466,11 @@ Work discovered along the way that is not a plan story.
   there) raises `GitError` instead of recording that repository's commit (FG-295).
 - `git_sha` raises `GitError`, a `RuntimeError`, outside a checkout or where git can't run,
   and no longer `subprocess.CalledProcessError` or `OSError`, so every caller must catch
-  `GitError`. On the Phase 3 branches `forge kaggle publish-code`'s except tuple (FG-302) and
-  `_kaggle_job_errors` (FG-303) catch `CalledProcessError` and not `GitError`, and rebasing
-  them onto this stack gives no conflict that shows it: add `GitError` to both, or those
-  commands print a traceback where they printed one `error:` line (FG-292, FG-295).
+  `GitError`. `forge kaggle publish-code` and `forge kaggle run` caught `CalledProcessError`
+  until the Phase 3 stack was replayed onto the gate 2 fixes; they catch `GitError` now and
+  print one `error:` line outside a checkout (FG-292, FG-295, FG-303). The eval runner reads
+  the commit at the Forge root, or, on a Kaggle kernel with no Forge root, from
+  `FORGE_CODE_SHA` (FG-303).
 - The scores and generations files hold the contract types only, so the executor's error message
   for a failed prediction is not stored. FG-204 classifies from the live result in the runner;
   FG-205's failure examples can show the class, or a later story can store the message (FG-202).
