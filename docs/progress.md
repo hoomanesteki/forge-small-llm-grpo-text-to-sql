@@ -116,6 +116,7 @@ Work discovered along the way that is not a plan story.
 | FG-192 | Gate 1 fixes: data and prompts | done | `load_dev` refuses an empty dev, `assert_train_only` refuses iterators, fetch won't overwrite other data and reports network errors, p2 samples keep their spaces, `[name]` quoted, fallback lines must parse; ADR-0004 says what counts as a dev use |
 | FG-193 | Gate 1 fixes: hashing and reports | done | A model hashes like its `model_dump()`, manifests keep a JSON copy of the config and need a real UTC offset, `@` stays in local paths; the agreement report credits Spider (CC BY-SA 4.0) and counts distinct items, regenerated as `docs/audit/agreement-2026-11-15.md` |
 | FG-194 | Gate 1 fixes: hard deadline | done | Untrusted SQL runs in `SandboxPool` workers that are killed 250 ms past their timeout, and each official EX item runs in one too; SQLite limits set from Spider's measured needs (4 kB values and rows, 8 kB SQL, 100-character LIKE patterns, 200 columns); result budgets count real memory, and the evaluator's fetch is bounded; ADR-0014 |
+| FG-195 | Gate 1 fixes: review follow-ups | done | `forge data fetch` reports hf_xet's bare `RuntimeError` with the retry hint, `canonical_json` sorts keys as the strings JSON writes so a manifest's copy of an int-keyed config hashes like it, and a `/` after the `@` outside `refs/` makes a model ref a path; the FG-192 note on `extract_sql` no longer claims short sentences that parse as a SELECT are passed over |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -214,9 +215,12 @@ Work discovered along the way that is not a plan story.
 - `extract_sql` takes one line when there is no sql block, as section 3.7 says, so an unfenced query
   split over several lines loses its tail. An unclosed `<think>` (a reply cut off while thinking) is
   not dropped either. FG-204 can count both if they show up. Since FG-192 the line must also parse
-  as a query with sqlglot, so a sentence opening with "With" or "Select" after the query no longer
-  wins; an unfenced query line with a syntax error now gives `None`, not SQL that fails to run. All
-  9,693 gold queries still come through on one line (`tests/integration/test_extract.py`).
+  as a query with sqlglot, so most sentences opening with "With" or "Select" after the query no
+  longer win; short ones that parse as a SELECT ("Select it", "Select this one", "select distinct
+  values") still do, and FG-204 can count them too (FG-195). An unfenced query line that sqlglot
+  can't parse gives `None`, not SQL that fails to run, but sqlglot is laxer than SQLite in places:
+  it takes `SELECT name, FROM singer`, which the executor then reports as `syntax`. All 9,693 gold
+  queries still come through on one line (`tests/integration/test_extract.py`).
 - The official evaluator removes every `DISTINCT`, inside `COUNT(DISTINCT x)` too, where it becomes
   `count(x)`. All 17 disagreeing items in the 2,000-item val check (15 distinct) come from that: 14
   (13 distinct) with a `COUNT(DISTINCT ...)` gold the evaluator matches to another column's distinct
@@ -276,7 +280,10 @@ Work discovered along the way that is not a plan story.
   become spaces.
 - huggingface-hub 2.4 raises its HTTP errors as `OSError`s, but a connection that still fails after
   its retries raises a bare `httpx2` error, which is not one. `forge data fetch` catches both, so
-  `httpx2` is now a declared dependency.
+  `httpx2` is now a declared dependency. Both pinned Hub zips are stored on Xet (their resolve URLs
+  answer with an `x-xet-hash`), so their bytes come through hf_xet 1.8, which reports a failed
+  transfer as a bare `RuntimeError` (`Task error: File reconstruction error: ...`). Since FG-195
+  fetch catches that too.
 - `forge data fetch` keeps the zip in `data/download` in the repo (git-ignored), not next to
   `FORGE_DATA_DIR`, and fills in missing files but replaces files that differ only with `--force`,
   so pointed at `tests/fixtures/spider_mini` it stops instead of downloading and extracting there.
@@ -287,13 +294,21 @@ Work discovered along the way that is not a plan story.
   872 questions, which share 456 gold queries; a few predictions also recur against a different
   gold, so the key includes the gold. I5 still reads the rate over all items, as the plan states
   it, and the report gives the distinct rate beside it (FG-193).
-- `make_run_id` strips `@<revision>` only when the part before the `@` is shaped like a hub repo id.
-  A relative path with one `/` before an `@` (`runs/x@y/ckpt`) still reads as repo `runs/x` at
-  revision `y/ckpt`, so pass local checkpoints as `./runs/...` or absolute paths (FG-193).
+- `make_run_id` strips `@<revision>` only when the part before the `@` is shaped like a hub repo id
+  (FG-193) and the revision has no `/` unless it starts with `refs/` (FG-195), so `runs/x@y/ckpt`
+  names `ckpt` and `Qwen/Qwen3-4B@refs/pr/1` names `qwen3-4b`. A relative path whose `@` is in its
+  last name (`runs/ckpt@v2`) still reads as repo `runs/ckpt` at revision `v2`, so pass local
+  checkpoints as `./runs/...` or absolute paths.
 - Since FG-193 `canonical_json` dumps models in Python mode, so `bytes` inside one (a BLOB in
   `ExecResult.rows`) raises `TypeError` instead of hashing like the same text as a string.
 - `build_manifest` stores the config as the JSON it hashed, so a `Path` comes back as a string and
-  a tuple as a list (FG-193).
+  a tuple as a list (FG-193), and an int key as a string. `canonical_json` sorted int keys as
+  numbers, so `{2: a, 10: b}` and its copy hashed differently; since FG-195 it sorts keys as the
+  strings JSON writes, and the copy hashes like the config. Mixed int and string keys now hash
+  instead of raising, and two keys that JSON writes alike (`1` and `"1"`) raise `TypeError`. Only
+  configs with non-string keys hash differently from before; the data manifest's keys are strings,
+  so the pinned data hashes are unchanged. Writing, reading back and sorting takes about 2.6 times
+  the old single pass: 10 ms against 4 ms for a 20,662-row result on the laptop.
 - SQLite reads each `CREATE` statement in `sqlite_master` through `SQLITE_LIMIT_LENGTH` whenever it
   prepares a query, so that limit can't go under the longest one, soccer_1's 1,191 bytes: one byte
   less and every query on soccer_1 fails. Spider's largest stored value is 213 bytes. Records (sorts,
