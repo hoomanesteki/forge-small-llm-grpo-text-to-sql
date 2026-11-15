@@ -12,7 +12,8 @@ the next time that slot has work.
 Which path for which SQL (ADR-0014):
 
 - Untrusted SQL, anything a model wrote or a reward or evaluation scores, runs through
-  ``SandboxPool.run`` or ``SandboxPool.run_many``.
+  ``SandboxPool.run``, ``SandboxPool.run_many`` or ``SqliteExecutor.run_many``, which
+  starts a pool.
 - Trusted SQL, Spider's gold queries, schema reads and tests, may call
   ``SqliteExecutor.run`` in process, whose deadline is soft.
 
