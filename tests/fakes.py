@@ -63,11 +63,13 @@ def hub_error(status: int, kind: type[HfHubHTTPError] = HfHubHTTPError) -> HfHub
 
 class FakeHub:
     """``huggingface_hub.HfApi`` as the Hub run store calls it: one repo whose files are
-    held in memory, by path. Each call is recorded as (method, keyword arguments)."""
+    held in memory, by path. Each call is recorded as (method, keyword arguments), and
+    raises the first error ``fail`` lists for its method, if any, before it does anything."""
 
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.fail: dict[str, list[BaseException]] = {}
         self.tokens: list[str | None] = []
 
     def client(self, token: str | None = None) -> FakeHub:
@@ -77,6 +79,8 @@ class FakeHub:
 
     def _record(self, method: str, kwargs: dict[str, Any]) -> None:
         self.calls.append((method, kwargs))
+        if self.fail.get(method):
+            raise self.fail[method].pop(0)
 
     def upload_file(self, **kwargs: Any) -> None:
         self._record("upload_file", kwargs)

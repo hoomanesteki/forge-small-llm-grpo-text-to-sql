@@ -6,7 +6,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx2
 import pytest
+from huggingface_hub.errors import OfflineModeIsEnabled, RepositoryNotFoundError
 
 from forge.core.types import RunManifest
 from forge.ops.hub import (
@@ -15,10 +17,11 @@ from forge.ops.hub import (
     LocalRunStore,
     RunNotFound,
     RunStore,
+    StoreUnavailable,
     checkpoint_dir,
     manifest_bytes,
 )
-from tests.fakes import FakeHub
+from tests.fakes import FakeHub, hub_error
 
 RUN = "2026-11-15-tiny-grpo-abc1234"
 OTHER = "2026-11-16-tiny-grpo-abc1234"
@@ -59,12 +62,16 @@ def _files(root: Path) -> dict[str, bytes]:
     }
 
 
+def _never_sleep(seconds: float) -> None:
+    raise AssertionError(f"waited {seconds} s for a call that should not be retried")
+
+
 @pytest.fixture(params=["local", "hub"])
 def store(request: pytest.FixtureRequest, tmp_path: Path) -> RunStore:
-    """Each store, the Hub's with its client faked."""
+    """Each store, the Hub's with its client faked and nothing to retry."""
     if request.param == "local":
         return LocalRunStore(tmp_path / "store")
-    return HubRunStore(REPO, api=FakeHub())
+    return HubRunStore(REPO, api=FakeHub(), sleep=_never_sleep)
 
 
 @pytest.mark.phase(3)
@@ -108,7 +115,7 @@ def test_local_store_roundtrip(tmp_path: Path) -> None:
 @pytest.mark.phase(3)
 def test_hub_store_roundtrip(tmp_path: Path) -> None:
     fake = FakeHub()
-    store = HubRunStore(REPO, api=fake)
+    store = HubRunStore(REPO, api=fake, sleep=_never_sleep)
     run = tmp_path / "made" / RUN
     (run / "eval").mkdir(parents=True)
     (run / "eval" / "val-scores.jsonl").write_text("{}\n")
@@ -190,7 +197,7 @@ def test_retention_keeps_latest_two_and_best(store: RunStore, tmp_path: Path) ->
 def test_hub_store_calls_api(tmp_path: Path) -> None:
     fake = FakeHub()
     # No token: the client is stood in for, and a real one would find its own.
-    store = HubRunStore(REPO, api=fake)
+    store = HubRunStore(REPO, api=fake, sleep=_never_sleep)
     (tmp_path / "metrics.jsonl").write_text("{}\n")
     manifest = _manifest()
     for step in (50, 100, 150):
@@ -255,6 +262,58 @@ def test_hub_store_calls_api(tmp_path: Path) -> None:
     }
     assert calls[8]["allow_patterns"] == [f"runs/{RUN}/*"]
     assert Path(calls[8]["local_dir"]).parent == tmp_path / "runs"
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx2.ConnectError("connection refused"),
+        httpx2.ReadTimeout("read timed out"),
+        hub_error(503),
+        hub_error(429),
+        RuntimeError("Error while uploading 'runs/x/metrics.jsonl' to the Hub."),
+    ],
+)
+def test_hub_store_retries_network_errors_with_backoff(
+    error: BaseException, tmp_path: Path
+) -> None:
+    (tmp_path / "metrics.jsonl").write_text("{}\n")
+    waits: list[float] = []
+    fake = FakeHub()
+    store = HubRunStore(REPO, api=fake, sleep=waits.append)
+
+    fake.fail["upload_file"] = [error, error]
+    store.put_file(RUN, tmp_path / "metrics.jsonl", "metrics.jsonl")
+    assert waits == [2.0, 4.0] and len(fake.calls) == 3
+    assert fake.files == {f"runs/{RUN}/metrics.jsonl": b"{}\n"}
+
+    waits.clear()
+    fake.calls.clear()
+    fake.fail["list_repo_files"] = [error] * 4
+    with pytest.raises(StoreUnavailable, match="failed 4 times") as raised:
+        store.runs()
+    assert raised.value.__cause__ is error
+    assert waits == [2.0, 4.0, 8.0] and len(fake.calls) == 4
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    "error",
+    [
+        hub_error(401, RepositoryNotFoundError),
+        hub_error(403),
+        OfflineModeIsEnabled("HF_HUB_OFFLINE is set"),
+        ValueError("Invalid repo id"),
+    ],
+)
+def test_hub_store_fails_at_once_on_other_errors(error: BaseException) -> None:
+    fake = FakeHub()
+    store = HubRunStore(REPO, api=fake, sleep=_never_sleep)
+    fake.fail["list_repo_files"] = [error]
+    with pytest.raises(type(error)) as raised:
+        store.latest_checkpoint(RUN)
+    assert raised.value is error and len(fake.calls) == 1
 
 
 @pytest.mark.phase(3)
