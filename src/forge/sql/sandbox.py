@@ -69,7 +69,12 @@ class SandboxTimeout(TimeoutError):
 
 
 class SandboxError(RuntimeError):
-    """A worker failed outside the job it ran: it didn't start, or it died."""
+    """A worker failed outside the job it ran: it didn't start, it died, or a job's
+    exception or result couldn't cross the pipe."""
+
+
+class SandboxWorkerDied(SandboxError):
+    """A worker died while it ran a job; the pool starts a fresh one for the next."""
 
 
 @dataclass(frozen=True)
@@ -168,8 +173,10 @@ class SandboxPool:
 
         ``fn`` must be a module-level function, which is how a job crosses to a worker,
         and ``executor`` is the worker's own. Raises ``SandboxTimeout`` when the worker
-        had to be killed and ``SandboxError`` when it died; an exception ``fn`` raises is
-        raised here, with the worker's traceback as a note.
+        had to be killed and ``SandboxWorkerDied`` when it died under ``fn``. Any other
+        ``SandboxError`` means no worker could start, or ``fn``'s result or exception
+        couldn't cross the pipe. An exception ``fn`` raises is raised here, with the
+        worker's traceback as a note.
         """
         if timeout_s <= 0:
             raise ValueError(f"timeout_s must be positive, got {timeout_s}")
@@ -177,8 +184,22 @@ class SandboxPool:
         if isinstance(outcome, _Killed):
             raise SandboxTimeout(f"killed after {outcome.ms:.0f} ms (timeout {timeout_s:g} s)")
         if isinstance(outcome, _Died):
-            raise SandboxError(f"sandbox worker died with exit code {outcome.exitcode}")
+            raise SandboxWorkerDied(f"sandbox worker died with exit code {outcome.exitcode}")
         return cast(T, outcome.value)
+
+    def start(self) -> None:
+        """Start every worker now and wait until each one is ready for a job.
+
+        Workers otherwise start when work comes, inside the call that brings it. Raises
+        ``SandboxError`` when a worker can't start.
+        """
+        if self._closed:
+            raise RuntimeError("the sandbox pool is closed")
+        for slot, worker in enumerate(self._slots):
+            if worker is None:
+                self._spawn(slot)
+        while not all(worker is not None and worker.ready for worker in self._slots):
+            self._receive({}, START_TIMEOUT_S)
 
     def close(self) -> None:
         """Stop every worker; the pool can't be used after this."""
@@ -299,7 +320,7 @@ class SandboxPool:
         for slot, worker in waiting.items():
             if worker.conn in ready:
                 try:
-                    message = worker.conn.recv()
+                    payload = worker.conn.recv_bytes()
                 except (EOFError, OSError):
                     worker.process.join()
                     if not worker.ready:
@@ -313,9 +334,9 @@ class SandboxPool:
                     self._replace(slot, f"died with exit code {worker.process.exitcode}")
                     continue
                 if worker.ready:
-                    replies.append((slot, cast(tuple[str, object], message)))
+                    replies.append((slot, _load_reply(payload)))
                 else:
-                    worker.ready = message == _READY
+                    worker.ready = pickle.loads(payload) == _READY
             elif not worker.ready and time.monotonic() - worker.started >= START_TIMEOUT_S:
                 self._replace(slot, "didn't start")
                 raise SandboxError(f"a sandbox worker didn't start in {START_TIMEOUT_S:g} s")
@@ -371,6 +392,22 @@ def _exec_result(outcome: _Outcome, timeout_ms: int) -> ExecResult:
             ms=outcome.ms,
         )
     return cast(ExecResult, outcome.value)
+
+
+def _load_reply(payload: bytes) -> tuple[str, object]:
+    """A worker's reply, or an error in its place when it can't be rebuilt here.
+
+    The whole message was read, so the worker and its pipe are fine and only this reply
+    is lost: a value can pickle in the worker and still fail to load, such as an object
+    whose class needs other arguments than the ones it pickles with.
+    """
+    try:
+        return cast(tuple[str, object], pickle.loads(payload))
+    except Exception as exc:
+        error = SandboxError(
+            f"a sandbox job's reply could not be read back: {type(exc).__name__}: {exc}"
+        )
+        return ("error", error)
 
 
 def _run_job(

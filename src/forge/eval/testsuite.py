@@ -35,9 +35,10 @@ Around that call:
   than ``item_timeout_s``: the evaluator's own timeout can't stop work inside one row,
   or its column-permutation search in Python. A killed item is not a match, and neither
   is one whose worker crashes (a SQLite fault, or the evaluator's own code): the crash
-  is logged and scoring goes on, rather than one bad item aborting the run. The
-  evaluator calls ``asyncio.run`` for every query, which raises inside a running event
-  loop such as a notebook cell's; a worker has none.
+  is logged and scoring goes on, rather than one bad item aborting the run. A worker
+  that can't start raises, since it would score every item as a miss. The evaluator
+  calls ``asyncio.run`` for every query, which raises inside a running event loop such
+  as a notebook cell's; a worker has none.
 
 The evaluator opens its own connections, read-only and with the executor's authorizer
 and limits (``third_party/test_suite_eval/CHANGES.md``), so SQL that got past these
@@ -60,7 +61,7 @@ from test_suite_eval.parse import remove_distinct
 from forge.core.types import ErrorKind
 from forge.data.spider import db_path, resolve_data_dir
 from forge.sql.executor import SqliteExecutor, strip_leading
-from forge.sql.sandbox import SandboxError, SandboxPool, SandboxTimeout
+from forge.sql.sandbox import SandboxPool, SandboxTimeout, SandboxWorkerDied
 
 log = logging.getLogger(__name__)
 
@@ -112,10 +113,11 @@ def official_exec_match(
 
     Items run one at a time in a worker of ``pool``, or of a one-worker pool made for
     this call; a pool passed in must be on the same data directory. An item still
-    running after ``item_timeout_s`` is killed and counts as no match. Raises
-    ``OfficialEvalTimeout`` once all of them take longer than ``timeout_s`` (worker
-    start-ups aside), killing the item then running. A missing database raises
-    ``DataNotFound``, and a failing gold query ``GoldQueryFailed``.
+    running after ``item_timeout_s`` is killed and counts as no match, and so does one
+    whose worker dies. Raises ``OfficialEvalTimeout`` once all of them take longer than
+    ``timeout_s`` (worker start-ups aside), killing the item then running. A missing
+    database raises ``DataNotFound``, a failing gold query ``GoldQueryFailed``, and a
+    worker that can't start ``forge.sql.sandbox.SandboxError``.
     """
     if timeout_s <= 0:
         raise ValueError(f"timeout_s must be positive, got {timeout_s}")
@@ -144,11 +146,13 @@ def official_exec_match(
                     "official EX item %d on %s killed after %g s", number, job.db_id, item_timeout_s
                 )
                 verdicts.append(False)
-            except SandboxError as exc:
+            except SandboxWorkerDied as exc:
                 # A worker that crashed under one item (a SQLite fault, or the evaluator's
                 # own code) must not abort the whole evaluation. Count the item as no
-                # match, as run_many does for a worker death, and go on; the pool has
-                # already started a fresh worker for the next item.
+                # match, as run_many does for a worker death, and go on; the pool starts
+                # a fresh worker for the next item. Every other SandboxError is raised:
+                # a worker that can't start would fail every item alike, and a reply
+                # that can't cross the pipe is a bug, not a wrong prediction.
                 log.warning("official EX item %d on %s: %s", number, job.db_id, exc)
                 verdicts.append(False)
     return verdicts

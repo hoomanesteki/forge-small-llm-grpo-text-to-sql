@@ -9,8 +9,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from pathlib import Path
 
 from forge.core.types import ExecResult
+from forge.eval import testsuite
+from forge.eval.testsuite import MatchItem
 from forge.sql.executor import SqliteExecutor
 
 # The limits FG-191 set, under which the review found one row holding seconds of work.
@@ -57,12 +60,18 @@ def fail(executor: SqliteExecutor, message: str) -> None:
 
 
 class Unpicklable(Exception):
+    """Pickles from its message alone, so it pickles but can't be rebuilt from that."""
+
     def __init__(self, first: str, second: str) -> None:
         super().__init__(f"{first} and {second}")
 
 
 def fail_unpicklably(executor: SqliteExecutor) -> None:
     raise Unpicklable("one", "two")
+
+
+def returns_unloadable(executor: SqliteExecutor) -> Unpicklable:
+    return Unpicklable("one", "two")
 
 
 class Unsendable:
@@ -78,3 +87,10 @@ def returns_unsendable(executor: SqliteExecutor) -> Unsendable:
 
 def sleep(executor: SqliteExecutor, seconds: float) -> None:
     time.sleep(seconds)
+
+
+def match_or_die(executor: SqliteExecutor, root: Path, item: MatchItem, die_on: str) -> bool:
+    """``forge.eval.testsuite._match``, except that the worker dies on ``die_on``."""
+    if item.pred_sql == die_on:
+        os._exit(3)
+    return testsuite._match(executor, root, item)
