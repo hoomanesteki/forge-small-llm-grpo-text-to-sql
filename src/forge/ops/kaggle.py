@@ -23,14 +23,18 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 
+from forge.data.spider import CHECKSUMS, load_checksums, verify_files
 from forge.ops.dotenv import forge_env
+from forge.ops.manifest import DirtyTreeError, git_sha
 
 TEMPLATE = Path("kaggle") / "kernel-metadata.template.json"  # relative to the repo root
 METADATA_FILE = "kernel-metadata.json"
@@ -227,8 +231,34 @@ def _strings(meta: Mapping[str, Any]) -> list[tuple[str, str]]:
     return found
 
 
+CODE_SLUG = "forge-code"
+DATA_SLUG = "forge-spider"
 OWNER_ENV = "FORGE_KAGGLE_USER"
+DATASET_METADATA_FILE = "dataset-metadata.json"
+GIT_SHA_FILE = "GIT_SHA"
+CHECKSUM_FILE = "spider.sha256"
+# Relative to the repo root; git ignores build/.
+REQUIREMENTS = Path("kaggle") / "requirements-gpu.txt"
+CODE_BUNDLE = Path("build") / "kaggle-code"
+DATA_BUNDLE = Path("build") / "kaggle-data"
 
+# CC BY-SA 4.0 asks for the authors, the license and its link wherever the data goes.
+SPIDER_DESCRIPTION = (
+    "Spider 1.0 for Forge's text-to-SQL jobs: the question and schema JSON files and every "
+    "`database/<db>/<db>.sqlite`, unchanged, each listed with its sha256 in `spider.sha256`."
+    "\n\n"
+    "Spider 1.0 by Tao Yu, Rui Zhang, Kai Yang, Michihiro Yasunaga, Dongxu Wang, Zifan Li, "
+    "James Ma, Irene Li, Qingning Yao, Shanelle Roman, Zilin Zhang and Dragomir Radev "
+    "(Yale LILY), licensed under CC BY-SA 4.0 "
+    "(https://creativecommons.org/licenses/by-sa/4.0/)."
+    "\n\n"
+    'Yu et al., "Spider: A Large-Scale Human-Labeled Dataset for Complex and Cross-Domain '
+    'Semantic Parsing and Text-to-SQL Task", EMNLP 2018, pages 3911-3921, '
+    "doi:10.18653/v1/D18-1425.\n"
+)
+
+# One package at one exact version: ``name==1.2.3``, with extras allowed.
+_PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?==[A-Za-z0-9._+!-]+")
 # kaggle 2.2.5 prints "Dataset creation error: ..." or "Dataset version creation error: ..."
 # on stdout and exits 0 when the server refuses an upload.
 _UPLOAD_REFUSED = re.compile(r"creation error", re.IGNORECASE)
@@ -238,7 +268,7 @@ Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 
 class KaggleError(RuntimeError):
-    """A kaggle command failed, or printed a failure and exited 0."""
+    """A kaggle or uv command failed, or printed a failure and exited 0."""
 
 
 def run_command(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -309,6 +339,119 @@ def kaggle_owner(env: Mapping[str, str], home: Path) -> str:
     return owner
 
 
+def dataset_metadata(ref: str, license_name: str, description: str | None = None) -> dict[str, Any]:
+    """``dataset-metadata.json`` for the private dataset ``ref``, titled with its slug."""
+    meta: dict[str, Any] = {"id": ref, "title": ref.split("/")[1]}
+    if description is not None:
+        meta["description"] = description
+    meta["licenses"] = [{"name": license_name}]
+    # create keeps a dataset private without -u, but `kaggle datasets metadata --update`
+    # makes it public unless the metadata says otherwise.
+    meta["isPrivate"] = True
+    return meta
+
+
+def unpinned_requirements(text: str) -> list[str]:
+    """The lines of a requirements file that don't pin one exact version with ``==``."""
+    lines = (raw.split("#", 1)[0].strip() for raw in text.splitlines())
+    return [line for line in lines if line and not _PINNED.fullmatch(line)]
+
+
+@dataclass(frozen=True)
+class CodeBundle:
+    path: Path
+    wheel: str  # the wheel's file name
+    git_sha: str
+
+
+@dataclass(frozen=True)
+class Published:
+    ref: str
+    created: bool  # False for a new version of a dataset that was there
+    output: str  # what the kaggle CLI printed
+
+
+def build_code_bundle(root: Path, owner: str, *, run: Runner = run_command) -> CodeBundle:
+    """Write ``build/kaggle-code``: the wheel built at HEAD, the pinned GPU requirements,
+    ``GIT_SHA`` and the dataset metadata, and nothing else.
+
+    A tree with uncommitted changes is refused before anything is built: the wheel would
+    hold code that ``GIT_SHA`` doesn't name.
+    """
+    try:
+        sha = git_sha(root)
+    except DirtyTreeError as exc:
+        raise DirtyTreeError(
+            "the working tree has uncommitted changes; commit them first, so the code "
+            "dataset holds a commit CI can test"
+        ) from exc
+    unpinned = unpinned_requirements((root / REQUIREMENTS).read_text(encoding="utf-8"))
+    if unpinned:
+        raise ValueError(f"{REQUIREMENTS} must pin each package with ==, not {unpinned}")
+    out = _fresh_dir(root / CODE_BUNDLE)
+    _check(
+        run, ["uv", "build", str(root), "--wheel", "--out-dir", str(out), "--no-create-gitignore"]
+    )
+    built = sorted(path.name for path in out.iterdir())
+    if len(built) != 1 or not built[0].endswith(".whl"):
+        raise KaggleError(f"uv build should leave one wheel in {out}, but left {built}")
+    shutil.copyfile(root / REQUIREMENTS, out / REQUIREMENTS.name)
+    (out / GIT_SHA_FILE).write_text(f"{sha}\n", encoding="utf-8")
+    _write_json(out / DATASET_METADATA_FILE, dataset_metadata(f"{owner}/{CODE_SLUG}", "MIT"))
+    return CodeBundle(out, built[0], sha)
+
+
+def build_data_bundle(
+    root: Path, owner: str, data_dir: Path, checksums: Traversable = CHECKSUMS
+) -> Path:
+    """Write ``build/kaggle-data``: each file ``checksums`` lists, the list itself as
+    ``spider.sha256``, and the dataset metadata with Spider's attribution.
+
+    Every file is checked against the list first, so only verified data is uploaded;
+    ``ChecksumMismatch`` names each one that is missing or differs.
+    """
+    expected = load_checksums(checksums)
+    verify_files(data_dir, expected)
+    out = _fresh_dir(root / DATA_BUNDLE)
+    for rel in sorted(expected):
+        target = out / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(data_dir / rel, target)
+    (out / CHECKSUM_FILE).write_bytes(checksums.read_bytes())
+    meta = dataset_metadata(f"{owner}/{DATA_SLUG}", "CC-BY-SA-4.0", SPIDER_DESCRIPTION)
+    _write_json(out / DATASET_METADATA_FILE, meta)
+    return out
+
+
+def publish_code(root: Path, owner: str, client: KaggleClient) -> tuple[CodeBundle, Published]:
+    """Build the code bundle and upload it: a new version noted with the SHA, or the
+    dataset's first version when it doesn't exist yet. uv runs through the client's runner."""
+    bundle = build_code_bundle(root, owner, run=client.run)
+    ref = f"{owner}/{CODE_SLUG}"
+    if client.dataset_exists(ref):
+        return bundle, Published(ref, False, client.version_dataset(bundle.path, bundle.git_sha))
+    return bundle, Published(ref, True, client.create_dataset(bundle.path))
+
+
+def publish_data(
+    root: Path,
+    owner: str,
+    client: KaggleClient,
+    data_dir: Path,
+    checksums: Traversable = CHECKSUMS,
+) -> Published | None:
+    """Create ``<owner>/forge-spider`` from the verified data; ``None`` if it exists.
+
+    The checksum list pins Spider, so the data never changes and one upload serves every
+    job. The check comes first, so a dataset that is there costs no copy of the data.
+    """
+    ref = f"{owner}/{DATA_SLUG}"
+    if client.dataset_exists(ref):
+        return None
+    bundle = build_data_bundle(root, owner, data_dir, checksums)
+    return Published(ref, True, client.create_dataset(bundle))
+
+
 def _kaggle_json_username(env: Mapping[str, str], home: Path) -> str | None:
     config_dir = (
         Path(env["KAGGLE_CONFIG_DIR"]) if env.get("KAGGLE_CONFIG_DIR") else home / ".kaggle"
@@ -323,6 +466,18 @@ def _kaggle_json_username(env: Mapping[str, str], home: Path) -> str | None:
         raise KaggleError(f"{path} is not valid JSON: {exc}") from exc
     username = data.get("username") if isinstance(data, dict) else None
     return username if isinstance(username, str) and username else None
+
+
+def _fresh_dir(path: Path) -> Path:
+    # Files left from an earlier bundle would be uploaded with this one.
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
+
+
+def _write_json(path: Path, data: Mapping[str, Any]) -> None:
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _run(run: Runner, command: list[str]) -> subprocess.CompletedProcess[str]:
