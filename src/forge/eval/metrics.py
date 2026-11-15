@@ -1,4 +1,4 @@
-"""Scores in aggregate (stage 9): the valid rate and EX, with intervals.
+"""Scores in aggregate (stage 9): rates with intervals and paired comparisons.
 
 Every interval is a 95% percentile bootstrap over 1,000 resamples from
 ``numpy.random.default_rng(0)``, seeded afresh for each interval. An interval then
@@ -7,10 +7,15 @@ same numbers, and the intervals over one set of questions share their resamples.
 
 A resample draws whole questions, since the samples of one question are not
 independent.
+
+``compare`` counts a sample as right by official EX when every score of both runs has
+an official verdict, and by fast EX otherwise (``ex_metric``). Reported numbers are
+official (ADR-0008), and a run stopped before its official batch can still be compared.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, get_args
 
@@ -20,12 +25,14 @@ from pydantic import BaseModel
 from forge.core.types import Hardness, Score
 from forge.eval.run_files import Key, key
 
+Metric = Literal["ex_fast", "ex_official"]
 Outcome = Literal["valid", "ex_fast", "ex_official"]
 
 LEVELS: tuple[Hardness, ...] = get_args(Hardness)
 RESAMPLES = 1000
 SEED = 0
 PERCENTILES = (2.5, 97.5)  # a 95% interval
+SHOWN_SAMPLES = 3
 
 
 class Estimate(BaseModel, frozen=True):
@@ -64,6 +71,30 @@ class Summary(BaseModel, frozen=True):
     by_hardness: dict[Hardness, HardnessEx]  # the levels present, easy to extra
 
 
+class McNemar(BaseModel, frozen=True):
+    """Paired outcomes as a 2x2 table, with the exact McNemar test on them."""
+
+    both: int  # right in a and in b
+    only_a: int  # right in a, wrong in b
+    only_b: int  # wrong in a, right in b
+    neither: int  # wrong in both
+    # Two-sided, with each question an independent pair. None when a question has
+    # several samples, which are not independent.
+    pvalue: float | None
+
+
+class Comparison(BaseModel, frozen=True):
+    """What ``compare`` returns: run b against run a on the same samples."""
+
+    metric: Metric
+    n: int  # pairs
+    questions: int
+    ex_a: float
+    ex_b: float
+    delta: Estimate  # ex_b - ex_a, with a paired bootstrap interval
+    mcnemar: McNemar
+
+
 def summarize(scores: Iterable[Score]) -> Summary:
     """The valid rate and EX, fast and official, with EX by hardness too; each with its
     interval.
@@ -94,6 +125,53 @@ def summarize(scores: Iterable[Score]) -> Summary:
             if groups
         },
     )
+
+
+def compare(scores_a: Iterable[Score], scores_b: Iterable[Score]) -> Comparison:
+    """Run b against run a, each sample paired with the same (example id, sample) in the other.
+
+    Raises ``ValueError`` unless both runs scored the same samples, and for scores
+    ``summarize`` refuses.
+    """
+    a = _questions(scores_a)
+    a_scores = [score for group in a.values() for score in group]
+    b = {key(score): score for group in _questions(scores_b).values() for score in group}
+    a_keys = {key(score) for score in a_scores}
+    if a_keys != b.keys():
+        raise ValueError(_mismatch(a_keys, set(b)))
+    metric = ex_metric([*a_scores, *b.values()])
+    table: Counter[tuple[bool, bool]] = Counter()
+    gains: list[int] = []
+    sizes: list[int] = []
+    for group in a.values():
+        pairs = [(_hit(score, metric), _hit(b[key(score)], metric)) for score in group]
+        table.update(pairs)
+        gains.append(sum(int(right_b) - int(right_a) for right_a, right_b in pairs))
+        sizes.append(len(pairs))
+    n = len(a_scores)
+    both, only_a = table[True, True], table[True, False]
+    only_b, neither = table[False, True], table[False, False]
+    low, high = _interval(gains, sizes)
+    return Comparison(
+        metric=metric,
+        n=n,
+        questions=len(a),
+        ex_a=(both + only_a) / n,
+        ex_b=(both + only_b) / n,
+        delta=Estimate(value=(only_b - only_a) / n, low=low, high=high),
+        mcnemar=McNemar(
+            both=both,
+            only_a=only_a,
+            only_b=only_b,
+            neither=neither,
+            pvalue=_mcnemar_pvalue(both, only_a, only_b, neither) if n == len(a) else None,
+        ),
+    )
+
+
+def ex_metric(scores: Iterable[Score]) -> Metric:
+    """Official EX when every score has an official verdict, else fast EX."""
+    return "ex_official" if all(score.ex_official is not None for score in scores) else "ex_fast"
 
 
 def _questions(scores: Iterable[Score]) -> dict[str, list[Score]]:
@@ -139,3 +217,20 @@ def _interval(numerators: Sequence[int], denominators: Sequence[int]) -> tuple[f
     drawn = totals[picks].sum(axis=1)
     low, high = np.percentile(drawn[:, 0] / drawn[:, 1], PERCENTILES)
     return float(low), float(high)
+
+
+def _mcnemar_pvalue(both: int, only_a: int, only_b: int, neither: int) -> float:
+    # statsmodels brings in pandas and scipy, about a second, and only compare needs it.
+    from statsmodels.stats.contingency_tables import mcnemar
+
+    return float(mcnemar([[both, only_a], [only_b, neither]], exact=True).pvalue)
+
+
+def _mismatch(a: set[Key], b: set[Key]) -> str:
+    parts = []
+    for name, extra in (("a", a - b), ("b", b - a)):
+        if extra:
+            shown = ", ".join(f"{i} sample {j}" for i, j in sorted(extra)[:SHOWN_SAMPLES])
+            more = ", ..." if len(extra) > SHOWN_SAMPLES else ""
+            parts.append(f"{len(extra)} only in run {name} ({shown}{more})")
+    return "the runs scored different samples, so they can't be paired: " + "; ".join(parts)
