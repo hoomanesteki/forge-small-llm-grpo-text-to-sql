@@ -56,7 +56,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
 | FG-401 | SFT dataset builder | 3 | done |  |  | `forge.train.sft_data`: TRL conversational prompt-completion rows (`prompt` from `fit_prompt`, `completion` the gold query in a sql block, `example_id`, `db_id`) from `load_train()` only, checked again by `assert_train_only`; repeats (casefolded, spacing collapsed), `FAILING_GOLD_IDS`, prompts over the limit and prompts that show a gold table without columns are left out and counted; `forge data build-sft --prompt-version --tokenizer [--out]` saves `data/sft/<sha256>/` with `meta.json`; `load_tokenizer` takes `<repo>@<revision>`. Masking checked through `SFTTrainer`'s own preparation with the tiny Qwen2.5 tokenizer |
-| FG-402 | Training backend abstraction and configs | 5 | todo |  |  |  |
+| FG-402 | Training backend abstraction and configs | 5 | done |  |  | `forge.train.config`: strict pydantic `LoraConfig`, `SftConfig`, `GrpoConfig`, `OpsConfig` (and `run`, `data`) from one YAML file, refusing unknown or repeated keys, `max_completion_length` over 512, `num_generations` that doesn't divide the generation batch, any split but train, and Unsloth or 4-bit off CUDA; `forge.train.backends`: `TrainBackend`, `TrlBackend` (float32 on CPU; bf16 on MPS from macOS 14, else float32; bf16 on CUDA where the GPU has it, else fp16) and a lazily imported `UnslothBackend`, one trainer builder for both, `max_prompt_length` dropping GRPO rows before TRL, `select_backend`; `forge.train.callbacks`: `CheckpointCallback`, `MetricsCallback` (JSONL), optional W&B, `training_callbacks`. Unsloth itself untried until a GPU job installs it |
 | FG-403 | SFT trainer with CPU smoke | 3 | todo |  |  |  |
 | FG-404 | SFT runs on Kaggle | 3 | todo |  |  |  |
 | FG-405 | SFT results and comparison | 2 | todo |  |  |  |
@@ -1023,3 +1023,24 @@ Work discovered along the way that is not a plan story.
 - `test_assistant_only_labels` is a unit test, as the plan names it, and loads the tiny model.
   The unit CI jobs have no Hugging Face cache, unlike smoke, so each of the three downloads it
   (about 21 MB); a cache step like the smoke job's would save that (FG-401).
+- `TrainBackend.sft` and `grpo` take `output_dir` and `seed` as keywords, and `load` takes
+  `seed`, since LoRA draws its first weights before any trainer seeds; plan section 3.5's
+  signatures have no place for them (FG-402).
+- The train config has no `ops.hub_run_repo`: the run store is the one `FORGE_RUN_STORE`
+  names, as for eval, so one setting names it. `run.init_adapter`, `data.curriculum`,
+  `data.filter_by_sft_pass_rate` and `rewards` are refused until FG-504, FG-505 and FG-501
+  add them (FG-402).
+- PyYAML reads `5e-6` as a string (YAML 1.1 wants `5.0e-6`). The train config loader reads it
+  as a float; `forge.eval.config` still uses `yaml.safe_load`, so `temperature: 7e-1` is
+  refused there as text (FG-402).
+- unsloth 2026.11.4 caps `trl<=1.15.0` (which can't train on CPU or MPS), `transformers<=5.17`
+  and `datasets<5`, so it can't share `uv.lock`. `UnslothBackend` is tested with a stand-in
+  module only; its install and first real run come with the first GPU job (FG-404). TRL
+  casts a 4-bit model's adapters to bf16, which fp16 can't unscale on a T4 (TRL issue 7776),
+  so `TrlBackend` casts them back to fp32 (FG-402).
+- `SFTTrainer` tokenizes with `datasets.map`, which writes four `cache-*.arrow` files into
+  the folder of a dataset opened with `load_from_disk`, so `data/sft/<hash>/` would gain
+  files. FG-403 should open it with `keep_in_memory=True`, which writes none (FG-402).
+- A periodic checkpoint whose push still fails on the network after the store's retries is
+  logged, and training goes on; any other store error stops the job. The time guard's own
+  push always raises, as before (FG-402).
