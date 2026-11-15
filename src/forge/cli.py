@@ -66,6 +66,7 @@ PromptVersionName = Literal["p1", "p2"]
 # The agreement check mutates training-side gold queries only (plan FG-108).
 AgreementSplitName = Literal["train", "val"]
 BackendName = Literal["hf", "vllm", "llamacpp", "fake"]
+DeviceName = Literal["cpu", "mps"]
 StoreName = Literal["local", "hub"]
 
 # Printed by the commands that read dev without a model, so nobody logs them as dev uses
@@ -321,6 +322,13 @@ def eval_run(
     backend: Annotated[
         BackendName, typer.Option(help="hf runs transformers; fake answers without a model.")
     ] = "hf",
+    device: Annotated[
+        DeviceName,
+        typer.Option(
+            help="Where hf runs the model: cpu, or mps for Apple silicon's GPU, which makes "
+            "the run a local-mps pilot (ADR-0016)."
+        ),
+    ] = "cpu",
     split: Annotated[SplitName, typer.Option(help="Which questions to answer.")] = "val",
     reason: Annotated[
         str | None,
@@ -378,6 +386,7 @@ def eval_run(
         model=model,
         adapter=adapter,
         backend=backend,
+        device=device,
         split=split,
         reason=reason,
         limit=limit,
@@ -425,6 +434,7 @@ def eval_run(
         f"split {split}: {run.questions} questions, {samples} each, prompt {prompt_version}, "
         f"backend {backend}, model {model}" + (f", adapter {adapter}" if adapter else "")
     )
+    typer.echo(f"platform {run.manifest.platform}")
     if run.resumed:
         typer.echo(f"resumed: {run.resumed} scores were stored by an earlier attempt")
     if len(scores) > run.resumed:

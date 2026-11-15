@@ -14,7 +14,7 @@ from forge.core.types import GenParams
 from forge.data.schema import PROMPT_VERSIONS
 from forge.data.splits import SPLITS
 from forge.eval import runner
-from forge.eval.config import BACKENDS, STORES, EvalConfig, NotAvailable, check_config
+from forge.eval.config import BACKENDS, DEVICES, STORES, EvalConfig, NotAvailable, check_config
 
 BASE = EvalConfig(model="org/model")
 
@@ -28,6 +28,12 @@ BASE = EvalConfig(model="org/model")
         ({"reason": "a look"}, ValueError, "--reason goes with --split dev"),
         ({"split": "test"}, ValueError, "split must be one of train, val, dev"),
         ({"backend": "onnx"}, ValueError, "backend must be one of hf, vllm, llamacpp, fake"),
+        ({"device": "cuda"}, ValueError, "device must be one of cpu, mps"),
+        (
+            {"device": "mps", "split": "dev", "reason": "a look"},
+            ValueError,
+            "pilots never evaluate dev",
+        ),
         ({"store": "s3"}, ValueError, "store must be one of local, hub"),
         ({"prompt_version": "p3"}, ValueError, "unknown prompt version 'p3'"),
         ({"limit": 0}, ValueError, "limit must be at least 1"),
@@ -37,6 +43,11 @@ BASE = EvalConfig(model="org/model")
         ({"run_id": "-x"}, ValueError, "names a folder"),
         ({"backend": "fake"}, ValueError, "--backend fake takes --model gold or select-1"),
         ({"backend": "fake", "model": "gold", "adapter": "a"}, ValueError, "loads no adapter"),
+        (
+            {"backend": "fake", "model": "gold", "device": "mps"},
+            ValueError,
+            "--backend fake runs no model, so it takes no --device mps",
+        ),
         ({"n": 4}, ValueError, "n=4 needs a temperature above 0"),
         ({"backend": "vllm"}, NotAvailable, "the vllm backend is not available yet"),
         ({"backend": "llamacpp"}, NotAvailable, "comes with FG-702"),
@@ -59,6 +70,7 @@ def test_config_accepted() -> None:
         EvalConfig(model="org/model", n=8, temperature=0.7, prompt_version="p2"),
         EvalConfig(model="org/model", retry=1),
         EvalConfig(model="org/model", n=4, temperature=0.7, retry=1),
+        EvalConfig(model="org/model", device="mps"),
     ):
         check_config(config)
 
@@ -73,7 +85,13 @@ def test_manifest_config_records_what_changes_a_score() -> None:
         "max_rows": 100_000,
         "official_item_timeout_s": 10.0,
     }
-    for changes in ({"n": 2, "temperature": 0.5}, {"limit": 5}, {"prompt_version": "p2"}):
+    assert config["device"] == "cpu"
+    for changes in (
+        {"n": 2, "temperature": 0.5},
+        {"limit": 5},
+        {"prompt_version": "p2"},
+        {"device": "mps"},
+    ):
         assert dataclasses.replace(BASE, **changes).manifest_config() != config
     # Where the files go and why dev was read don't change a score.
     assert dataclasses.replace(BASE, store="hub").manifest_config() == config
@@ -82,9 +100,18 @@ def test_manifest_config_records_what_changes_a_score() -> None:
 
 
 @pytest.mark.phase(2)
+def test_platform_follows_the_device() -> None:
+    # A run on Apple silicon's GPU is a local-mps pilot; every other local run is local-cpu.
+    assert BASE.platform == "local-cpu"
+    assert dataclasses.replace(BASE, device="mps").platform == "local-mps"
+    assert EvalConfig(model="gold", backend="fake").platform == "local-cpu"
+
+
+@pytest.mark.phase(2)
 def test_cli_offers_exactly_the_backends_stores_splits_and_prompts() -> None:
     hints = get_type_hints(cli.eval_run, include_extras=False)
     assert get_args(hints["backend"]) == BACKENDS
+    assert get_args(hints["device"]) == DEVICES
     assert get_args(hints["store"]) == STORES
     assert get_args(hints["split"]) == SPLITS
     assert get_args(hints["prompt_version"]) == PROMPT_VERSIONS
