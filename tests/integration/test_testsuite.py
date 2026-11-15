@@ -64,9 +64,19 @@ def test_refused_predictions_never_reach_the_evaluator(
         "DROP TABLE head",
         "DROP TABLE IF EXISTS forge_missing",
         "SELECT 1; SELECT 2",
+        # Writes SQLite rejects for a syntax or name error before it asks the authorizer.
+        "ATTACH DATABASE CASE WHEN 1 > = 1 THEN 'planted.sqlite' END AS e",
+        "ATTACH DATABASE YEAR(CURDATE()) || '.sqlite' AS e",
+        "DELETE FROM forge_missing",
+        # Writes only once the evaluator has dropped DISTINCT, or cut the input at the
+        # first statement sqlparse finds.
+        "DISTINCT ATTACH DATABASE 'hidden.sqlite' AS e",
+        "DISTINCT DELETE FROM head",
+        "DISTINCT VACUUM INTO 'copy.sqlite'",
     ]
 
-    assert official_exec_match([(DB, pred, EMPTY_GOLD) for pred in refused]) == [False] * 9
+    verdicts = official_exec_match([(DB, pred, EMPTY_GOLD) for pred in refused])
+    assert verdicts == [False] * len(refused)
     assert calls == []
 
     assert official_exec_match([(DB, "SELECT name FROM head", EMPTY_GOLD)]) == [True]
@@ -97,6 +107,24 @@ def test_official_match_closes_upstream_holes(spider_mini: Path) -> None:
     # Past sqlparse's grouping limits the evaluator can't read the prediction.
     huge = "SELECT " + " + ".join(["1"] * 6000)
     assert official_exec_match([(DB, huge, "SELECT 6000")]) == [False]
+
+
+@pytest.mark.phase(1)
+def test_official_match_sees_the_statement_sqlite_runs(spider_mini: Path) -> None:
+    # SQLite skips leading semicolons and comments; remove_distinct keeps only the first
+    # statement sqlparse finds, which for these is the bare ';' and runs to no rows.
+    names = "; SELECT name FROM head"
+    assert _upstream(names, EMPTY_GOLD) == 1
+    counted = "/* count */ ; SELECT count(*) FROM head WHERE age  >  56"
+    assert _upstream(counted, COUNT_GOLD) == 0
+
+    assert official_exec_match(
+        [
+            (DB, names, EMPTY_GOLD),
+            (DB, counted, COUNT_GOLD),
+            (DB, "; -- empty\n SELECT name FROM head WHERE age > 2000", EMPTY_GOLD),
+        ]
+    ) == [False, True, True]
 
 
 @pytest.mark.phase(1)

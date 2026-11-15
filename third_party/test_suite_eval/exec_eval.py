@@ -1,7 +1,7 @@
 # Vendored from https://github.com/taoyds/test-suite-sql-eval at commit
 # e97acc546ecbee8fa27fa8dbf025ef61493a876c, Apache-2.0 (see LICENSE).
 # Changed for Forge, see CHANGES.md: relative import, raw-string regex, read-only
-# connection, a timeout that interrupts sqlite, no prints.
+# connection with an authorizer and limits, a timeout that interrupts sqlite, no prints.
 import os
 import re
 import asyncio
@@ -26,6 +26,24 @@ TIMEOUT = 60
 EXEC_TMP_DIR = 'tmp/'
 # Forge: sqlite VM instructions between two deadline checks in exec_on_db_
 PROGRESS_STEPS = 1000
+# Forge: what get_cursor_from_path allows, the same as forge.sql.executor (a test keeps
+# them equal); copied so this package imports without Forge. Default deny: only reads
+# pass the authorizer. The limits keep each step cheap, and with no attached database
+# allowed, ATTACH and VACUUM INTO can't create files on a read-only connection.
+ALLOWED_ACTIONS = frozenset(
+    {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+)
+LIMITS = {
+    sqlite3.SQLITE_LIMIT_LENGTH: 100_000,
+    sqlite3.SQLITE_LIMIT_LIKE_PATTERN_LENGTH: 1_000,
+    sqlite3.SQLITE_LIMIT_SQL_LENGTH: 100_000,
+    sqlite3.SQLITE_LIMIT_ATTACHED: 0,
+}
+
+
+def _authorize(action, arg1, arg2, db_name, source):
+    return sqlite3.SQLITE_OK if action in ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
+
 
 def permute_tuple(element: Tuple, perm: Tuple) -> Tuple:
     assert len(element) == len(perm)
@@ -141,6 +159,11 @@ def get_cursor_from_path(sqlite_path: str):
     # file, and a missing path raises instead of being created as an empty database
     uri = Path(sqlite_path).absolute().as_uri() + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
+    # Forge: read-only still lets ATTACH and VACUUM INTO create files, and lets one value
+    # take gigabytes and seconds, so the executor's authorizer and limits apply here too
+    connection.set_authorizer(_authorize)
+    for limit, value in LIMITS.items():
+        connection.setlimit(limit, value)
     connection.text_factory = lambda b: b.decode(errors="ignore")
     cursor = connection.cursor()
     return cursor

@@ -16,10 +16,23 @@ from typer.testing import CliRunner
 from forge import cli
 from forge.data.spider import FAILING_GOLD_IDS, DataNotFound, load_raw
 from forge.sql import executor as executor_module
-from forge.sql.executor import DEFAULT_MAX_ROWS, SqlExecutor, SqliteExecutor, connect_readonly
+from forge.sql.executor import (
+    DEFAULT_MAX_ROWS,
+    LIMITS,
+    MAX_RESULT_BYTES,
+    SqlExecutor,
+    SqliteExecutor,
+    connect_readonly,
+)
 
 DB = "department_management"
 RUNAWAY = "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) SELECT count(*) FROM r"
+# Endless, and each row takes tens of milliseconds inside one SQLite call, so dozens of
+# rows pass between two progress-handler checks.
+SLOW_ROWS = (
+    RUNAWAY + " WHERE instr(printf('%.*c', 60000, 'a') || x, printf('%.*c', 30000, 'a') || 'b')",
+    RUNAWAY + " WHERE printf('%.*c', 60000, 'a') || x LIKE '%' || printf('%.*c', 500, 'a') || 'b'",
+)
 
 
 def _counting(n: int) -> str:
@@ -123,6 +136,18 @@ def test_writes_denied(
         "BEGIN",
         "SAVEPOINT s",
         "SELECT load_extension('evil')",
+        # SQLite resolves names before it asks the authorizer, so these fail on the
+        # missing name first; they are still writes.
+        "DELETE FROM forge_missing",
+        "INSERT INTO forge_missing VALUES (1)",
+        "UPDATE head SET forge_missing = 1",
+        "ALTER TABLE head DROP COLUMN forge_missing",
+        "DROP INDEX forge_missing",
+        "WITH s AS (SELECT 1) DELETE FROM forge_missing",
+        "DELETE FROM head WHERE name = 'unclosed",
+        # Statements that read but are not queries.
+        "EXPLAIN SELECT * FROM head",
+        "EXPLAIN QUERY PLAN SELECT * FROM head",
     ]
 
     for statement in statements:
@@ -201,6 +226,80 @@ def test_timeout(executor: SqliteExecutor) -> None:
 
     # Interrupting leaves the connection usable, and without the old deadline.
     assert executor.run(DB, _counting(3)).rows == [(1,), (2,), (3,)]
+
+
+@pytest.mark.phase(1)
+def test_timeout_holds_for_expensive_rows(executor: SqliteExecutor) -> None:
+    for sql in SLOW_ROWS:
+        started = time.perf_counter()
+        result = executor.run(DB, sql, timeout_ms=300)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+
+        assert (result.ok, result.error_kind) == (False, "timeout"), (sql, result)
+        # The watchdog interrupts at the next row, so at most one row's work (well under
+        # 100 ms here) runs past the deadline; the margin is for slow CI machines.
+        assert elapsed_ms < 300 + 700, sql
+    assert executor.run(DB, _counting(3)).rows == [(1,), (2,), (3,)]
+
+
+@pytest.mark.phase(1)
+def test_limits_bound_each_value(executor: SqliteExecutor, spider_mini: Path) -> None:
+    with closing(connect_readonly(_db_file(spider_mini))) as conn:
+        assert {limit: conn.getlimit(limit) for limit in LIMITS} == LIMITS
+
+    # Each of these used to run for seconds, or allocate gigabytes, and return ok.
+    cases = {
+        "SELECT length(randomblob(900000000))": "string or blob too big",
+        "SELECT count(*) FROM head WHERE length(randomblob(300000000)) > 0": (
+            "string or blob too big"
+        ),
+        "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 150) "
+        "SELECT zeroblob(2000000) FROM r": "string or blob too big",
+        "SELECT printf('%.*c', 100000, 'a') LIKE ('%' || printf('%.*c', 20000, 'a') || 'b')": (
+            "LIKE or GLOB pattern too complex"
+        ),
+        "SELECT " + " + ".join(["1"] * 30_000): "query string is too large",
+    }
+    for sql, error in cases.items():
+        started = time.perf_counter()
+        result = executor.run(DB, sql, timeout_ms=300)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+
+        assert (result.ok, result.error_kind, result.error) == (False, "other", error), sql[:60]
+        assert elapsed_ms < 300, sql[:60]
+
+    # Values up to the limit still work.
+    assert executor.run(DB, "SELECT length(randomblob(100000))").rows == [(100_000,)]
+
+
+@pytest.mark.phase(1)
+def test_result_bytes_capped(executor: SqliteExecutor) -> None:
+    blobs = (
+        "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < {n}) "
+        "SELECT x, zeroblob(99000) FROM r"
+    )
+    assert MAX_RESULT_BYTES == 64 * 2**20
+
+    # 1,000 rows of 99 kB is about 99 MB of values, under the row cap but over the budget.
+    over = executor.run(DB, blobs.format(n=1000))
+    assert (over.ok, over.error_kind) == (False, "other")
+    assert over.error == "result too big: more than 64 MiB of values"
+    assert over.rows is None
+
+    under = executor.run(DB, blobs.format(n=500))
+    assert under.ok, under.error
+    assert [row[0] for row in under.rows or ()] == list(range(1, 501))
+
+
+@pytest.mark.phase(1)
+def test_run_many_bounds_each_item(executor: SqliteExecutor) -> None:
+    items = [(DB, SLOW_ROWS[0]), (DB, "SELECT count(*) FROM head"), (DB, SLOW_ROWS[1])] * 2
+
+    results = executor.run_many(items, workers=2, timeout_ms=300)
+
+    assert [r.error_kind for r in results] == ["timeout", None, "timeout"] * 2
+    # Each item stops at its own deadline inside the worker.
+    assert all(r.ms < 300 + 700 for r in results), [round(r.ms) for r in results]
 
 
 @pytest.mark.phase(1)

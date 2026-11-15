@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import hashlib
 import math
+import shutil
 from collections import Counter
 from itertools import combinations
 from pathlib import Path
 
 import pytest
+from test_suite_eval import exec_eval
 
 from forge.core.types import ErrorKind, Example
-from forge.data.spider import load_raw
+from forge.data.spider import db_path, load_raw
 from forge.data.splits import (
     MANIFEST_DIR,
     SPLITS,
@@ -35,6 +37,7 @@ from forge.data.splits import (
 )
 from forge.eval.agreement import AGREEMENT_TARGET, agreement_mutations, agreement_rate, score
 from forge.eval.mutations import CHANGES
+from forge.eval.testsuite import official_exec_match
 from forge.sql.executor import SqliteExecutor
 
 
@@ -106,13 +109,20 @@ I2_DENIED = (
     "INSERT INTO {t} SELECT * FROM {t}",
     "REPLACE INTO {t} SELECT * FROM {t}",
     "UPDATE {t} SET {c} = NULL",
+    "UPDATE {t} SET forge_missing = 1",
     "DELETE FROM {t}",
+    "DELETE FROM forge_missing",
+    "INSERT INTO forge_missing VALUES (1)",
+    "DELETE FROM {t} WHERE {c} = 'unclosed",
     "WITH s AS (SELECT 1) DELETE FROM {t}",
+    "WITH s AS (SELECT 1) DELETE FROM forge_missing",
     "DROP TABLE {t}",
     "DROP TABLE IF EXISTS forge_missing",
     "DROP VIEW IF EXISTS forge_missing",
     "ALTER TABLE {t} RENAME TO forge_gone",
     "ALTER TABLE {t} ADD COLUMN forge_extra TEXT",
+    "ALTER TABLE {t} DROP COLUMN forge_missing",
+    "DROP INDEX forge_missing",
     "CREATE TABLE forge_new AS SELECT * FROM {t}",
     "CREATE TEMP TABLE forge_new AS SELECT * FROM {t}",
     "CREATE INDEX forge_index ON {t} ({c})",
@@ -121,6 +131,7 @@ I2_DENIED = (
     "ATTACH DATABASE '{scratch}/attached.sqlite' AS evil",
     "ATTACH DATABASE 'relative.sqlite' AS evil",
     "ATTACH DATABASE 'file:{scratch}/uri.sqlite?mode=rwc' AS evil",
+    "ATTACH DATABASE CASE WHEN 1 > = 1 THEN '{scratch}/case.sqlite' END AS evil",
     "DETACH DATABASE main",
     "PRAGMA writable_schema = 1",
     "PRAGMA journal_mode = WAL",
@@ -133,6 +144,7 @@ I2_DENIED = (
     "ANALYZE {t}",
     "BEGIN IMMEDIATE",
     "SAVEPOINT forge",
+    "EXPLAIN SELECT * FROM {t}",
     "SELECT * FROM {t}; DELETE FROM {t}",
     "SELECT 1; DROP TABLE {t}",
 )
@@ -140,7 +152,8 @@ I2_JUNK: tuple[tuple[str, ErrorKind], ...] = (
     ("", "empty_sql"),
     ("-- DELETE FROM {t}", "empty_sql"),
     ("SELEC * FORM {t}", "syntax"),
-    ("DELETE FROM {t} WHERE {c} = 'unclosed", "syntax"),
+    (" \v", "empty_sql"),
+    ("SELECT * FROM {t} WHERE {c} = 'unclosed", "syntax"),
     ("SELECT * FROM forge_missing", "no_such_table"),
     ("SELECT forge_missing FROM {t}", "no_such_column"),
     ("SELECT * FROM {t} WHERE {c} = ?", "other"),
@@ -207,6 +220,75 @@ def test_i2_db_files_unchanged(
 
     assert _file_hashes(spider_mini / "database") == before
     assert list(tmp_path.iterdir()) == []
+
+
+# Predictions that write files unless every layer holds. {folder} is the database's own
+# folder, where the evaluator runs gold on every .sqlite file, and {scratch} the working
+# directory. Some are writes only after the evaluator's rewrites: postprocess turns '> ='
+# into '>=', replace_cur_year turns YEAR(CURDATE()) into 2020, and remove_distinct drops
+# DISTINCT and keeps only the first statement sqlparse finds.
+I2_OFFICIAL = (
+    "ATTACH DATABASE CASE WHEN 1 > = 1 THEN '{folder}/planted.sqlite' END AS e",
+    "ATTACH DATABASE '{scratch}/' || YEAR(CURDATE()) || '.sqlite' AS e",
+    "ATTACH DATABASE '{folder}/attached.sqlite' AS e",
+    "ATTACH DATABASE 'relative.sqlite' AS e",
+    "DISTINCT ATTACH DATABASE '{folder}/hidden.sqlite' AS e",
+    "DISTINCT ATTACH DATABASE 'file:{scratch}/uri.sqlite?mode=rwc' AS e",
+    "VACUUM INTO '{folder}/copy.sqlite'",
+    "DISTINCT VACUUM INTO '{scratch}/vacuum.sqlite'",
+    "; VACUUM INTO '{scratch}/leading.sqlite'",
+    "DISTINCT DELETE FROM {t}",
+    "DISTINCT DROP TABLE {t}",
+    "DISTINCT CREATE TABLE forge_new AS SELECT 1",
+    "DELETE FROM forge_missing",
+)
+EMPTY_GOLD = "SELECT 1 WHERE 0"  # empty on every database, so a no-op would match
+
+
+@pytest.mark.phase(1)
+def test_i2_official_eval_leaves_files_unchanged(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A copy, so a regression can't plant files in the committed fixture.
+    data = tmp_path / "spider"
+    shutil.copytree(spider_mini, data)
+    monkeypatch.setenv("FORGE_DATA_DIR", str(data))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    before = _file_hashes(data)
+
+    items: list[tuple[str, str, str]] = []
+    with SqliteExecutor(data) as executor:
+        for folder in sorted((data / "database").iterdir()):
+            listing = executor.run(
+                folder.name, "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+            table = _quote((listing.rows or [("missing",)])[0][0])
+            for template in I2_OFFICIAL:
+                pred = template.format(folder=folder, scratch=scratch, t=table)
+                items.append((folder.name, pred, EMPTY_GOLD))
+    assert len(items) == 5 * len(I2_OFFICIAL)
+
+    assert official_exec_match(items) == [False] * len(items)
+    # The evaluator's own connections hold too, without Forge's checks in front of them.
+    # Its verdicts are upstream's: it runs only the ';' of '; VACUUM INTO ...', which
+    # matches the empty gold result. Only the files are checked here.
+    for db_id, pred, gold in items:
+        exec_eval.eval_exec_match(
+            db=str(db_path(db_id, data)),
+            p_str=pred,
+            g_str=gold,
+            plug_value=False,
+            keep_distinct=False,
+            progress_bar_for_each_datapoint=False,
+        )
+
+    assert _file_hashes(data) == before
+    assert list(scratch.iterdir()) == []
+    # Nothing was planted beside the databases, so gold still runs on every one of them.
+    databases = sorted({db_id for db_id, _, _ in items})
+    assert official_exec_match([(db, EMPTY_GOLD, EMPTY_GOLD) for db in databases]) == [True] * 5
 
 
 @pytest.mark.phase(1)
