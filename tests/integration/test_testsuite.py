@@ -26,6 +26,7 @@ from forge.eval.agreement import (
 )
 from forge.eval.testsuite import GoldQueryFailed, OfficialEvalTimeout, official_exec_match
 from tests.fakes import InlineSandbox
+from tests.sandbox_jobs import review_query
 
 DB = "department_management"
 # No head is older than 1000, so this gold result is empty.
@@ -182,15 +183,18 @@ def test_official_match_kills_a_pathological_prediction(
         "head AS f, head AS g, head AS h, head AS i"
     )
     items = [(DB, runaway, COUNT_GOLD), (DB, cartesian, COUNT_GOLD), (DB, COUNT_GOLD, COUNT_GOLD)]
+    # The FG-191 review's queries now fail on the length limit at once, here too.
+    items += [(DB, review_query(100), COUNT_GOLD), (DB, review_query(200), COUNT_GOLD)]
     caplog.set_level(logging.DEBUG, logger="forge")
 
     start = time.monotonic()
     verdicts = official_exec_match(items, item_timeout_s=0.5)
     elapsed = time.monotonic() - start
 
-    # Two kills of 0.5 s, each followed by a fresh worker's start-up.
-    assert verdicts == [False, False, True]
-    assert elapsed < 2 * 0.5 + 3.0
+    assert verdicts == [False, False, True, False, False]
+    # Two kills of 0.5 s and three worker start-ups, where the evaluator's own deadline
+    # would have taken two minutes.
+    assert elapsed < 10
     assert "official EX item 0 on department_management killed after 0.5 s" in caplog.text
     assert "2 restarts so far" in caplog.text
 
@@ -261,6 +265,19 @@ def test_gold_scores_perfect_on_full_val() -> None:
 
     assert len(scores) == 872
     assert [s.mutation.example_id for s in scores if not (s.fast and s.official)] == []
+
+
+@pytest.mark.phase(1)
+@pytest.mark.requires_full_data
+def test_eval_gold_on_full_val_stays_perfect_under_the_limits() -> None:
+    # The phase 1 demo, under the SQLite limits measured from Spider (ADR-0014).
+    result = CliRunner().invoke(cli.app, ["eval", "gold", "--split", "val"])
+
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout)[2:] == [
+        ["fast", "EX", "872/872", "100.00%"],
+        ["official", "EX", "872/872", "100.00%"],
+    ]
 
 
 @pytest.mark.phase(1)
