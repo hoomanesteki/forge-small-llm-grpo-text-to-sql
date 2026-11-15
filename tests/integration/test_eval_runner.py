@@ -24,6 +24,7 @@ from forge.eval import runner
 from forge.eval.config import OFFICIAL_ITEM_TIMEOUT_S, PRED_TIMEOUT_MS, EvalConfig
 from forge.eval.run_files import RunConflict
 from forge.eval.runner import run_eval
+from forge.eval.taxonomy import ERROR_CLASSES
 from forge.infer import hf_backend
 from forge.infer.base import FakeBackend
 from forge.ops.dev_usage import read_uses
@@ -168,7 +169,8 @@ def test_end_to_end_with_fake_backend(spider_mini: Path, runs: Path, tmp_path: P
     _, generations, scores = _stored(runs / "select-one")
     assert [g.sql for g in generations] == ["SELECT 1"] * 20
     assert all(s.valid and not s.ex_fast and s.ex_official is False for s in scores)
-    assert all(s.error_class == "unclassified" for s in scores)
+    # SELECT 1 reads no table, and every val gold query reads one.
+    assert all(s.error_class == "wrong_tables" for s in scores)
     assert _summary("fast EX", 0, 20) in constant.stdout
     assert _summary("official EX", 0, 20) in constant.stdout
 
@@ -430,3 +432,57 @@ def test_hf_backend_is_built_from_the_options(
     assert not dev_log.exists()
     failed = RunManifest.model_validate_json((runs / "no-model" / "manifest.json").read_bytes())
     assert failed.status == "failed"
+
+
+@pytest.mark.phase(2)
+def test_wrong_predictions_get_their_error_class(spider_mini: Path, runs: Path) -> None:
+    val = _val()
+    intersect = next(e.gold_sql for e in val if e.id == "spider-train-00025")
+    # One wrong reply for each class, each run for real on flight_1; the rest answer gold.
+    wrong = {
+        "spider-train-00010": ("no_sql", "There are some aircraft."),
+        "spider-train-00011": ("syntax", "SELECT count(* FROM Aircraft"),
+        "spider-train-00012": ("schema_link", "SELECT name, range_km FROM Aircraft"),
+        "spider-train-00013": ("wrong_tables", "SELECT origin, distance FROM Flight"),
+        "spider-train-00027": (
+            "join",
+            "SELECT T2.name FROM Certificate AS T1 JOIN Aircraft AS T2 ON T2.aid = T1.eid "
+            "GROUP BY T1.aid ORDER BY count(*) DESC LIMIT 1",
+        ),
+        "spider-train-00017": ("projection", "SELECT name FROM Aircraft WHERE aid = 12"),
+        "spider-train-00019": (
+            "aggregation",
+            "SELECT min(distance), sum(distance), max(distance) FROM Aircraft",
+        ),
+        "spider-train-00014": ("where", "SELECT aid FROM Aircraft WHERE distance < 1000"),
+        "spider-train-00024": (
+            "group_order",
+            "SELECT origin FROM Flight GROUP BY origin ORDER BY count(*) ASC LIMIT 1",
+        ),
+        "spider-train-00016": (
+            "value",
+            "SELECT count(*) FROM Aircraft WHERE distance BETWEEN 1000 AND 2000",
+        ),
+        "spider-train-00025": ("other", intersect.replace(" INTERSECT ", " UNION ")),
+    }
+    gold = _gold_reply(val)
+
+    def reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        if prompt.example_id not in wrong:
+            return gold(prompt, params, sample_idx)
+        text = wrong[prompt.example_id][1]
+        return text if text.startswith("There") else f"```sql\n{text}\n```"
+
+    run = run_eval(
+        EvalConfig(model="gold", backend="fake", run_id="classes"),
+        backend=FakeBackend(reply, model_ref="gold"),
+        allow_dirty=True,
+        workers=1,
+    )
+    _, _, scores = _stored(runs / "classes")
+    assert scores == list(run.scores)
+    assert {s.example_id: s.error_class for s in scores} == {
+        e.id: wrong[e.id][0] if e.id in wrong else None for e in val
+    }
+    assert sorted({s.error_class for s in scores if s.error_class}) == sorted(ERROR_CLASSES)
+    assert all(s.ex_fast == (s.error_class is None) for s in scores)
