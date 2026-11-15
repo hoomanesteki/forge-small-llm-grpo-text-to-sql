@@ -143,3 +143,13 @@ def test_run_manifest_round_trips_and_keeps_outputs_separate() -> None:
 
     first.outputs["metrics"] = "runs/x/metrics.jsonl"
     assert _manifest().outputs == {}
+
+
+@pytest.mark.phase(2)
+def test_scores_stored_before_retry_read_as_one_reply() -> None:
+    # Lines from runs made before FG-206 lack the retry fields (ADR-0015).
+    line = '{"example_id":"e1","hardness":"easy","valid":true,"ex_fast":true,"ex_official":true}'
+    old = Score.model_validate_json(line)
+    assert (old.attempts, old.first_try_ex) == (1, None)
+    retried = old.model_copy(update={"attempts": 2, "first_try_ex": False})
+    assert Score.model_validate_json(retried.model_dump_json()) == retried
