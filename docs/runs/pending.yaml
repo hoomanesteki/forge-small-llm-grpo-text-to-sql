@@ -1,6 +1,8 @@
-# Runs a story needs that can't happen yet. Each entry says what blocks it, how to run it
-# and what it fills in. The story that makes the run removes its entry in the same change
-# and adds its ledger row. Nothing here is a result.
+# Runs a story needs that can't happen yet. Each entry says what blocks it and since when,
+# how to run it and what it fills in. The story that makes the run removes its entry in the
+# same change and adds its ledger row. Nothing here is a result. An entry with configs runs
+# each of them, or, with pick, the one it names; tests/integration/test_artifacts.py skips a
+# story's run checks only while the story has an entry here.
 pending:
   - story: FG-301
     run: kaggle-throughput-spike
@@ -9,6 +11,7 @@ pending:
     accelerator: NvidiaTeslaT4
     est_gpu_hours: 1.5
     status: blocked
+    since: 2026-11-15
     blocked_on:
       - a phone-verified Kaggle account (GPU and internet need it)
       - a Kaggle API token in ~/.kaggle/access_token
@@ -26,6 +29,7 @@ pending:
     accelerator: none (a CPU kernel)
     est_gpu_hours: 0
     status: blocked
+    since: 2026-11-15
     blocked_on:
       - a phone-verified Kaggle account (GPU and internet need it)
       - a Kaggle API token in ~/.kaggle/access_token
@@ -38,6 +42,7 @@ pending:
     accelerator: none (uploads only, no kernel runs)
     est_gpu_hours: 0
     status: blocked
+    since: 2026-11-15
     blocked_on:
       - a Kaggle account with an API token in ~/.kaggle/access_token
       - FORGE_KAGGLE_USER in .env, since an API token doesn't name its user
@@ -51,6 +56,7 @@ pending:
     accelerator: NvidiaTeslaT4
     est_gpu_hours: 0.5
     status: blocked
+    since: 2026-11-15
     blocked_on:
       - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
       - both datasets published once (FG-302's pending publish)
@@ -59,3 +65,116 @@ pending:
       - the FG-303 PR description, the push, wait and output of the job (acceptance criterion 4)
       - docs/compute-ledger.md, one kaggle row
       - docs/progress.md, FG-303 status done
+  - story: FG-307
+    run: baseline-val-p1
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    configs:
+      - configs/eval/qwen3-1-7b-val.yaml
+      - configs/eval/qwen3-4b-val.yaml
+      - configs/eval/qwen2-5-coder-1-5b-val.yaml
+    est_gpu_hours: 0.95
+    status: blocked
+    since: 2026-11-15
+    blocked_on:
+      - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
+      - both datasets published once (FG-302's pending publish)
+    how: docs/runbook.md, "Baselines", step 1
+    fills:
+      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
+      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
+      - docs/adr/0012-model-choice.md, the measured table
+  - story: FG-307
+    run: top-candidate-val-p2
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    pick: the candidate whose p1 val run has the best official EX
+    configs:
+      - configs/eval/qwen3-1-7b-val-p2.yaml
+      - configs/eval/qwen3-4b-val-p2.yaml
+      - configs/eval/qwen2-5-coder-1-5b-val-p2.yaml
+    est_gpu_hours: 0.35
+    status: blocked
+    since: 2026-11-15
+    blocked_on:
+      - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
+      - both datasets published once (FG-302's pending publish)
+    how: docs/runbook.md, "Baselines", step 2
+    fills:
+      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
+      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
+      - docs/adr/0007-prompt-format.md, the p1 and p2 table, accepted
+  - story: FG-307
+    run: reference-val
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    configs:
+      - configs/eval/qwen3-8b-val.yaml
+    est_gpu_hours: 0.45
+    status: blocked
+    since: 2026-11-15
+    blocked_on:
+      - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
+      - both datasets published once (FG-302's pending publish)
+      - FG-301's answer to whether vLLM loads bitsandbytes 4-bit weights on the T4
+    how: docs/runbook.md, "Baselines", step 3
+    fills:
+      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
+      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
+  - story: FG-307
+    run: i6-repeat
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    configs:
+      - configs/eval/qwen2-5-coder-1-5b-val-100.yaml
+    est_gpu_hours: 0.15
+    status: blocked
+    since: 2026-11-15
+    blocked_on:
+      - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
+      - both datasets published once (FG-302's pending publish)
+    how: docs/runbook.md, "Baselines", step 4
+    fills:
+      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
+      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
+      - the I6 check in test_phase3_baseline_reports_present
+  - story: FG-307
+    run: chosen-dev
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    pick: the candidate ADR-0012's rule chooses from the val runs
+    configs:
+      - configs/eval/qwen3-1-7b-dev.yaml
+      - configs/eval/qwen3-4b-dev.yaml
+      - configs/eval/qwen2-5-coder-1-5b-dev.yaml
+    est_gpu_hours: 0.4
+    status: blocked
+    since: 2026-11-15
+    blocked_on:
+      - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
+      - both datasets published once (FG-302's pending publish)
+      - FG-301's GRPO memory measurements, which ADR-0012's rule needs
+    how: docs/runbook.md, "Baselines", step 5
+    fills:
+      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
+      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
+      - docs/dev-usage.md, dev look 1
+      - docs/adr/0012-model-choice.md, accepted
+  - story: FG-307
+    run: reference-dev
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    configs:
+      - configs/eval/qwen3-8b-dev.yaml
+    est_gpu_hours: 0.5
+    status: blocked
+    since: 2026-11-15
+    blocked_on:
+      - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
+      - both datasets published once (FG-302's pending publish)
+      - FG-301's answer to whether vLLM loads bitsandbytes 4-bit weights on the T4
+    how: docs/runbook.md, "Baselines", step 5
+    fills:
+      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
+      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
+      - docs/dev-usage.md, dev look 2
