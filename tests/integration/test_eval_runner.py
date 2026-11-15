@@ -29,6 +29,8 @@ from forge.eval.taxonomy import ERROR_CLASSES
 from forge.infer import hf_backend
 from forge.infer.base import FakeBackend
 from forge.ops.dev_usage import read_uses
+from forge.ops.ledger import run_hours
+from forge.ops.manifest import accelerator
 from tests.fakes import WordTokenizer
 from tests.report_trace import untraced
 
@@ -493,6 +495,10 @@ def test_mps_run_is_labeled_a_local_mps_pilot(
     assert devices == ["mps"]
     manifest = RunManifest.model_validate_json((runs / "pilot" / "manifest.json").read_bytes())
     assert (manifest.platform, manifest.config["device"]) == ("local-mps", "mps")
+    # The chip is named, and the run's wall-clock time on it is its GPU time.
+    assert manifest.gpu == accelerator("local-mps")
+    assert manifest.ended_at is not None
+    assert manifest.gpu_hours == run_hours(manifest.started_at, manifest.ended_at) > 0
 
     # The report says where the numbers were made, and every number still traces (I4).
     assert cli_runner.invoke(cli.app, ["report", "run", "pilot"]).exit_code == 0
@@ -516,6 +522,8 @@ def test_kernel_run_names_its_host_and_the_code_dataset_commit(
     run = run_eval(config, workers=1)
     assert (run.manifest.git_sha, run.manifest.platform) == (sha, "kaggle")
     assert run.manifest.status == "finished"
+    assert run.manifest.gpu == accelerator("kaggle")  # None without CUDA, as in CI
+    assert run.manifest.gpu_hours > 0
     laptop = EvalConfig(model="gold", backend="fake", limit=2)
     assert run.manifest.config == laptop.manifest_config()
 

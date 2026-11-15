@@ -11,7 +11,8 @@ these exist, as paths inside the folder. Reports of a finished run
 manifest doesn't list.
 
 ``start`` writes the manifest with status ``running`` before any work, and ``finish``
-writes it again at the end: ``finished``, or ``failed`` with the traceback in
+writes it again at the end, with its end time and GPU hours
+(``forge.ops.manifest.close``): ``finished``, or ``failed`` with the traceback in
 ``error.txt``. A run killed outright stays ``running``, and its id can be resumed: the
 same run with the same config, commit and data. A finished run, one made with other
 options, code or data, or one of another kind is refused, and ``hold`` keeps a second
@@ -38,7 +39,6 @@ import traceback
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -47,7 +47,7 @@ from pydantic import BaseModel, ValidationError
 
 from forge.core.types import Generation, RunManifest, Score, Split
 from forge.data.splits import SPLITS
-from forge.ops.manifest import config_hash
+from forge.ops.manifest import close, config_hash
 
 log = logging.getLogger(__name__)
 
@@ -214,13 +214,8 @@ def finish(paths: RunPaths, manifest: RunManifest, error: BaseException | None) 
         paths.error.unlink(missing_ok=True)
     else:
         write_atomic(paths.error, "".join(traceback.format_exception(error)).encode())
-    final = manifest.model_copy(
-        update={
-            "status": "finished" if error is None else "failed",
-            "ended_at": datetime.now(UTC),
-            "outputs": paths.outputs(),
-        }
-    )
+    final = close(manifest, "finished" if error is None else "failed")
+    final = final.model_copy(update={"outputs": paths.outputs()})
     _write_manifest(paths, final)
     return final
 

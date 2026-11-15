@@ -5,6 +5,10 @@ Only Kaggle hours count against the weekly quota; Colab and Modal hours still co
 toward the project's GPU total, and Modal is where cash can be spent. Laptop sessions,
 on its CPU or on Apple silicon's GPU (``local-mps``, ADR-0016), spend neither budget
 and count toward neither.
+
+A run's hours are its wall-clock time, from its manifest's ``started_at`` to its
+``ended_at`` (``run_hours``): a session holds its GPU for all of it, loading and
+uploading included.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from forge.ops.logfile import locked_append
@@ -22,6 +26,9 @@ COLUMNS = ("date", "platform", "gpu", "hours", "run_id", "purpose", "cost_usd")
 PLATFORMS = frozenset({"local-cpu", "local-mps", "kaggle", "colab", "modal"})
 GPU_PLATFORMS = frozenset({"kaggle", "colab", "modal"})
 QUOTA_PLATFORMS = frozenset({"kaggle"})
+# Platforms whose runs hold a GPU, the laptop's through MPS among them. Their manifests
+# count wall-clock hours as GPU hours; only GPU_PLATFORMS spend the free GPU budget.
+GPU_RUN_PLATFORMS = GPU_PLATFORMS | {"local-mps"}
 # Characters that would break a markdown table row.
 _TABLE_BREAKERS = re.compile(r"[|\r\n\u2028\u2029\x85]")
 HEADER = "| " + " | ".join(COLUMNS) + " |\n|" + "---|" * len(COLUMNS) + "\n"
@@ -82,6 +89,17 @@ class LedgerRow:
             purpose=purpose,
             cost_usd=float(cost),
         )
+
+
+def run_hours(started_at: datetime, ended_at: datetime) -> float:
+    """The wall-clock hours from ``started_at`` to ``ended_at``.
+
+    Raises ``ValueError`` when the end comes first: a manifest that says so is corrupt.
+    """
+    seconds = (ended_at - started_at).total_seconds()
+    if seconds < 0:
+        raise ValueError(f"a run can't end ({ended_at}) before it starts ({started_at})")
+    return seconds / 3600
 
 
 def read_rows(path: Path | None = None) -> list[LedgerRow]:
