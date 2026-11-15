@@ -30,7 +30,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
-| FG-201 | Inference backend protocol and CPU backend | 3 | todo |  |  |  |
+| FG-201 | Inference backend protocol and CPU backend | 3 | done |  |  | `InferenceBackend`, `FakeBackend` and `render_chat` (thinking off where the template reads the flag); `HfBackend` decodes from `GenParams` alone in left-padded batches, seeds each sample by example and index, loads PEFT adapters; tiny model pinned in `configs/models.yaml` |
 | FG-202 | Eval runner | 5 | todo |  |  |  |
 | FG-203 | Metrics with confidence intervals and paired tests | 5 | todo |  |  |  |
 | FG-204 | Error taxonomy | 3 | todo |  |  |  |
@@ -392,3 +392,29 @@ Work discovered along the way that is not a plan story.
 - Tests that time a batch call `SandboxPool.start()` first, which waits until every worker is
   ready. A two-query warm-up could leave one worker still starting (1 of 20 rounds), and the
   rest of its start-up then landed in the timed batch (FG-197).
+- transformers 5 fills every generation setting a call leaves unset from the checkpoint's
+  `generation_config.json`. The tiny model ships temperature 0.7, top_k 20, top_p 0.8 and a 1.05
+  repetition penalty, so `HfBackend` keeps only the special token ids and greedy is a plain
+  argmax. FG-306 should check what vLLM takes from the same file (FG-201).
+- transformers 5 loads a checkpoint in the dtype it was saved in (bfloat16 for the tiny model);
+  `HfBackend` defaults to float32 (FG-201).
+- Every row of an `HfBackend` batch gets the batch's wall time as `latency_ms`, so a sum over
+  generations counts each batch once per row; FG-202 and FG-301 should time each `generate` call
+  for total generation time (FG-201).
+- `check_params` refuses `n > 1` at temperature 0, which would give n copies of one greedy reply,
+  so FG-202's `--n` needs a `--temperature` above 0 (FG-201).
+- The tiny model's logits are nearly flat (std about 0.01), so its greedy replies can change with
+  batch padding through float error. Tests that compare batchings use the offline model in
+  `tests/tiny_hf.py`, whose smallest top-1 lead over the tests' 72 greedy steps is 0.0025; FG-207's
+  smoke checks should compare runs with the same batches only (FG-201).
+- For a `qwen2` checkpoint, transformers 5 loads `Qwen2Tokenizer` whatever `tokenizer_config.json`
+  names and rebuilds any other kind of tokenizer wrongly, so the offline test model has a
+  byte-level Qwen2 tokenizer (FG-201).
+- `chat_token_counter` (FG-105) passes `enable_thinking=False` to every template and `render_chat`
+  only to one that reads it; other templates ignore the flag, so both render the same prompt
+  and `tokens_in` matches the overflow policy's count (FG-201).
+- `split_ref` reads `org/model@feature/x` as branch `feature/x` of `org/model` unless a directory
+  by that name exists, where `make_run_id` slugs it as a path (FG-201).
+- transformers 5 types `generate`'s `self` with a protocol that mypy can't match to any model
+  class, so `HfBackend` holds its model through a one-method `CausalLM` protocol; FG-402's train
+  backends will meet the same (FG-201).

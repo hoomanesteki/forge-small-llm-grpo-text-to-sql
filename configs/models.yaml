@@ -1,0 +1,9 @@
+# Models Forge loads by name. A Hub model is pinned to a commit, not a branch: the test
+# repos are rewritten in place, so `main` would change what a test runs without notice.
+
+tiny:
+  # Random weights (2 layers, hidden size 8) with the full Qwen2.5 tokenizer and chat
+  # template, about 20 MB. Tests and the CPU smoke pipeline use it to check the wiring
+  # between stages; what it writes is noise.
+  repo: trl-internal-testing/tiny-Qwen2ForCausalLM-2.5
+  revision: edca82771e1fad8f0b7ce110ffe770c682043fec
