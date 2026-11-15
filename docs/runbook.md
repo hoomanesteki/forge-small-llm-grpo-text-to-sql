@@ -224,6 +224,31 @@ before the next one.
   platform with a GPU (`local-mps` too), and none on `local-cpu`. A resumed run keeps its
   first `started_at`, so its hours include the time between its sessions.
 
+## Baselines
+
+FG-307 measures the base models before any training (ADR-0012). Each run is a kernel job
+from `configs/eval/`, where every model has a config per run, with the model pinned to
+the commit `configs/models.yaml` names. `uv run python scripts/check_models.py` checks
+those commits, licenses and gated flags against the Hub first, reading metadata only.
+Push them in this order, from one clean commit that passed `make smoke`:
+
+1. The candidates on val with p1: `qwen3-1-7b-val`, `qwen3-4b-val` and
+   `qwen2-5-coder-1-5b-val`.
+2. The top candidate by val official EX with p2: its `<name>-val-p2` (ADR-0007).
+3. The reference on val, in 4-bit: `qwen3-8b-val`.
+4. I6's repeat: `qwen2-5-coder-1-5b-val-100`, the first 100 val questions again.
+5. The model ADR-0012's rule chooses, and the reference, on dev, once each:
+   `<name>-dev` and `qwen3-8b-dev`, with `--reason baseline`. These are dev looks 1 and 2.
+
+The same model's runs from one commit on one day would share a default run id, so name
+each: `--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`.
+For each run, `forge kaggle wait <run_id>`, then `forge runs pull <run_id> --store kaggle`
+(or the hub store, with an `HF_TOKEN` in the kernel), which adds its ledger row. Render its
+report on the laptop with `FORGE_DATA_DIR=data/spider uv run forge report run <run_id>`, so
+its rebuild compares the chart, and copy the folder whole to `docs/runs/`.
+`tests/integration/test_artifacts.py::test_phase3_baseline_reports_present` then checks
+every run is there with its report, I5 on its replies and I6 on step 4 against step 1.
+
 ## Troubleshooting
 
 - **`ModuleNotFoundError: forge` on macOS.** The venv can come out with the hidden file

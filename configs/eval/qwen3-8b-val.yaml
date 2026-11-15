@@ -1,0 +1,18 @@
+# FG-307 baseline, the reference model: Qwen3-8B on the whole val split, greedy, with the p1
+# prompt, as a kernel job on a Kaggle T4 (ADR-0012, docs/runbook.md "Baselines"):
+#
+#   uv run forge kaggle run --job eval --config configs/eval/qwen3-8b-val.yaml
+#
+# The model is configs/models.yaml's reference.qwen3-8b, pinned to the same commit, loaded
+# in 4-bit.
+model: Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218
+backend: vllm
+quantization: bitsandbytes
+split: val
+limit: null
+prompt_version: p1
+n: 1
+temperature: 0.0
+retry: 0
+ops:
+  est_gpu_hours: 0.45
