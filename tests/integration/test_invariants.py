@@ -3,6 +3,8 @@
 I1: no ``db_id`` is in more than one split, and training code raises on val or dev.
 I2: running any SQL leaves every database file byte-identical, killed workers included, and
 non-SELECT statements are denied.
+I4 (a run's report, for now): every number in it traces to the run's stored scores and
+manifest.
 I5: the fast comparator agrees with the official evaluator on at least 98% of predictions.
 """
 
@@ -10,15 +12,17 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import shutil
 from collections import Counter
+from datetime import UTC, datetime
 from itertools import combinations
 from pathlib import Path
 
 import pytest
 from test_suite_eval import exec_eval
 
-from forge.core.types import ErrorKind, Example
+from forge.core.types import ErrorKind, Example, GenParams, Prompt
 from forge.data.spider import db_path, load_raw
 from forge.data.splits import (
     MANIFEST_DIR,
@@ -36,11 +40,16 @@ from forge.data.splits import (
     val_databases,
 )
 from forge.eval.agreement import AGREEMENT_TARGET, agreement_mutations, agreement_rate, score
+from forge.eval.config import EvalConfig
 from forge.eval.mutations import CHANGES
+from forge.eval.report import write_run_report
+from forge.eval.runner import run_eval
 from forge.eval.testsuite import official_exec_match
+from forge.infer.base import FakeBackend
 from forge.sql import sandbox
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
+from tests.report_trace import untraced
 from tests.sandbox_jobs import review_query, run_with_fg191_limits
 
 
@@ -307,6 +316,97 @@ def test_i2_official_eval_leaves_files_unchanged(
     # Nothing was planted beside the databases, so gold still runs on every one of them.
     databases = sorted({db_id for db_id, _, _ in items})
     assert official_exec_match([(db, EMPTY_GOLD, EMPTY_GOLD) for db in databases]) == [True] * 5
+
+
+NO_SQL = "Let me think about it."
+# SQLite can't parse it, but official EX drops DISTINCT, runs count(*) and matches.
+COUNT_DISTINCT = "SELECT count(DISTINCT *) FROM Aircraft"
+MISSPELT = "SELEC name, distance FROM Aircraft"
+# I4's run: what the fake model answers first, and again when that query failed to run;
+# None is the gold query, and so is a question not listed. The replies reach every kind of
+# number a report holds: retries that fix a query, fail again or give up, one reply only
+# official EX matches, and more failures of one class than a report shows.
+I4_REPLIES: dict[str, tuple[str | None, str | None]] = {
+    "spider-train-00010": (COUNT_DISTINCT, COUNT_DISTINCT),
+    "spider-train-00012": (NO_SQL, None),
+    "spider-train-00013": (MISSPELT, MISSPELT),
+    "spider-train-00014": ("SELECT aid FROM Aircraft WHERE distance > 100", None),
+    "spider-train-00016": ("SELECT count(*) FROM Aircraft WHERE distance > 1000", None),
+    "spider-train-00018": ("SELECT name FROM Aircraft WHERE aid = 12", None),
+    "spider-train-00023": ("SELECT name FROM Employees", NO_SQL),
+    **dict.fromkeys([f"spider-train-{n:05d}" for n in (19, 20, 21, 22, 25, 26)], (NO_SQL, NO_SQL)),
+}
+
+
+@pytest.mark.phase(2)
+def test_i4_report_numbers_trace_to_manifest(spider_mini: Path, tmp_path: Path) -> None:
+    gold = {example.id: example.gold_sql for example in load_val()}
+
+    def reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        first, again = I4_REPLIES.get(prompt.example_id, (None, None))
+        # A retry turn adds the first reply and the error to the prompt's two messages.
+        text = again if len(prompt.messages) > 2 else first
+        if text is None:
+            text = gold[prompt.example_id]
+        return text if text == NO_SQL else f"```sql\n{text}\n```"
+
+    runs = tmp_path / "runs"
+    run = run_eval(
+        EvalConfig(model="gold", backend="fake", retry=1, run_id="i4"),
+        backend=FakeBackend(reply, model_ref="gold"),
+        allow_dirty=True,
+        runs_root=runs,
+        cache_root=tmp_path / "cache",
+        workers=1,
+    )
+    path = write_run_report("i4", runs_root=runs, now=datetime(2026, 11, 15, tzinfo=UTC)).report
+    text = path.read_text(encoding="utf-8")
+    # Every section that holds numbers is there to trace.
+    for part in (
+        "\n## Retry\n",
+        "\nThe checkers disagree on 1 sample: ",
+        "\n### no_sql: 5 of 7 shown\n",
+        "\nThe first reply's query failed to run:\n",
+    ):
+        assert part in text, part
+    assert untraced(text, run.paths.root, data_dir=spider_mini) == []
+
+    # A number edited by hand, or one that comes from nowhere, is found wherever it is.
+    title = text.split("\n", 1)[0]
+    # The low end of the title's interval, a tenth of a point higher.
+    raised = re.sub(r"\[(\d+\.\d)%", lambda m: f"[{float(m.group(1)) + 0.1:.1f}%", title, count=1)
+    retried = "| retried: the first query failed to run |"
+    for old, new in (
+        (title, raised),
+        ("| official EX | 9 | 20 |", "| official EX | 10 | 20 |"),
+        ("| +5.0 [", "| +6.0 ["),
+        (f"{retried} 10 |", f"{retried} 9 |"),
+        ("\n| no_sql | 7 |", "\n| no_sql | 6 |"),
+        ("### no_sql: 5 of 7 shown", "### no_sql: 5 of 8 shown"),
+        ("\n## By hardness\n", "\n## By hardness\n\nEasy questions gained 12 points.\n"),
+        ("\n| value |", "\n| best guess | 3 |\n| value |"),
+        ("has an id of 12?", "has an id of 21?"),
+        ("WHERE aid  =  12", "WHERE aid  =  21"),
+    ):
+        assert old in text, old
+        assert untraced(text.replace(old, new), run.paths.root, data_dir=spider_mini), new
+
+    # A run of several samples a question states how it sampled, and which sample failed.
+    def sampled(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        return NO_SQL if sample_idx else f"```sql\n{gold[prompt.example_id]}\n```"
+
+    several = run_eval(
+        EvalConfig(model="gold", backend="fake", n=2, temperature=0.7, limit=6, run_id="i4-n2"),
+        backend=FakeBackend(sampled, model_ref="gold"),
+        allow_dirty=True,
+        runs_root=runs,
+        cache_root=tmp_path / "cache",
+        workers=1,
+    )
+    text = write_run_report("i4-n2", runs_root=runs).report.read_text(encoding="utf-8")
+    assert "\n| Generation | sampled at temperature 0.7, top-p 1, seed 0, at most 256" in text
+    assert "\n### no_sql: 5 of 6 shown\n" in text and ", sample 1)\n" in text
+    assert untraced(text, several.paths.root, data_dir=spider_mini) == []
 
 
 @pytest.mark.phase(1)

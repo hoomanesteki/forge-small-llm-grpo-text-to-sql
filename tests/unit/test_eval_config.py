@@ -7,11 +7,13 @@ import re
 from typing import Any, get_args, get_type_hints
 
 import pytest
+from typer.testing import CliRunner
 
 from forge import cli
 from forge.core.types import GenParams
 from forge.data.schema import PROMPT_VERSIONS
 from forge.data.splits import SPLITS
+from forge.eval import runner
 from forge.eval.config import BACKENDS, STORES, EvalConfig, NotAvailable, check_config
 
 BASE = EvalConfig(model="org/model")
@@ -86,3 +88,24 @@ def test_cli_offers_exactly_the_backends_stores_splits_and_prompts() -> None:
     assert get_args(hints["store"]) == STORES
     assert get_args(hints["split"]) == SPLITS
     assert get_args(hints["prompt_version"]) == PROMPT_VERSIONS
+
+
+@pytest.mark.phase(2)
+def test_cli_sizes_the_sql_worker_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    pools: list[int] = []
+
+    def run_eval(config: EvalConfig, *, workers: int, **kwargs: Any) -> None:
+        pools.append(workers)
+        raise ValueError("stopped before any work")
+
+    monkeypatch.setattr(runner, "run_eval", run_eval)
+    cli_runner = CliRunner()
+    args = ["eval", "run", "--backend", "fake", "--model", "gold"]
+    for options in (["--workers", "2"], []):
+        result = cli_runner.invoke(cli.app, [*args, *options])
+        assert (result.exit_code, result.stderr) == (1, "error: stopped before any work\n")
+    # Unset, the pool has the runner's default: one worker per CPU, at most 4.
+    assert pools == [2, runner.WORKERS]
+    refused = cli_runner.invoke(cli.app, [*args, "--workers", "0"])
+    assert refused.exit_code == 2 and "--workers" in refused.stderr
+    assert len(pools) == 2

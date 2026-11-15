@@ -14,6 +14,7 @@ CHECKS=(
   "lint-type"
   "unit (3.11)" "unit (3.12)"
   "integration (3.11)" "integration (3.12)"
+  "smoke"
   "security"
 )
 for extra in ${EXTRA_CHECKS:-}; do CHECKS+=("$extra"); done
