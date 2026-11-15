@@ -44,7 +44,10 @@ research in [the FG-301 spike](../spikes/kaggle-gpu.md):
   transformers generation on the 1.7B model only, and the section 3.8 budget is redone
   for it.
 - The GPU packages are `kaggle/requirements-gpu.txt`, the same versions as `uv.lock`
-  where the lock has them (ADR-0002).
+  where the lock has them (ADR-0002), except torch 2.14.0 and transformers 5.20.2: since
+  FG-306 the file holds vllm 0.33.0 for evaluation, which needs both, so it is the
+  spike's `trl-vllm` stack. If vLLM fails on the T4, the `trl` stack (the lock's
+  versions on the image's torch) is the fallback.
 
 ## What FG-301 has to measure
 

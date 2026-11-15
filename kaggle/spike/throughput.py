@@ -158,7 +158,8 @@ class Stack:
 # vLLM 0.11.2 (torch 2.9.0), transformers 4.57.6 and TRL 0.22.2.
 STACKS = {
     "vllm": Stack(("vllm==0.33.0",), system_site_packages=False),
-    # Forge's training stack, as in uv.lock; kaggle/requirements-gpu.txt lists the same pins.
+    # Forge's training stack as uv.lock has it, on the image's torch: ADR-0006's training
+    # stack if vLLM can't run beside it.
     "trl": Stack(
         (
             "trl==1.18.0",
@@ -171,14 +172,18 @@ STACKS = {
         ),
         system_site_packages=True,
     ),
-    # TRL generating through vLLM in the same process: the newest vLLM TRL 1.18 accepts.
+    # Forge's GPU stack, as kaggle/requirements-gpu.txt pins it: the newest vLLM TRL 1.18
+    # accepts, with the torch and transformers it needs, so TRL can generate through it.
     "trl-vllm": Stack(
         (
-            "trl==1.18.0",
-            "transformers==5.20.2",
-            "peft==0.21.3",
             "vllm==0.33.0",
+            "torch==2.14.0",
+            "transformers==5.20.2",
+            "trl==1.18.0",
+            "peft==0.21.3",
+            "accelerate==1.15.0",
             "datasets==5.2.0",
+            "huggingface-hub==2.4.0",
             "bitsandbytes==0.50.2",
         ),
         system_site_packages=False,

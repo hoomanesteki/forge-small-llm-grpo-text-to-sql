@@ -24,6 +24,11 @@ today's numbers.
 - GPU packages (unsloth, vllm, bitsandbytes) are not in the lock. They must match
   the CUDA build of torch preinstalled on Kaggle, so FG-301 pins them in
   `kaggle/requirements-gpu.txt`, tested on that image.
+- vLLM brings its own torch. Since FG-306 that file pins vllm 0.33.0, which pins torch
+  2.14.0 (built for CUDA 13.0, the image's CUDA) and needs transformers below 5.21, so GPU
+  jobs run torch 2.14.0 and transformers 5.20.2 where CI runs 2.15.0 and 5.23.0. Every
+  other pin there is the lock's version. The transformers calls Forge makes in a kernel
+  were checked against the 5.20.2 source: they behave the same for Forge's arguments.
 - The llama.cpp commit used for GGUF export is pinned in FG-702 and added here.
 
 ## Consequences

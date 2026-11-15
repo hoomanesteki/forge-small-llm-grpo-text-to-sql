@@ -81,8 +81,8 @@ The stacks are candidates, each pinned in the script and none verified on a T4:
 | Stack | Pins | Why |
 |---|---|---|
 | `vllm` | vllm 0.33.0 (brings torch 2.14.0) | Generation throughput for evaluation (FG-306) |
-| `trl` | Forge's lock: trl 1.18.0, transformers 5.23.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0, huggingface-hub 2.4.0, plus bitsandbytes 0.50.2; on the image's torch | ADR-0006's default, the same list as `kaggle/requirements-gpu.txt` |
-| `trl-vllm` | trl 1.18.0, transformers 5.20.2, peft 0.21.3, vllm 0.33.0, datasets 5.2.0, bitsandbytes 0.50.2 | TRL generating through colocated vLLM |
+| `trl` | Forge's lock: trl 1.18.0, transformers 5.23.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0, huggingface-hub 2.4.0, plus bitsandbytes 0.50.2; on the image's torch | ADR-0006's training stack without vLLM, the fallback |
+| `trl-vllm` | vllm 0.33.0, torch 2.14.0, transformers 5.20.2, then the lock's trl 1.18.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0 and huggingface-hub 2.4.0, plus bitsandbytes 0.50.2 | The same list as `kaggle/requirements-gpu.txt` since FG-306: evaluation through vLLM, and TRL generating through colocated vLLM |
 | `unsloth` | unsloth 2026.11.4, vllm 0.11.2, transformers 4.57.6, trl 0.22.2, datasets 4.3.0, bitsandbytes 0.50.2, torchao below 0.18 | Unsloth's own Kaggle T4 recipe, for comparison |
 
 ## 1. Kernel metadata, the accelerator and private datasets
