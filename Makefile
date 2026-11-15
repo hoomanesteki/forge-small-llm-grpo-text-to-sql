@@ -42,8 +42,8 @@ test-unit: unhide ## Unit tests
 test-int: unhide ## Integration tests (fixture Spider subset)
 	$(call allow_empty,$(PYTEST) tests/integration)
 
-smoke: unhide ## Full pipeline on CPU with a tiny model
-	@echo "make smoke is added in FG-207 (CPU smoke pipeline in CI)"
+smoke: unhide ## Full pipeline on CPU with a tiny model; marks a clean commit that passes
+	PHASE=$(PHASE) scripts/smoke/pipeline.sh
 
 check: lint type test-unit test-int ## Everything a PR must pass locally
 
