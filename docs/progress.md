@@ -24,7 +24,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-105 | Schema serializer and prompt builder | 5 | done |  |  | One `CREATE TABLE` line per table from `sqlite_master`, p2 sample rows, `fit_prompt` overflow policy, `forge data prompt-stats` |
 | FG-106 | Safe SQL executor | 5 | done |  |  | Read-only immutable URI, default-deny authorizer, deadline every 1,000 VM steps, row cap, statements counted before execution, spawn pool, `forge sql run`; every train and val gold query runs except the 3 known failures |
 | FG-107 | SQL extraction and result comparator | 3 | done |  |  | Last sql block, else last SELECT/WITH line, think blocks dropped; multiset or list rows, 6-decimal floats, column orders up to 6 columns; top-level ORDER BY by sqlglot with a regex fallback |
-| FG-108 | Official evaluator integration and agreement check | 5 | done |  |  | `official_exec_match` calls `eval_exec_match` in a worker thread, refusing empty, comment-only and denied SQL; sqlglot mutations; gold 100% on val with both checkers; agreement 99.15% on 2,000 val mutations (`docs/audit/agreement-2026-11-14.md`), all 17 misses from DISTINCT removal; ADR-0008, `scripts/smoke/phase_1.sh` |
+| FG-108 | Official evaluator integration and agreement check | 5 | done |  |  | `official_exec_match` calls `eval_exec_match` in a worker thread, refusing empty, comment-only and denied SQL; sqlglot mutations; gold 100% on val with both checkers; agreement 99.15% on 2,000 val mutations and 98.96% on the 1,445 distinct ones (`docs/audit/agreement-2026-11-15.md`), all 17 misses (15 distinct) from DISTINCT removal; ADR-0008, `scripts/smoke/phase_1.sh` |
 
 ## Phase 2: Evaluation harness (v0.2.0)
 
@@ -114,6 +114,7 @@ Work discovered along the way that is not a plan story.
 | FG-093 | Gate 0 fixes: backlog labels and test checks | done | GPU spike labeled GPU (11), phase and skip marks checked, gitignore |
 | FG-191 | Gate 1 fixes: sandbox safety | done | Statements denied by keyword before SQLite runs them, SQLite limits on every connection (the evaluator's too), a watchdog at the deadline, a 64 MiB result budget, `\v` counted as SQLite does; official EX vets what the evaluator runs and strips leading `;` |
 | FG-192 | Gate 1 fixes: data and prompts | done | `load_dev` refuses an empty dev, `assert_train_only` refuses iterators, fetch won't overwrite other data and reports network errors, p2 samples keep their spaces, `[name]` quoted, fallback lines must parse; ADR-0004 says what counts as a dev use |
+| FG-193 | Gate 1 fixes: hashing and reports | done | A model hashes like its `model_dump()`, manifests keep a JSON copy of the config and need a real UTC offset, `@` stays in local paths; the agreement report credits Spider (CC BY-SA 4.0) and counts distinct items, regenerated as `docs/audit/agreement-2026-11-15.md` |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -215,9 +216,10 @@ Work discovered along the way that is not a plan story.
   wins; an unfenced query line with a syntax error now gives `None`, not SQL that fails to run. All
   9,693 gold queries still come through on one line (`tests/integration/test_extract.py`).
 - The official evaluator removes every `DISTINCT`, inside `COUNT(DISTINCT x)` too, where it becomes
-  `count(x)`. All 17 disagreements in the 2,000-item val check come from that: 14 `COUNT(DISTINCT ...)`
-  golds the evaluator matches to another column's distinct count, and 3 `SELECT DISTINCT` golds whose
-  prediction has the same distinct rows over other duplicates. The fast comparator stays as it is
+  `count(x)`. All 17 disagreeing items in the 2,000-item val check (15 distinct) come from that: 14
+  (13 distinct) with a `COUNT(DISTINCT ...)` gold the evaluator matches to another column's distinct
+  count, and 3 (2 distinct) with a `SELECT DISTINCT` gold whose prediction has the same distinct rows
+  over other duplicates. The fast comparator stays as it is
   (ADR-0008). The mutations never add or drop a `DISTINCT`, so FG-307 should watch that case on real
   outputs, and FG-601 should look for reward gains the official metric doesn't show.
 - No disagreement in the 2,000 items came from `ORDER BY` detection. The mutations never reorder the
@@ -254,8 +256,10 @@ Work discovered along the way that is not a plan story.
 - SQLite reads `\v` as whitespace only inside a run that starts with one of space, tab, newline, form
   feed or return, and Python's check after the first statement never skips it. `statement_count`
   follows both rules; sqlite3 on 3.11.15 and 3.12.13 agrees on the cases in the unit tests.
-- Re-running `forge eval agreement --mutations 2000 --split val --seed 0` on the FG-191 code gives the
-  same report as `docs/audit/agreement-2026-11-14.md` apart from the date and commit, so it stands.
+- Re-running `forge eval agreement --mutations 2000 --split val --seed 0` on the FG-191 code gave the
+  same report as the 2026-11-14 one apart from the date and commit. FG-193 regenerated it with the
+  Spider attribution and distinct counts; the UTC date had moved on, so
+  `docs/audit/agreement-2026-11-15.md` replaces it, with the same counts over all items.
 - sqlglot 30.31 raises `RecursionError`, not a `SqlglotError`, on about 47 nested parentheses
   (`SELECT ((((...1))))`). Gold queries never nest that deep, but model output can: `extract_sql`
   treats it as no query, and any later code that parses model output with sqlglot (FG-204, FG-501,
@@ -272,3 +276,15 @@ Work discovered along the way that is not a plan story.
   so pointed at `tests/fixtures/spider_mini` it stops instead of downloading and extracting there.
 - `load_dev()` raises `DataNotFound` when the data has no dev questions, before it writes the row,
   so the fixture or a partial download never spends one of the six looks.
+- The 2,000 agreement items hold 1,445 distinct checks (database, gold and prediction). Unchanged
+  gold queries repeat the most (626 items, 370 distinct), since the mutations cycle through val's
+  872 questions, which share 456 gold queries; a few predictions also recur against a different
+  gold, so the key includes the gold. I5 still reads the rate over all items, as the plan states
+  it, and the report gives the distinct rate beside it (FG-193).
+- `make_run_id` strips `@<revision>` only when the part before the `@` is shaped like a hub repo id.
+  A relative path with one `/` before an `@` (`runs/x@y/ckpt`) still reads as repo `runs/x` at
+  revision `y/ckpt`, so pass local checkpoints as `./runs/...` or absolute paths (FG-193).
+- Since FG-193 `canonical_json` dumps models in Python mode, so `bytes` inside one (a BLOB in
+  `ExecResult.rows`) raises `TypeError` instead of hashing like the same text as a string.
+- `build_manifest` stores the config as the JSON it hashed, so a `Path` comes back as a string and
+  a tuple as a list (FG-193).
