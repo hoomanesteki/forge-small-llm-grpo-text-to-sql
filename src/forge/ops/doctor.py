@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from forge.ops.kaggle import kaggle_bin
+
 DEFAULT_RUN_STORE = "hoomanesteki/forge-runs"
 SECRET_NAME = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD)", re.IGNORECASE)
 
@@ -59,12 +61,6 @@ def _run(args: Sequence[str], env: Mapping[str, str]) -> subprocess.CompletedPro
     return subprocess.run(
         list(args), capture_output=True, text=True, timeout=60, check=False, env=dict(env)
     )
-
-
-def _kaggle_bin() -> str:
-    """The kaggle script next to this interpreter, so an unactivated venv still works."""
-    sibling = Path(sys.executable).parent / "kaggle"
-    return str(sibling) if sibling.is_file() else "kaggle"
 
 
 def _disk_free_gb(path: Path) -> float:
@@ -143,7 +139,7 @@ def check_kaggle(ctx: Context) -> Check:
     try:
         # The cheapest authenticated call: list one of your own kernels. The merged env
         # matters: credentials that live only in .env must reach the CLI too.
-        out = run([_kaggle_bin(), "kernels", "list", "--mine", "--page-size", "1"], ctx.env)
+        out = run([kaggle_bin(), "kernels", "list", "--mine", "--page-size", "1"], ctx.env)
     except FileNotFoundError:
         return Check(
             "kaggle auth", False, f"credentials in {source}, CLI missing", "run make setup"
