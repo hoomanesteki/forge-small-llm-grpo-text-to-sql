@@ -4,18 +4,17 @@
 gold's under ``forge.sql.compare``. ``ex_official`` is left to the official evaluator,
 which the eval runner calls in one batch at the end, except for a query that timed out
 in the sandbox: that one is no match without the evaluator, which would otherwise give
-it up to its item timeout again (ADR-0008). ``error_class`` is ``None`` for a match
-and ``UNCLASSIFIED`` for any other result until the error taxonomy (FG-204) names the
-cause.
+it up to its item timeout again (ADR-0008). ``error_class`` is ``None`` for a match,
+and otherwise what the error taxonomy (``forge.eval.taxonomy``) says went wrong.
 """
 
 from __future__ import annotations
 
 from forge.core.types import Example, ExecResult, Generation, Score
+from forge.eval.mutations import Columns
+from forge.eval.taxonomy import classify
 from forge.sql.compare import order_matters, results_match
 
-# What error_class holds for a wrong prediction until FG-204 classifies it.
-UNCLASSIFIED = "unclassified"
 NO_SQL = "the reply has no SQL query"
 
 
@@ -25,9 +24,16 @@ def no_sql() -> ExecResult:
 
 
 def score_generation(
-    example: Example, generation: Generation, pred: ExecResult, gold: ExecResult
+    example: Example,
+    generation: Generation,
+    pred: ExecResult,
+    gold: ExecResult,
+    *,
+    columns: Columns,
 ) -> Score:
-    """Score one generation: ``pred`` is its query's result, ``gold`` its example's."""
+    """Score one generation: ``pred`` is its query's result, ``gold`` its example's, and
+    ``columns`` the tables of its database with their columns, which the error class of a
+    wrong prediction is read against."""
     if generation.example_id != example.id:
         raise ValueError(
             f"a generation for {generation.example_id} can't be scored against {example.id}"
@@ -40,5 +46,5 @@ def score_generation(
         valid=pred.ok,
         ex_fast=ex_fast,
         ex_official=False if pred.error_kind == "timeout" else None,
-        error_class=None if ex_fast else UNCLASSIFIED,
+        error_class=None if ex_fast else classify(example, generation, pred, columns=columns),
     )
