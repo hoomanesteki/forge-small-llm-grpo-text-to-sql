@@ -40,7 +40,8 @@ only with its numbers and with what draws and compresses it, which machines don'
 with the same releases, CI's Linux writes other bytes than macOS. So the PNG's
 ``Software`` text names the releases and the platform that drew it (``chart_renderer``),
 and ``rebuild`` compares the chart only where they are the same, and says so of one drawn
-elsewhere instead of failing it. A chart that names no renderer is compared.
+elsewhere instead of failing it. A chart whose ``Software`` text isn't in that form, such
+as an image editor's, or that has none, is compared.
 
 Each kind of number has one format, so FG-207's I4 check can find every number in the
 stored files: a rate as a percentage with one decimal and its 95% interval in brackets
@@ -128,6 +129,11 @@ UNCLASSIFIED_NOTE = (
 
 _ORDER = (*ERROR_CLASSES, UNCLASSIFIED)
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# chart_renderer's form, whatever the releases and platform it names: only a chart whose
+# Software text has it can have been drawn by render_chart elsewhere.
+_RENDERER = re.compile(
+    r"matplotlib \S+ \(FreeType \S+\), numpy \S+, Pillow \S+ \(zlib(?:-ng)? \S+\), \S+ \S*"
+)
 # The Generated line as _generated writes it, and nothing else.
 _GENERATED_LINE = re.compile(
     rf"^{GENERATED}\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}:\d{{2}} UTC$", re.MULTILINE
@@ -262,7 +268,7 @@ def rebuild(
 ) -> list[Check]:
     """Render the run's report, its chart and each ``compare-<a>.md`` in its ``eval``
     folder again, and compare each with the stored file, a report's ``Generated:`` line
-    aside, and the chart only where its ``chart_renderer`` drew it. Writes nothing.
+    aside, and the chart unless it names another ``chart_renderer``. Writes nothing.
     """
     data, root = _data(data_dir), runs_root or runs_dir()
     run = _load(run_id, data, root)
@@ -637,9 +643,9 @@ def _check_chart(path: Path, rebuilt: bytes) -> Check:
     if stored == rebuilt:
         return Check(path, ())
     # Another renderer's bytes can differ for the same numbers, so they show nothing; a
-    # chart that names this machine's renderer, or none, is compared.
+    # chart that names this machine's renderer, any other text or none is compared.
     drawn_with, here = _software(stored), chart_renderer()
-    if drawn_with is not None and drawn_with != here:
+    if drawn_with is not None and _RENDERER.fullmatch(drawn_with) and drawn_with != here:
         return Check(
             path, (), skipped=f"it was drawn with {drawn_with}, and this machine draws with {here}"
         )
