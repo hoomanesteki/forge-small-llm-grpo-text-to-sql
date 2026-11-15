@@ -63,8 +63,8 @@ from forge.eval.run_files import Key, RunFiles, RunPaths, finish, hold, key, sta
 from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
-from forge.ops.manifest import build_manifest
-from forge.ops.paths import cache_dir, repo_root, runs_dir
+from forge.ops.manifest import CODE_SHA_ENV, build_manifest
+from forge.ops.paths import RepoRootNotFound, cache_dir, repo_root, runs_dir
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
 
@@ -160,7 +160,7 @@ def run_eval(
         platform=config.platform,
         adapter_ref=config.adapter,
         allow_dirty=allow_dirty,
-        repo=repo_root(),
+        repo=_code_root(),
         data_dir=root,
     )
     paths = RunPaths((runs_root or runs_dir()) / fresh.run_id, config.split)
@@ -364,3 +364,18 @@ def _fill_official(files: RunFiles, examples: Mapping[str, Example], pool: Sandb
     for (i, field, _), verdict in zip(todo, verdicts, strict=True):
         scores[i] = scores[i].model_copy(update={field: verdict})
     files.replace_scores(scores)
+
+
+def _code_root() -> Path | None:
+    """Where the run's commit is read: the Forge root, or None on a Kaggle kernel.
+
+    A kernel runs the installed wheel with no Forge checkout, and its entry script names
+    the code dataset's commit in ``FORGE_CODE_SHA``, which ``code_sha`` then takes. Anywhere
+    else a missing Forge root is an error, so a run never records a commit it can't name.
+    """
+    try:
+        return repo_root()
+    except RepoRootNotFound:
+        if os.environ.get(CODE_SHA_ENV):
+            return None
+        raise
