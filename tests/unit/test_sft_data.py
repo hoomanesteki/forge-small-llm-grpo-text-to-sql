@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+from datasets import load_from_disk
 from trl.data_utils import is_conversational
 
+from forge.core.hashing import canonical_json, sha256_hex
 from forge.core.types import Example
 from forge.data.prompts import chat_token_counter, fit_prompt
 from forge.data.spider import load_raw
@@ -20,14 +25,18 @@ from forge.data.splits import (
     split_examples,
     write_manifests,
 )
+from forge.infer.hf_backend import split_ref
 from forge.train import sft_data
 from forge.train.sft_data import (
     SftCounts,
     _hidden_tables,
     build_sft_dataset,
+    read_meta,
+    save_sft,
 )
 from tests.fakes import WordTokenizer
 
+ROOT = Path(__file__).resolve().parents[2]
 WORDS = chat_token_counter(WordTokenizer())
 
 
@@ -80,6 +89,99 @@ def test_train_ids_only_on_full_data() -> None:
     # Exact repeats of a question on its database, case and spacing aside, and the three
     # gold queries that fail on SQLite.
     assert (counts.duplicates, counts.failing_gold) == (25, 3)
+
+
+@pytest.mark.phase(4)
+def test_assistant_only_labels(spider_mini: Path, tiny_model_ref: str, tmp_path: Path) -> None:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from trl import SFTConfig, SFTTrainer
+
+    repo, revision = split_ref(tiny_model_ref)
+    tokenizer = AutoTokenizer.from_pretrained(repo, revision=revision)
+    dataset = build_sft_dataset("p1", tiny_model_ref, chat_token_counter(tokenizer))
+    saved = load_from_disk(str(save_sft(dataset, tmp_path / "sft")))
+
+    # TRL's own preparation, as SFT training runs it. The sequence length is ADR-0010's:
+    # TRL's default of 1,024 would cut the reply off long prompts.
+    args = SFTConfig(
+        output_dir=str(tmp_path / "out"),
+        use_cpu=True,
+        bf16=False,
+        report_to="none",
+        max_length=2048,
+    )
+    model = AutoModelForCausalLM.from_pretrained(repo, revision=revision)
+    trainer = SFTTrainer(model=model, args=args, train_dataset=saved, processing_class=tokenizer)
+    assert trainer.completion_only_loss
+    prepared = trainer.train_dataset
+    assert prepared["example_id"] == [row["example_id"] for row in dataset.rows]
+
+    gold = {example.id: example.gold_sql for example in load_train()}
+    for row in prepared:
+        prompt = tokenizer.apply_chat_template(
+            row["prompt"], add_generation_prompt=True, tokenize=True, return_dict=True
+        )["input_ids"]
+        n = len(prompt)
+        ids, labels = row["input_ids"], row["labels"]
+        assert ids[:n] == prompt
+        # Every prompt token is masked, every reply token is learned: the query in its
+        # code block, then the end of the turn, so the model learns to stop.
+        assert labels[:n] == [-100] * n
+        assert labels[n:] == ids[n:]
+        reply = f"```sql\n{gold[row['example_id']]}\n```{tokenizer.eos_token}\n"
+        assert tokenizer.decode(labels[n:]) == reply
+
+
+@pytest.mark.phase(4)
+def test_dataset_hash_stable(spider_mini: Path, tmp_path: Path) -> None:
+    first = _build()
+    assert _build() == first
+    payload = {"rows": first.rows, "prompt_version": "p1", "tokenizer": "org/tok"}
+    assert first.meta.hash == sha256_hex(canonical_json(payload))
+
+    # A fresh interpreter with other hash seeds gets the same hash: nothing depends on
+    # set order or PYTHONHASHSEED.
+    code = (
+        "from forge.data.prompts import chat_token_counter\n"
+        "from forge.train.sft_data import build_sft_dataset\n"
+        "from tests.fakes import WordTokenizer\n"
+        "count = chat_token_counter(WordTokenizer())\n"
+        "print(build_sft_dataset('p1', 'org/tok', count).meta.hash)\n"
+    )
+    outputs = {
+        subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONHASHSEED": hash_seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for hash_seed in ("1", "2")
+    }
+    assert outputs == {first.meta.hash + "\n"}
+
+    # Each input to the hash moves it: the prompt version, the tokenizer and the rows.
+    fewer = _build(max_tokens=120)
+    assert fewer.rows != first.rows
+    others = {_build("p2").meta.hash, _build(tokenizer="org/other").meta.hash, fewer.meta.hash}
+    assert len(others) == 3 and first.meta.hash not in others
+
+    # Saved under its hash with its meta.json, once: a second save keeps the first.
+    folder = save_sft(first, tmp_path / "sft")
+    assert folder == tmp_path / "sft" / first.meta.hash
+    assert read_meta(folder) == first.meta
+    assert load_from_disk(str(folder)).to_list() == first.rows
+    written = (folder / "meta.json").stat().st_mtime_ns
+    assert save_sft(_build(), tmp_path / "sft") == folder
+    assert (folder / "meta.json").stat().st_mtime_ns == written
+    assert [path.name for path in (tmp_path / "sft").iterdir()] == [first.meta.hash]
+
+    # A folder whose meta.json names another dataset is refused, not reused.
+    stale = tmp_path / "stale"
+    shutil.copytree(save_sft(fewer, tmp_path / "other"), stale / first.meta.hash)
+    with pytest.raises(ValueError, match=f"holds the dataset with hash {fewer.meta.hash}"):
+        save_sft(first, stale)
 
 
 @pytest.mark.phase(4)

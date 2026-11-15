@@ -19,20 +19,23 @@ before they are returned. Left out, and counted in the meta's ``counts``:
 - a prompt the policy cut down to show a table the gold query reads without its
   columns: training on it would teach the model to name columns it can't see.
 
-The hash is the sha256 of the canonical JSON of the rows, the prompt version and the
-tokenizer id; a Hub tokenizer given as ``<repo>@<revision>`` makes it the same on every
-machine.
+``save_sft`` writes the rows with ``datasets`` to ``data/sft/<hash>/``, next to
+``meta.json``. The hash is the sha256 of the canonical JSON of the rows, the prompt
+version and the tokenizer id, so the same rows always land in the same folder; a Hub
+tokenizer given as ``<repo>@<revision>`` makes it the same on every machine.
 """
 
 from __future__ import annotations
 
 import logging
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
 import sqlglot
+from datasets import Dataset
 from pydantic import BaseModel
 from sqlglot import exp
 from sqlglot.errors import SqlglotError
@@ -49,8 +52,11 @@ from forge.data.prompts import (
 )
 from forge.data.spider import FAILING_GOLD_IDS
 from forge.data.splits import assert_train_only, load_train
+from forge.ops.paths import repo_root
 
 log = logging.getLogger(__name__)
+
+META_FILE = "meta.json"
 
 
 class SftRow(TypedDict):
@@ -155,6 +161,40 @@ def sft_hash(rows: Sequence[SftRow], prompt_version: str, tokenizer: str) -> str
 def sql_block(sql: str) -> str:
     """The reply the model learns: the query alone in a sql code block (plan section 3.7)."""
     return f"```sql\n{sql.strip()}\n```"
+
+
+def default_root() -> Path:
+    return repo_root() / "data" / "sft"
+
+
+def save_sft(dataset: SftDataset, root: Path | None = None) -> Path:
+    """Write the dataset to ``<root>/<hash>/`` (default ``data/sft``) and return that folder.
+
+    A folder already there with this hash in its ``meta.json`` holds these same rows, so
+    it is kept as it is. The rows are written to a temporary folder beside it first, so a
+    failed write never leaves a partial dataset under the hash.
+    """
+    root = default_root() if root is None else root
+    target = root / dataset.meta.hash
+    if target.exists():
+        found = read_meta(target).hash
+        if found != dataset.meta.hash:
+            raise ValueError(
+                f"{target} holds the dataset with hash {found}, not its own name; remove it"
+            )
+        log.info("%s is already built", target)
+        return target
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".sft-", dir=root) as scratch:
+        staged = Path(scratch) / dataset.meta.hash
+        Dataset.from_list(list(dataset.rows)).save_to_disk(str(staged))
+        (staged / META_FILE).write_text(dataset.meta.model_dump_json(indent=2) + "\n", "utf-8")
+        staged.rename(target)
+    return target
+
+
+def read_meta(folder: Path) -> SftMeta:
+    return SftMeta.model_validate_json((folder / META_FILE).read_bytes())
 
 
 def _drop_duplicates(examples: Sequence[Example]) -> list[Example]:
