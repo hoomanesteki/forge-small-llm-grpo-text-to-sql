@@ -759,5 +759,89 @@ def ledger_summary(days: int = typer.Option(7, help="quota window in days")) -> 
     typer.echo(summary(window_days=days).render())
 
 
+kaggle_app = typer.Typer(
+    help="Kaggle: the private code and data datasets that GPU jobs mount.", no_args_is_help=True
+)
+app.add_typer(kaggle_app, name="kaggle")
+
+
+def _kaggle_owner() -> str:
+    from forge.ops.dotenv import forge_env
+    from forge.ops.kaggle import kaggle_owner
+
+    return kaggle_owner(forge_env(), Path.home())
+
+
+@kaggle_app.command("publish-code")
+def kaggle_publish_code() -> None:
+    """Publish the wheel built at HEAD as the private dataset <owner>/forge-code.
+
+    build/kaggle-code gets the wheel, kaggle/requirements-gpu.txt and GIT_SHA, and goes up
+    as a new version noted with the SHA, or as the first one. The owner is
+    FORGE_KAGGLE_USER, else the Kaggle credentials' username. A dirty tree is refused.
+    """
+    import subprocess
+
+    from forge.ops.kaggle import KaggleClient, KaggleError, publish_code
+    from forge.ops.manifest import DirtyTreeError
+    from forge.ops.paths import RepoRootNotFound, repo_root
+
+    try:
+        bundle, published = publish_code(repo_root(), _kaggle_owner(), KaggleClient())
+    # OSError covers a missing requirements file and a bundle that can't be written,
+    # ValueError an unpinned requirement, CalledProcessError a root that isn't a checkout.
+    except (
+        DirtyTreeError,
+        KaggleError,
+        OSError,
+        RepoRootNotFound,
+        subprocess.CalledProcessError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"bundle {bundle.path}: {bundle.wheel}, requirements-gpu.txt, GIT_SHA")
+    action = "created" if published.created else "uploaded a new version of"
+    typer.echo(f"{action} {published.ref} at {bundle.git_sha}")
+    typer.echo(published.output)
+
+
+@kaggle_app.command("publish-data")
+def kaggle_publish_data() -> None:
+    """Upload the verified Spider files once, as the private dataset <owner>/forge-spider.
+
+    Every file spider.sha256 lists must be in FORGE_DATA_DIR (default data/spider) and
+    match it. build/kaggle-data gets them and spider.sha256, and the description carries
+    Spider's CC BY-SA 4.0 attribution and citation. A dataset that exists is left as it
+    is: the checksums pin Spider, so one upload serves every job.
+    """
+    from forge.data.spider import ChecksumMismatch, resolve_data_dir
+    from forge.ops.kaggle import DATA_BUNDLE, DATA_SLUG, KaggleClient, KaggleError, publish_data
+    from forge.ops.paths import RepoRootNotFound, repo_root
+
+    try:
+        root = repo_root()
+        owner = _kaggle_owner()
+        data_dir = resolve_data_dir()
+        published = publish_data(root, owner, KaggleClient(), data_dir)
+    except ChecksumMismatch as exc:
+        typer.echo(
+            f"error: {len(exc.files)} file(s) in {data_dir} are missing or differ from "
+            "spider.sha256; run `forge data fetch` or point FORGE_DATA_DIR at the full download",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    # OSError covers a bundle that can't be written, ValueError a malformed checksum list.
+    except (KaggleError, OSError, RepoRootNotFound, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if published is None:
+        typer.echo(f"{owner}/{DATA_SLUG} exists already; nothing to upload")
+        return
+    typer.echo(f"bundle {root / DATA_BUNDLE}: the files of {data_dir}, each matching spider.sha256")
+    typer.echo(f"created {published.ref}")
+    typer.echo(published.output)
+
+
 if __name__ == "__main__":
     app()

@@ -11,8 +11,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from forge import cli
 from forge.data.spider import ChecksumMismatch, file_sha256, raw_files
+from forge.ops import kaggle
 from forge.ops.kaggle import (
     CODE_BUNDLE,
     DATA_BUNDLE,
@@ -354,3 +357,79 @@ def test_owner_errors(tmp_path: Path) -> None:
 def test_unpinned_requirements() -> None:
     text = "# header\n\ntrl==1.18.0  # note\npeft[extra]==0.21.3\nvllm>=0.33\ntorch\n-r more.txt\n"
     assert unpinned_requirements(text) == ["vllm>=0.33", "torch", "-r more.txt"]
+
+
+@pytest.fixture
+def cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No credentials, .env or home of the developer's: an empty repo root and home."""
+    monkeypatch.setenv("FORGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in ("FORGE_KAGGLE_USER", "KAGGLE_USERNAME", "KAGGLE_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path
+
+
+@pytest.mark.phase(3)
+def test_publish_cli_needs_a_username(cli_env: Path) -> None:
+    for command in ("publish-code", "publish-data"):
+        result = CliRunner().invoke(cli.app, ["kaggle", command])
+        assert result.exit_code == 1, result.output
+        assert "error: no Kaggle username: set FORGE_KAGGLE_USER" in result.stderr
+
+
+@pytest.mark.phase(3)
+def test_publish_code_cli(repo: Path, cli_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FORGE_ROOT", str(repo))
+    monkeypatch.setenv("FORGE_KAGGLE_USER", OWNER)
+    fake = FakeCli("forge-owner/forge-code")
+    monkeypatch.setattr(kaggle, "KaggleClient", lambda: _client(fake))
+
+    result = CliRunner().invoke(cli.app, ["kaggle", "publish-code"])
+
+    assert result.exit_code == 0, result.output
+    sha = _git(repo, "rev-parse", "HEAD")
+    assert result.stdout.splitlines() == [
+        f"bundle {repo / CODE_BUNDLE}: {WHEEL}, requirements-gpu.txt, GIT_SHA",
+        f"uploaded a new version of forge-owner/forge-code at {sha}",
+        CREATED.strip(),
+    ]
+
+    # An untracked file is enough to refuse: the wheel would carry it under this SHA.
+    (repo / "scratch.py").write_text("print('not committed')\n", encoding="utf-8")
+    fake.commands.clear()
+    result = CliRunner().invoke(cli.app, ["kaggle", "publish-code"])
+    assert result.exit_code == 1, result.output
+    assert "error: the working tree has uncommitted changes" in result.stderr
+    assert fake.commands == []
+
+
+@pytest.mark.phase(3)
+def test_publish_data_cli_leaves_a_published_dataset(
+    cli_env: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_KAGGLE_USER", OWNER)
+    fake = FakeCli("forge-owner/forge-spider")
+    monkeypatch.setattr(kaggle, "KaggleClient", lambda: _client(fake))
+
+    result = CliRunner().invoke(cli.app, ["kaggle", "publish-data"])
+
+    assert result.exit_code == 0, result.output
+    assert "forge-owner/forge-spider exists already" in result.stdout
+    assert fake.commands == [["kaggle", "datasets", "status", "forge-owner/forge-spider"]]
+
+
+@pytest.mark.phase(3)
+def test_publish_data_cli_refuses_data_that_is_not_the_full_download(
+    cli_env: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fixture is a subset, so most of spider.sha256's files are missing from it.
+    monkeypatch.setenv("FORGE_KAGGLE_USER", OWNER)
+    fake = FakeCli()
+    monkeypatch.setattr(kaggle, "KaggleClient", lambda: _client(fake))
+
+    result = CliRunner().invoke(cli.app, ["kaggle", "publish-data"])
+
+    assert result.exit_code == 1, result.output
+    assert "differ from spider.sha256" in result.stderr
+    assert "forge data fetch" in result.stderr
+    assert [c[2] for c in fake.commands] == ["status"]
