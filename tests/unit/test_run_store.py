@@ -1,4 +1,5 @@
-"""The run stores (``forge.ops.hub``), each through the same tests: a folder for now."""
+"""The run stores (``forge.ops.hub``): a folder, and the Hub repo with its client stood in
+for by ``FakeHub``, so no test needs a token or the network."""
 
 from __future__ import annotations
 
@@ -10,15 +11,18 @@ import pytest
 from forge.core.types import RunManifest
 from forge.ops.hub import (
     BEST,
+    HubRunStore,
     LocalRunStore,
     RunNotFound,
     RunStore,
     checkpoint_dir,
     manifest_bytes,
 )
+from tests.fakes import FakeHub
 
 RUN = "2026-11-15-tiny-grpo-abc1234"
 OTHER = "2026-11-16-tiny-grpo-abc1234"
+REPO = "owner/forge-runs"
 
 
 def _manifest(run_id: str = RUN) -> RunManifest:
@@ -55,9 +59,12 @@ def _files(root: Path) -> dict[str, bytes]:
     }
 
 
-@pytest.fixture(params=["local"])
+@pytest.fixture(params=["local", "hub"])
 def store(request: pytest.FixtureRequest, tmp_path: Path) -> RunStore:
-    return LocalRunStore(tmp_path / "store")
+    """Each store, the Hub's with its client faked."""
+    if request.param == "local":
+        return LocalRunStore(tmp_path / "store")
+    return HubRunStore(REPO, api=FakeHub())
 
 
 @pytest.mark.phase(3)
@@ -96,6 +103,37 @@ def test_local_store_roundtrip(tmp_path: Path) -> None:
     assert RunManifest.model_validate_json((local / "manifest.json").read_bytes()) == manifest
     # Pulling copies: the store keeps its run.
     assert store.get_manifest(RUN) == manifest and (tmp_path / "store" / RUN / ".lock").exists()
+
+
+@pytest.mark.phase(3)
+def test_hub_store_roundtrip(tmp_path: Path) -> None:
+    fake = FakeHub()
+    store = HubRunStore(REPO, api=fake)
+    run = tmp_path / "made" / RUN
+    (run / "eval").mkdir(parents=True)
+    (run / "eval" / "val-scores.jsonl").write_text("{}\n")
+    (run / ".lock").write_text("")
+    manifest = _manifest()
+    (run / "manifest.json").write_bytes(manifest_bytes(manifest))
+
+    assert store.put_folder(RUN, run) == f"runs/{RUN}"
+    assert sorted(fake.files) == [f"runs/{RUN}/eval/val-scores.jsonl", f"runs/{RUN}/manifest.json"]
+    assert store.runs() == [RUN]
+    assert store.get_manifest(RUN) == manifest
+
+    local = tmp_path / "runs" / RUN
+    (local / "eval").mkdir(parents=True)
+    (local / "eval" / "old.jsonl").write_text("from an earlier pull\n")
+    (local / "kernels.json").write_text("{}\n")
+    store.pull(RUN, local)
+
+    # As forge kaggle output does: eval/ comes whole from the store, kernels.json stays.
+    assert _files(local) == {
+        "eval/val-scores.jsonl": b"{}\n",
+        "kernels.json": b"{}\n",
+        "manifest.json": manifest_bytes(manifest),
+    }
+    assert sorted(p.name for p in local.parent.iterdir()) == [RUN]
 
 
 @pytest.mark.phase(3)
@@ -146,6 +184,77 @@ def test_retention_keeps_latest_two_and_best(store: RunStore, tmp_path: Path) ->
     assert store.prune_checkpoints(RUN, keep=1) == ["checkpoints/step-000150"]
     with pytest.raises(ValueError, match="keep must be at least 1"):
         store.prune_checkpoints(RUN, keep=0)
+
+
+@pytest.mark.phase(3)
+def test_hub_store_calls_api(tmp_path: Path) -> None:
+    fake = FakeHub()
+    # No token: the client is stood in for, and a real one would find its own.
+    store = HubRunStore(REPO, api=fake)
+    (tmp_path / "metrics.jsonl").write_text("{}\n")
+    manifest = _manifest()
+    for step in (50, 100, 150):
+        store.put_folder(RUN, _checkpoint(tmp_path, step), checkpoint_dir(step))
+    fake.calls.clear()
+
+    store.put_manifest(manifest)
+    assert store.put_file(RUN, tmp_path / "metrics.jsonl", "metrics.jsonl") == (
+        f"runs/{RUN}/metrics.jsonl"
+    )
+    assert store.put_folder(RUN, tmp_path / "saved-150", "checkpoints/best") == (
+        f"runs/{RUN}/checkpoints/best"
+    )
+    assert store.get_manifest(RUN) == manifest
+    assert store.latest_checkpoint(RUN) == "checkpoints/step-000150"
+    assert store.prune_checkpoints(RUN) == ["checkpoints/step-000050"]
+    assert store.runs() == [RUN]
+    store.pull(RUN, tmp_path / "runs" / RUN)
+
+    names = [method for method, _ in fake.calls]
+    assert names == [
+        "upload_file",
+        "upload_file",
+        "upload_folder",
+        "hf_hub_download",
+        "list_repo_files",
+        "list_repo_files",
+        "delete_files",
+        "list_repo_files",
+        "snapshot_download",
+    ]
+    # Every call goes to the run store's model repo, the private one doctor checks.
+    assert {(kw["repo_id"], kw["repo_type"]) for _, kw in fake.calls} == {(REPO, "model")}
+    calls = [
+        {name: value for name, value in kw.items() if name not in ("repo_id", "repo_type")}
+        for _, kw in fake.calls
+    ]
+    assert calls[0] == {
+        "path_or_fileobj": manifest_bytes(manifest),
+        "path_in_repo": f"runs/{RUN}/manifest.json",
+        "commit_message": f"Write the running manifest of run {RUN}",
+    }
+    assert calls[1] == {
+        "path_or_fileobj": str(tmp_path / "metrics.jsonl"),
+        "path_in_repo": f"runs/{RUN}/metrics.jsonl",
+        "commit_message": f"Add metrics.jsonl to run {RUN}",
+    }
+    assert calls[2] == {
+        "folder_path": str(tmp_path / "saved-150"),
+        "path_in_repo": f"runs/{RUN}/checkpoints/best",
+        "ignore_patterns": [".lock"],
+        "delete_patterns": None,
+        "commit_message": f"Add checkpoints/best to run {RUN}",
+    }
+    # The manifest is read through a folder of its own, not the shared Hub cache.
+    assert calls[3]["filename"] == f"runs/{RUN}/manifest.json"
+    assert not Path(calls[3]["local_dir"]).exists()
+    assert calls[4] == calls[5] == calls[7] == {}
+    assert calls[6] == {
+        "delete_patterns": [f"runs/{RUN}/checkpoints/step-000050/*"],
+        "commit_message": f"Keep the latest 2 checkpoints of run {RUN}",
+    }
+    assert calls[8]["allow_patterns"] == [f"runs/{RUN}/*"]
+    assert Path(calls[8]["local_dir"]).parent == tmp_path / "runs"
 
 
 @pytest.mark.phase(3)
