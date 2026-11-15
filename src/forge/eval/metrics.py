@@ -1,4 +1,4 @@
-"""Scores in aggregate (stage 9): rates with intervals and paired comparisons.
+"""Scores in aggregate (stage 9): rates with intervals, paired comparisons and pass@k.
 
 Every interval is a 95% percentile bootstrap over 1,000 resamples from
 ``numpy.random.default_rng(0)``, seeded afresh for each interval. An interval then
@@ -8,13 +8,14 @@ same numbers, and the intervals over one set of questions share their resamples.
 A resample draws whole questions, since the samples of one question are not
 independent.
 
-``compare`` counts a sample as right by official EX when every score of both runs has
-an official verdict, and by fast EX otherwise (``ex_metric``). Reported numbers are
+``compare`` and ``pass_at_k`` count a sample as right by official EX when every score
+has an official verdict, and by fast EX otherwise (``ex_metric``). Reported numbers are
 official (ADR-0008), and a run stopped before its official batch can still be compared.
 """
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, get_args
@@ -167,6 +168,27 @@ def compare(scores_a: Iterable[Score], scores_b: Iterable[Score]) -> Comparison:
             pvalue=_mcnemar_pvalue(both, only_a, only_b, neither) if n == len(a) else None,
         ),
     )
+
+
+def pass_at_k(scores: Iterable[Score], k: int) -> float:
+    """The chance that at least one of k samples is right, averaged over questions.
+
+    Each question with n samples, c of them right, gives the unbiased estimate
+    1 - C(n - c, k) / C(n, k) of Chen et al. (2021). Raises ``ValueError`` when k is
+    below 1 or a question has fewer than k samples, and for scores ``summarize`` refuses.
+    """
+    if k < 1:
+        raise ValueError(f"pass@k needs k of at least 1, got {k}")
+    questions = _questions(scores)
+    metric = ex_metric(score for group in questions.values() for score in group)
+    estimates: list[float] = []
+    for example_id, group in questions.items():
+        n = len(group)
+        if n < k:
+            raise ValueError(f"pass@{k} needs {k} samples of each question; {example_id} has {n}")
+        right = sum(_hit(score, metric) for score in group)
+        estimates.append(1 - math.comb(n - right, k) / math.comb(n, k))
+    return math.fsum(estimates) / len(estimates)
 
 
 def ex_metric(scores: Iterable[Score]) -> Metric:

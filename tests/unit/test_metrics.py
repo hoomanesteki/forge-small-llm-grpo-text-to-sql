@@ -1,14 +1,16 @@
-"""Scores in aggregate: rates with bootstrap intervals and paired comparisons."""
+"""Scores in aggregate: rates with bootstrap intervals, paired comparisons and pass@k."""
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
+from fractions import Fraction
 
 import pytest
 
 from forge.core.types import Hardness, Score
-from forge.eval.metrics import Rate, compare, ex_metric, summarize
+from forge.eval.metrics import Rate, compare, ex_metric, pass_at_k, summarize
 
 
 def _score(
@@ -202,6 +204,7 @@ def test_official_ex_counts_when_every_score_has_it() -> None:
     a = [_score(q, fast=q == 0, official=q != 0) for q in range(4)]
     b = [_score(q, fast=True, official=True) for q in range(4)]
     assert ex_metric(a) == "ex_official"
+    assert pass_at_k(a, 1) == 3 / 4
     assert compare(a, b).ex_a == 3 / 4
 
     # Without a verdict for every score, of either run, fast EX counts instead.
@@ -209,6 +212,40 @@ def test_official_ex_counts_when_every_score_has_it() -> None:
     assert ex_metric(b) == "ex_fast"
     result = compare(a, b)
     assert (result.metric, result.ex_a) == ("ex_fast", 1 / 4)
+    a[3] = a[3].model_copy(update={"ex_official": None})
+    assert pass_at_k(a, 1) == 1 / 4
+
+
+@pytest.mark.phase(2)
+def test_pass_at_k_unbiased() -> None:
+    # Four questions of 5 samples each, with 0, 1, 2 and 5 of them right.
+    right = [0, 1, 2, 5]
+    scores = [
+        _score(q, fast=sample < c, hardness="medium", sample=sample)
+        for q, c in enumerate(right)
+        for sample in range(5)
+    ]
+    for k in range(1, 6):
+        # The estimator is unbiased for the share of k-sample draws, without replacement,
+        # that hold a right answer; count every draw.
+        draws = [
+            Fraction(
+                sum(any(s < c for s in draw) for draw in itertools.combinations(range(5), k)),
+                math.comb(5, k),
+            )
+            for c in right
+        ]
+        assert draws == [1 - Fraction(math.comb(5 - c, k), math.comb(5, k)) for c in right]
+        assert pass_at_k(scores, k) == pytest.approx(float(sum(draws) / len(draws)), rel=1e-12)
+
+    # pass@1 is the share of right samples, pass@5 the share of questions with one.
+    assert pass_at_k(scores, 1) == pytest.approx(8 / 20)
+    assert pass_at_k(scores, 5) == 3 / 4
+    assert pass_at_k(reversed(scores), 2) == pass_at_k(scores, 2)
+    with pytest.raises(ValueError, match="pass@6 needs 6 samples of each question"):
+        pass_at_k(scores, 6)
+    with pytest.raises(ValueError, match="k of at least 1"):
+        pass_at_k(scores, 0)
 
 
 @pytest.mark.phase(2)
