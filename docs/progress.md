@@ -113,6 +113,7 @@ Work discovered along the way that is not a plan story.
 | FG-092 | Gate 0 fixes: doctor and .env | done | `six` for the Kaggle CLI, .env reaches the CLI, file tokens masked |
 | FG-093 | Gate 0 fixes: backlog labels and test checks | done | GPU spike labeled GPU (11), phase and skip marks checked, gitignore |
 | FG-191 | Gate 1 fixes: sandbox safety | done | Statements denied by keyword before SQLite runs them, SQLite limits on every connection (the evaluator's too), a watchdog at the deadline, a 64 MiB result budget, `\v` counted as SQLite does; official EX vets what the evaluator runs and strips leading `;` |
+| FG-192 | Gate 1 fixes: data and prompts | done | `load_dev` refuses an empty dev, `assert_train_only` refuses iterators, fetch won't overwrite other data and reports network errors, p2 samples keep their spaces, `[name]` quoted, fallback lines must parse; ADR-0004 says what counts as a dev use |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -156,16 +157,25 @@ Work discovered along the way that is not a plan story.
   in their DDL. Schema text drops comments, since on one line they would swallow the rest of the
   statement; flight_4's column notes go with them. All 873 normalized statements rebuild their
   tables with the same columns, keys and foreign keys (`tests/integration/test_schema.py`).
+  Since FG-192 `normalize_sql` also reads SQLite's `[name]` as quoted; no Spider table uses one.
 - `forge.data.schema` opens databases read-only through its own small helper. FG-106 moves it into
   `forge.sql.executor`.
 - `forge data prompt-stats` with the Qwen2.5 tokenizer (from `trl-internal-testing/tiny-Qwen2ForCausalLM-2.5`):
   at p1 only baseball_1's 82 train questions pass 1,536 tokens, and dropping columns brings them
   to 530 or fewer. At p2, 1,215 train, 246 val and 160 dev prompts pass 1,536 and lose their
   sample rows, so for those p2 is p1. FG-307 should keep that in mind when comparing the two.
-  Nothing is excluded from training at either version.
+  Nothing is excluded from training at either version. Since FG-192 the numbers are the same.
+- 23 of those 82 fitted baseball_1 train prompts (ids between `spider-train-03629` and `03710`,
+  at p1 and p2) show a table their gold SQL uses as a stub without columns, because the question
+  doesn't name it: home_game in 10, player_college and salary in 4 each, park, player,
+  player_award and team in 2 each. Found by comparing the tables sqlglot finds in each gold query
+  with `FittedPrompt.dropped_columns`. The model can't see the columns it needs there, so FG-401
+  and FG-505 should drop those examples or flag them.
 - An excluded example keeps its shortest prompt in `FittedPrompt.prompt` and stays in the eval
   denominator. FG-202 decides whether eval sends that prompt or the full one.
 - `prompt-stats` reads dev questions and schemas without logging a dev use: it runs no model.
+  ADR-0004 now says what counts as a dev use, and `prompt-stats` and `forge eval gold` print a
+  note saying so with `--split dev` (FG-192).
 - SQLite runs `DROP TABLE|INDEX|VIEW|TRIGGER IF EXISTS` on a missing object as a no-op without
   asking the authorizer, so it would come back ok with no rows and match an empty gold result.
   The executor reports any statement without result columns as `denied`.
@@ -200,7 +210,10 @@ Work discovered along the way that is not a plan story.
   properly. Every train and val gold parses with sqlglot 30.31, so the regex fallback never runs on them.
 - `extract_sql` takes one line when there is no sql block, as section 3.7 says, so an unfenced query
   split over several lines loses its tail. An unclosed `<think>` (a reply cut off while thinking) is
-  not dropped either. FG-204 can count both if they show up.
+  not dropped either. FG-204 can count both if they show up. Since FG-192 the line must also parse
+  as a query with sqlglot, so a sentence opening with "With" or "Select" after the query no longer
+  wins; an unfenced query line with a syntax error now gives `None`, not SQL that fails to run. All
+  9,693 gold queries still come through on one line (`tests/integration/test_extract.py`).
 - The official evaluator removes every `DISTINCT`, inside `COUNT(DISTINCT x)` too, where it becomes
   `count(x)`. All 17 disagreements in the 2,000-item val check come from that: 14 `COUNT(DISTINCT ...)`
   golds the evaluator matches to another column's distinct count, and 3 `SELECT DISTINCT` golds whose
@@ -243,3 +256,19 @@ Work discovered along the way that is not a plan story.
   follows both rules; sqlite3 on 3.11.15 and 3.12.13 agrees on the cases in the unit tests.
 - Re-running `forge eval agreement --mutations 2000 --split val --seed 0` on the FG-191 code gives the
   same report as `docs/audit/agreement-2026-11-14.md` apart from the date and commit, so it stands.
+- sqlglot 30.31 raises `RecursionError`, not a `SqlglotError`, on about 47 nested parentheses
+  (`SELECT ((((...1))))`). Gold queries never nest that deep, but model output can: `extract_sql`
+  treats it as no query, and any later code that parses model output with sqlglot (FG-204, FG-501,
+  FG-601) must catch it too.
+- p2 sample values had every run of whitespace collapsed, so 37 stored values in 11 databases
+  showed as values that don't exist, among them flight_2's (dev) airport codes, stored with a
+  leading space (`' APG'`) in `flights` and without one in `airports`. Since FG-192 only line breaks
+  become spaces.
+- huggingface-hub 2.4 raises its HTTP errors as `OSError`s, but a connection that still fails after
+  its retries raises a bare `httpx2` error, which is not one. `forge data fetch` catches both, so
+  `httpx2` is now a declared dependency.
+- `forge data fetch` keeps the zip in `data/download` in the repo (git-ignored), not next to
+  `FORGE_DATA_DIR`, and fills in missing files but replaces files that differ only with `--force`,
+  so pointed at `tests/fixtures/spider_mini` it stops instead of downloading and extracting there.
+- `load_dev()` raises `DataNotFound` when the data has no dev questions, before it writes the row,
+  so the fixture or a partial download never spends one of the six looks.

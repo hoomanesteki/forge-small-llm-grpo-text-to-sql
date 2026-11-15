@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,53 @@ def test_sample_values_are_cut_and_kept_on_one_line(tmp_path: Path) -> None:
         # Text that is not valid UTF-8 is shown with a replacement character.
         "-- sample: (3, 'A�B', NULL)",
     )
+
+
+@pytest.mark.phase(1)
+def test_sample_values_keep_their_spaces(tmp_path: Path) -> None:
+    # Spider has values like 'BREAK ' and 'C  Programming'; a gold query that matches one
+    # needs the spaces the prompt shows.
+    _make_db(
+        tmp_path,
+        "spaced",
+        "CREATE TABLE t (a TEXT, b TEXT, c TEXT, d TEXT, e TEXT, f TEXT)",
+        "INSERT INTO t VALUES ('  BREAK ', 'C  Programming', 'tab' || char(9) || 'kept', "
+        "'one' || char(13, 10) || 'two', 'u' || char(8232) || 'v', "
+        "'x' || char(11) || char(12) || char(28) || char(133) || 'y')",
+    )
+
+    text = schema_text("spaced", "p2", data_dir=tmp_path)
+
+    # Only line breaks become spaces, a CR LF pair as one: they would end the comment.
+    assert text.splitlines() == [
+        "CREATE TABLE t (a TEXT, b TEXT, c TEXT, d TEXT, e TEXT, f TEXT)",
+        "-- sample: ('  BREAK ', 'C  Programming', 'tab\tkept', 'one two', 'u v', 'x    y')",
+    ]
+
+
+@pytest.mark.phase(1)
+def test_normalize_sql_keeps_bracketed_names(tmp_path: Path) -> None:
+    # SQLite takes [name] as a quoted name, so what is inside stays as it is.
+    assert normalize_sql("CREATE TABLE t ([a--b] int, c text)") == (
+        "CREATE TABLE t ([a--b] int, c text)"
+    )
+    ddl = "CREATE TABLE [two  words(] (\n  [x /* y */] int ,\n  [it's] text, z int\n)"
+    one_line = "CREATE TABLE [two  words(] ([x /* y */] int, [it's] text, z int)"
+    assert normalize_sql(ddl) == one_line
+    with pytest.raises(ValueError, match="unterminated"):
+        normalize_sql("CREATE TABLE t ([open int)")
+
+    # The one-line statement builds the same table, and its stub cuts at the column list.
+    source = _make_db(tmp_path, "bracketed", ddl)
+    (table,) = schema_tables("bracketed", "p1", data_dir=tmp_path)
+    assert table.create == one_line
+    assert table.stub == "CREATE TABLE [two  words(] (...)"
+    info = 'PRAGMA table_info("two  words(")'
+    with closing(sqlite3.connect(source)) as orig, closing(sqlite3.connect(":memory:")) as copy:
+        copy.execute(table.create)
+        columns = copy.execute(info).fetchall()
+        assert columns == orig.execute(info).fetchall()
+    assert [column[1] for column in columns] == ["x /* y */", "it's", "z"]
 
 
 @pytest.mark.phase(1)
