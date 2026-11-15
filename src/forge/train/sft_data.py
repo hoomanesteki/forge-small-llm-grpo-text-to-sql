@@ -197,6 +197,19 @@ def read_meta(folder: Path) -> SftMeta:
     return SftMeta.model_validate_json((folder / META_FILE).read_bytes())
 
 
+def render_counts(counts: SftCounts) -> str:
+    rows = [
+        ("train questions", counts.train),
+        ("  asked again on the same database", counts.duplicates),
+        ("  gold query fails on SQLite", counts.failing_gold),
+        ("  over the token limit", counts.over_limit),
+        ("  gold table shown without columns", counts.hidden_gold_tables),
+        ("rows", counts.rows),
+    ]
+    width = max(len(label) for label, _ in rows)
+    return "\n".join(f"{label:<{width}}  {value:>6}" for label, value in rows)
+
+
 def _drop_duplicates(examples: Sequence[Example]) -> list[Example]:
     seen: set[tuple[str, str]] = set()
     unique = []

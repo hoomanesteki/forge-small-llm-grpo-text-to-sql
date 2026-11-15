@@ -55,7 +55,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
-| FG-401 | SFT dataset builder | 3 | todo |  |  |  |
+| FG-401 | SFT dataset builder | 3 | done |  |  | `forge.train.sft_data`: TRL conversational prompt-completion rows (`prompt` from `fit_prompt`, `completion` the gold query in a sql block, `example_id`, `db_id`) from `load_train()` only, checked again by `assert_train_only`; repeats (casefolded, spacing collapsed), `FAILING_GOLD_IDS`, prompts over the limit and prompts that show a gold table without columns are left out and counted; `forge data build-sft --prompt-version --tokenizer [--out]` saves `data/sft/<sha256>/` with `meta.json`; `load_tokenizer` takes `<repo>@<revision>`. Masking checked through `SFTTrainer`'s own preparation with the tiny Qwen2.5 tokenizer |
 | FG-402 | Training backend abstraction and configs | 5 | todo |  |  |  |
 | FG-403 | SFT trainer with CPU smoke | 3 | todo |  |  |  |
 | FG-404 | SFT runs on Kaggle | 3 | todo |  |  |  |
@@ -789,3 +789,22 @@ Work discovered along the way that is not a plan story.
   of install, download and engine start per kernel; FG-301's measurements should replace
   them before the first push, as the kernel's timeout is the estimate and half again
   (FG-307).
+- `forge data build-sft` on the full train split with the pilot's tokenizer
+  (Qwen2.5-Coder-0.5B-Instruct at its pinned commit), at p1 and at p2: 7,787 questions, 25 asked
+  again on the same database (9 repeat it exactly, 16 differ only in case), 3 with gold that
+  fails on SQLite, none over 1,536 tokens, and 23 whose fitted prompt shows a table the gold
+  reads without its columns: the baseball_1 prompts the FG-105 note above found. That leaves
+  7,736 rows. It took 7 s at p1 and 9 s at p2 on the laptop (FG-401).
+- TRL 1.18's `SFTConfig.max_length` defaults to 1,024, below the 1,536-token prompt limit. With
+  the pilot's tokenizer 333 p1 rows and 1,364 p2 rows are longer than 1,024 tokens (the longest
+  is 1,615, the longest reply 205), and `truncation_mode="keep_start"` would cut their replies
+  and the end-of-turn token, or drop the row when nothing of the reply is left. No row passes
+  2,048, so FG-402 and FG-403 must set ADR-0010's 2,048 (FG-401).
+- 2,046 of the 7,787 train gold queries end in `;`, and many keep Spider's spacing
+  (`T1.a  =  T2.b`). The completions keep the gold as it is, so the model learns both; the
+  executor runs a query with a trailing `;` (FG-401).
+- The SFT dataset's hash is in its `meta.json`. `RunManifest.data_manifest_hash` holds the
+  Spider files' hash, so FG-403 has to put the SFT hash in the run's config or outputs (FG-401).
+- `test_assistant_only_labels` is a unit test, as the plan names it, and loads the tiny model.
+  The unit CI jobs have no Hugging Face cache, unlike smoke, so each of the three downloads it
+  (about 21 MB); a cache step like the smoke job's would save that (FG-401).

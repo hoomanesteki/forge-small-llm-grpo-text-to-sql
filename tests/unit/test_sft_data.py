@@ -12,9 +12,12 @@ from pathlib import Path
 import pytest
 from datasets import load_from_disk
 from trl.data_utils import is_conversational
+from typer.testing import CliRunner
 
+from forge import cli
 from forge.core.hashing import canonical_json, sha256_hex
 from forge.core.types import Example
+from forge.data import prompts
 from forge.data.prompts import chat_token_counter, fit_prompt
 from forge.data.spider import load_raw
 from forge.data.splits import (
@@ -257,3 +260,43 @@ def test_hidden_tables_reads_the_gold_query() -> None:
     assert _hidden_tables(example("SELECT * FROM ("), ()) == []
     with pytest.raises(ValueError, match="x-1: sqlglot can't read the gold query"):
         _hidden_tables(example("SELECT * FROM ("), ("dept",))
+
+
+def _cells(text: str) -> list[list[str]]:
+    return [line.split() for line in text.splitlines()]
+
+
+@pytest.mark.phase(4)
+def test_build_sft_cli(spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loaded: list[str] = []
+
+    def fake_load(name: str) -> WordTokenizer:
+        loaded.append(name)
+        return WordTokenizer()
+
+    monkeypatch.setattr(prompts, "load_tokenizer", fake_load)
+    args = ["data", "build-sft", "--prompt-version", "p2", "--tokenizer", "org/tok"]
+    result = CliRunner().invoke(cli.app, [*args, "--out", str(tmp_path / "sft")])
+
+    assert result.exit_code == 0, result.output
+    assert loaded == ["org/tok"]
+    expected = _build("p2")
+    folder = tmp_path / "sft" / expected.meta.hash
+    assert read_meta(folder) == expected.meta
+    lines = result.stdout.splitlines()
+    assert lines[:2] == [f"data: {spider_mini}", "prompt p2, tokenizer org/tok"]
+    assert lines[-2:] == [f"sft dataset: {folder}", f"hash: {expected.meta.hash}"]
+    cells = _cells(result.stdout)
+    assert ["train", "questions", "40"] in cells and ["rows", "40"] in cells
+
+    # A leak into the train split is an error, not a dataset.
+    monkeypatch.setattr(sft_data, "load_train", lambda data_dir=None: load_val())
+    leaked = CliRunner().invoke(cli.app, [*args, "--out", str(tmp_path / "leak")])
+    assert leaked.exit_code == 1
+    assert "error: 20 val or dev example(s) passed to training" in leaked.stderr
+    assert not (tmp_path / "leak").exists()
+
+    # The prompt version is never assumed.
+    missing = CliRunner().invoke(cli.app, ["data", "build-sft", "--tokenizer", "org/tok"])
+    assert missing.exit_code == 2
+    assert "--prompt-version" in missing.stderr
