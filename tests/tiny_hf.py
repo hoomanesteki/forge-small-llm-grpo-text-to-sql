@@ -48,7 +48,8 @@ def byte_tokenizer(chat_template: str = CHATML) -> Qwen2Tokenizer:
 
 def save_random_model(directory: Path, *, generation: dict[str, Any] | None = None) -> Path:
     """Save a two-layer Qwen2 model with random weights, and ``byte_tokenizer``, to
-    ``directory``; ``generation`` is the generation config the checkpoint ships.
+    ``directory``; ``generation`` is the generation config the checkpoint ships, over the
+    tokenizer's end and pad tokens.
 
     The weights are drawn wide, so at every step the likeliest token leads the next by
     far more than float error, and a greedy reply doesn't depend on how a batch pads it.
@@ -72,9 +73,11 @@ def save_random_model(directory: Path, *, generation: dict[str, Any] | None = No
         torch.manual_seed(0)
         model = Qwen2ForCausalLM(config)
     model.generation_config = GenerationConfig(
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-        **(generation or {}),
+        **{
+            "eos_token_id": tokenizer.eos_token_id,
+            "pad_token_id": tokenizer.pad_token_id,
+            **(generation or {}),
+        }
     )
     model.save_pretrained(directory)
     tokenizer.save_pretrained(directory)
