@@ -34,7 +34,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-202 | Eval runner | 5 | done |  |  | `forge eval run` with the fake (gold, select-1) and hf backends; prompts fitted as in training; predictions in one `SandboxPool` a run; gold cached per split as JSON lines; official EX in one batch at the end, 10 s an item, a 2 s timeout no match (ADR-0008); a batch's generations then scores appended and flushed; a killed run resumes without duplicates; manifest running, then finished or failed with `error.txt` |
 | FG-203 | Metrics with confidence intervals and paired tests | 5 | done |  |  | `summarize`, `compare` and `pass_at_k` in `forge.eval.metrics`; 95% percentile bootstrap, 1,000 resamples, `default_rng(0)` for each interval, drawing whole questions or `gold_clusters`; exact McNemar from statsmodels, with no p-value for several samples a question; official EX when every score has a verdict, else fast |
 | FG-204 | Error taxonomy | 3 | done |  |  | `classify` in `forge.eval.taxonomy`: no_sql, syntax and schema_link from the error kind, then sqlglot shapes compare tables, joins, select lists, aggregates, WHERE, GROUP BY to LIMIT and last literals; names resolve to tables against each database's columns, a double-quoted name no table has is a string, and a nested filter query counts in its condition; `forge eval run` stores the class of each wrong prediction |
-| FG-205 | Report generator | 3 | todo |  |  |  |
+| FG-205 | Report generator | 3 | done |  |  | `forge report run`, `compare` and `rebuild` (`forge.eval.report`) from a finished run's stored files (`read_run`) and its split's questions in data with the manifest's hash; official EX leads, with fast EX and the valid rate beside it, 95% intervals over gold clusters, a by-hardness table and PNG, the error classes of official EX failures, and 5 failures from each of the 3 most common classes; compare gives the paired change, McNemar's table and p, and changes by hardness and class; rebuild renders the run's reports again and diffs them, the `Generated:` line aside |
 | FG-206 | Execution-guided retry | 3 | todo |  |  |  |
 | FG-207 | CPU smoke pipeline in CI | 3 | todo |  |  |  |
 
@@ -474,3 +474,29 @@ Work discovered along the way that is not a plan story.
 - `error_class` follows fast EX, since a score is written before the official batch runs, so a
   prediction that only the official evaluator accepts keeps a class. FG-205's taxonomy table should
   count the failures of the metric it reports (FG-204).
+- Reports read questions and gold queries from `FORGE_DATA_DIR`, which must hash to the run's
+  data manifest hash, so a Kaggle run's report needs the same Spider files where it renders
+  (FG-303, FG-304). On full val (872 questions) `forge report run` took 1.1 s on the laptop,
+  `compare` 1.9 s and `rebuild` 1.6 s (FG-205).
+- A dev run's report shows answers the run's own look already saw, so it needs the run's row in
+  `docs/dev-usage.md`, refuses without it, and adds none; ADR-0004 now says so. FG-303 and FG-304
+  have to bring a Kaggle dev run's row home before its report renders, and FG-508's dev compare
+  reports spend no extra looks (FG-205).
+- Example failures show the error class and whether the query ran, not the executor's message,
+  which the scores and generations don't store (FG-202). Storing it means a contract change or
+  a file of its own (FG-205).
+- Error classes count the failures of official EX. A failure only official EX finds has no class,
+  since a run classifies the misses of fast EX, so reports count it as `unclassified`; a compare
+  report gives a paired change for official EX only (FG-205).
+- `rebuild` diffs the markdown and leaves the chart out. The PNG's bytes repeat on one machine
+  (matplotlib's default style whatever a matplotlibrc says, and no `Software` text chunk), but
+  nothing yet shows they match across machines, such as Kaggle's Linux and the Mac, and the
+  by-hardness table holds every number the chart draws (FG-205).
+- `rebuild <b>` checks the compare reports in run b's `eval` folder; one written with `--out`
+  isn't checked and doesn't say it is. FG-307 and FG-405 commit reports under `docs/runs/`, so
+  their checks should diff those copies against the run store's or rebuild in place (FG-205).
+- For FG-207's I4: in a report the title, tables and headings hold the numbers; prose lines hold
+  only constants (95%, 1,000 resamples and seed 0, the 5 failures of 3 classes, and Spider's
+  citation: 1.0, 2018 and 4.0), and the `Generated:` line the time. Question lines and code
+  blocks quote the data and the generations, and cluster counts come from `gold_clusters` over
+  the scored questions (FG-205).

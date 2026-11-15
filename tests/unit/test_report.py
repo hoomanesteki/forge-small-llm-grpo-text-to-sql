@@ -24,7 +24,7 @@ from forge.data.spider import load_raw
 from forge.data.splits import split_examples
 from forge.eval.config import EvalConfig
 from forge.eval.metrics import Estimate, Rate, compare, gold_clusters, summarize
-from forge.eval.report import load_run, write_compare_report, write_run_report
+from forge.eval.report import load_run, rebuild, write_compare_report, write_run_report
 from forge.eval.run_files import RunCorrupt, RunUnfinished
 from forge.ops.dev_usage import log_dev_use, read_uses
 from forge.ops.manifest import config_hash
@@ -297,6 +297,52 @@ def test_report_renders_from_scores(runs: Path) -> None:
 
 
 @pytest.mark.phase(2)
+def test_rebuild_matches_original(runs: Path) -> None:
+    root = _store(runs, "mixed", MIXED)
+    _store(runs, "base", dict.fromkeys(VAL, RIGHT))
+    report = write_run_report("mixed", runs_root=runs, now=AT).report
+    compared = write_compare_report("base", "mixed", runs_root=runs, now=AT)
+    assert compared == root / "eval" / "compare-base.md"
+    original = report.read_bytes()
+
+    checks = rebuild("mixed", runs_root=runs)
+    assert [(check.path, check.diff) for check in checks] == [(report, ()), (compared, ())]
+    assert report.read_bytes() == original  # a rebuild writes nothing
+
+    # Written again later, the report differs from the first in its Generated line only.
+    write_run_report("mixed", runs_root=runs, now=LATER)
+    again = report.read_bytes()
+    changed = [
+        (old, new)
+        for old, new in zip(original.split(b"\n"), again.split(b"\n"), strict=True)
+        if old != new
+    ]
+    assert changed == [
+        (b"Generated: 2026-11-15 09:30:00 UTC", b"Generated: 2026-12-01 18:45:12 UTC")
+    ]
+    assert [check.diff for check in rebuild("mixed", runs_root=runs)] == [(), ()]
+
+    # A number edited in the stored report is a difference.
+    report.write_bytes(again.replace(b"| no_sql | 6 | 54.5% |", b"| no_sql | 5 | 54.5% |"))
+    run_check, compare_check = rebuild("mixed", runs_root=runs)
+    assert [line for line in run_check.diff if line.startswith(("-|", "+|"))] == [
+        "-| no_sql | 5 | 54.5% |",
+        "+| no_sql | 6 | 54.5% |",
+    ]
+    assert not compare_check.diff
+    report.write_bytes(again)
+
+    # So is a score changed after the reports were written: a right answer that official
+    # EX now rejects shows in both.
+    _edit_first_score(root, ex_official=False)
+    run_check, compare_check = rebuild("mixed", runs_root=runs)
+    assert "-| official EX | 9 | 20 |" in "\n".join(run_check.diff)
+    assert "+| official EX | 8 | 20 |" in "\n".join(run_check.diff)
+    assert "+| unclassified | 2 | 16.7% |" in run_check.diff
+    assert "+| run a right | 8 | 12 |" in compare_check.diff
+
+
+@pytest.mark.phase(2)
 def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
     # Official EX in run a and run b: 8 right in both, 1 only in a, 9 only in b, and 2
     # in neither. Run a fails with 1 syntax error and 10 wrong filters, run b on values.
@@ -320,6 +366,7 @@ def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
     assert "\n| Run | `base` | `tuned` |\n| Model | `gold` | `tuned` |\n" in text
     links = "[manifest.json](../../base/manifest.json) | [manifest.json](../manifest.json)"
     assert f"| Manifest | {links} |" in text
+    assert "checked against them by `forge report rebuild tuned`" in text
 
     mcnemar = _section(text, "McNemar's test")
     assert "| run a right | 8 | 1 |\n| run a wrong | 9 | 2 |" in mcnemar
@@ -352,7 +399,7 @@ def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
         assert f"\n{row}\n" in classes
     assert "unclassified" not in classes
 
-    # Written elsewhere, its links work from there.
+    # Written elsewhere, its links work from there, and it doesn't claim rebuild checks it.
     out = tmp_path / "docs" / "base-vs-tuned.md"
     assert write_compare_report("base", "tuned", out=out, runs_root=runs, now=AT) == out
     elsewhere = out.read_text()
@@ -360,6 +407,7 @@ def test_compare_report_has_mcnemar(runs: Path, tmp_path: Path) -> None:
         "[manifest.json](../runs/base/manifest.json) | [manifest.json](../runs/tuned/manifest.json)"
     )
     assert f"| Manifest | {links} |" in elsewhere
+    assert "forge report rebuild" not in elsewhere
     assert _section(elsewhere, "McNemar's test") == mcnemar
 
 

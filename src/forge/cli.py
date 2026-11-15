@@ -563,7 +563,7 @@ def eval_agreement(
 
 
 def _report_errors() -> tuple[type[Exception], ...]:
-    """What reading runs for a report can raise: OSError for a missing run or data
+    """What reading runs for a report can raise: OSError for a missing run, report or data
     (DataNotFound), ValueError for a corrupt run (RunCorrupt), one made on other data or
     runs that can't be compared, and RunLocked while another process writes a run."""
     from forge.eval.run_files import RunLocked, RunUnfinished
@@ -611,6 +611,33 @@ def report_compare(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"report: {written}")
+
+
+@report_app.command("rebuild")
+def report_rebuild(
+    run_id: Annotated[str, typer.Argument(help="The run, a folder in runs/ (FORGE_RUNS_DIR).")],
+) -> None:
+    """Render the run's report, and each compare report in its eval folder, again from
+    the stored files; exit 1 unless each matches the stored one, its Generated line aside.
+    """
+    from forge.eval.report import rebuild
+
+    try:
+        checks = rebuild(run_id)
+    except _report_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    for check in checks:
+        if check.diff:
+            typer.echo(f"{check.path}: differs from its rebuild")
+            for line in check.diff:
+                typer.echo(line)
+        else:
+            typer.echo(f"{check.path}: matches its rebuild")
+    differ = sum(bool(check.diff) for check in checks)
+    if differ:
+        typer.echo(f"error: {differ} of {len(checks)} reports differ from their rebuild", err=True)
+        raise typer.Exit(1)
 
 
 def _report_git_sha() -> str:
