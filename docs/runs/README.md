@@ -45,3 +45,9 @@ To make it again, from the commit in its manifest:
 FORGE_DATA_DIR=data/spider uv run forge eval run --config configs/eval/pilot-qwen25coder05b-val.yaml
 FORGE_DATA_DIR=data/spider uv run forge report run <run_id>
 ```
+
+## Pending runs
+
+[pending.yaml](pending.yaml) lists the runs a story needs that can't happen yet, what blocks
+each one and what it will fill in. FG-301's Kaggle spike is there until the Kaggle account
+exists.

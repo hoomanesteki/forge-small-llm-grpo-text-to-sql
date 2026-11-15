@@ -43,7 +43,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
-| FG-301 | Spike: Kaggle, Unsloth and vLLM on a T4 | 3 | todo |  |  |  |
+| FG-301 | Spike: Kaggle, Unsloth and vLLM on a T4 | 3 | blocked: needs Kaggle account (phone verified) and API token |  |  | Built on CPU: the kernel metadata template and `check_kernel_metadata`, the self-contained spike `kaggle/spike/throughput.py` (env, secrets, downloads, installs, vLLM fp16 and GRPO benches, session-limit probe) and its bundler, candidate pins in `kaggle/requirements-gpu.txt`, `docs/spikes/kaggle-gpu.md` (research with sources; nothing measured), ADR-0005, ADR-0006 (proposed). Pending: the GPU session, its ledger row and the section 3.8 budget update (`docs/runs/pending.yaml`) |
 | FG-302 | Code and data packaging as Kaggle datasets | 3 | todo |  |  |  |
 | FG-303 | Kaggle job runner CLI | 5 | todo |  |  |  |
 | FG-304 | Hub run store and resume | 5 | todo |  |  |  |
@@ -632,3 +632,33 @@ Work discovered along the way that is not a plan story.
   `tests/integration/test_artifacts.py` checks the pilot offline and, with the full data, its
   rebuild and I4 trace. FG-307's `test_phase3_baseline_reports_present` can join that file
   (FG-291).
+- Kaggle's newest GPU image (v173, released 2026-10-30) has Python 3.13 by its Dockerfile, and
+  `pyproject.toml` requires Python below 3.13, so FG-302's wheel would not install there. The
+  spike's `env` stage reads the live version; if it is 3.13, widen `requires-python` and add 3.13
+  to CI, as ADR-0002's revisit condition says (FG-301).
+- The same image moved from CUDA 12.8 to CUDA 13 (torch 2.11.0+cu130), so wheels built for CUDA 12,
+  bitsandbytes' among them, may not load. The spike's installs show it (FG-301).
+- No one environment holds Forge's lock and vLLM: vllm 0.33.0 pins torch 2.14.0 and transformers
+  below 5.21, while `uv.lock` has torch 2.15.0 and transformers 5.23.0. FG-306 either runs vLLM in
+  an environment of its own or moves transformers back to 5.20; the spike measures both ways
+  (`vllm` and `trl-vllm` stacks). Unsloth 2026.11.4 caps trl at 1.15.0, which can't train on CPU,
+  so ADR-0006 (proposed) keeps TRL on the GPU and Unsloth optional (FG-301).
+- TRL 1.18 casts a 4-bit model's LoRA adapters to bf16 (issue 7776), which fp16 training on a T4
+  can't unscale. The spike casts trainable parameters back to fp32 after building the trainer;
+  FG-402's TRL backend needs the same on the T4, and `fp16=True` with `bf16=False` (issue 7889)
+  (FG-301).
+- `kaggle kernels push` sends only the code file, and Kaggle starts a script kernel without
+  arguments. The spike is one self-contained file, and `forge.ops.kaggle.bake_argv` writes its
+  arguments into it; FG-303's `kaggle/entry.py` can render its job arguments the same way. The
+  spike's report records how Kaggle launched the script (`launch`), which the entry script needs
+  (FG-301).
+- Kaggle Secrets can only be attached in the web editor. The spike pushes its kernel once with
+  `--no-run`, has the secret attached, then runs it, to learn whether a CLI-pushed version can read
+  it (FG-301, ADR-0005).
+- Integration checkpoint 3 asks every FG-301 run for a manifest, but the spike runs without Forge
+  installed and `RunManifest.kind` has no spike kind. Its JSON report and ledger row stand in for a
+  manifest unless a story adds the kind, which would change a contract (FG-301).
+- Plan sections 3.12 and 3.13 still name Unsloth as the GPU trainer. ADR-0006 makes TRL the default
+  once FG-301's numbers confirm it; update both rows then (FG-301).
+- The spike's session-limit probe is a CPU kernel killed by its own `-t 900` timeout, so it spends no
+  GPU quota. That it behaves like the 12-hour cut is an assumption the run can't prove (FG-301).

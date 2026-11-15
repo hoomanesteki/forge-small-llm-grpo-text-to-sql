@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from forge.data import prompts as forge_prompts
 from forge.ops.kaggle import METADATA_FILE, check_kernel_metadata
@@ -529,3 +531,34 @@ def test_bundle_writes_both_kernels(tmp_path: Path) -> None:
         f"kaggle kernels output forge-owner/forge-throughput-spike -p {tmp_path / 'gpu'}-output -o",
     ]
     assert commands[3] == f"kaggle kernels push -p {tmp_path / 'limit'} -t 900"
+
+
+@pytest.mark.phase(3)
+def test_spike_doc_keeps_research_apart_from_measurements() -> None:
+    doc = (ROOT / "docs" / "spikes" / "kaggle-gpu.md").read_text(encoding="utf-8")
+    questions = [part for part in doc.split("\n## ") if part[:1].isdigit()]
+    assert [part.split(".", 1)[0] for part in questions] == ["1", "2", "3", "4", "5", "6"]
+    for part in questions:
+        research, found, measured = part.partition("**To be measured on the first GPU session.**")
+        title = part.splitlines()[0]
+        assert found, f"{title}: no measurements section"
+        assert "**What research says today.**" in research, title
+        assert "](https://" in research, f"{title}: research without a source"
+        # Each measurement names the report field it comes from.
+        assert re.search(r"`[a-z_-]+[.:]", measured), f"{title}: no report field named"
+    for name, status in (("0005-kaggle-compute", "accepted"), ("0006-train-backend", "proposed")):
+        assert f"(../adr/{name}.md)" in doc
+        adr = (ROOT / "docs" / "adr" / f"{name}.md").read_text(encoding="utf-8")
+        assert adr.startswith(f"# ADR-{name[:4]}:")
+        assert re.search(rf"\n- Status: ({status}|accepted|superseded)", adr), name
+
+
+@pytest.mark.phase(3)
+def test_pending_runs_say_what_blocks_them() -> None:
+    pending = yaml.safe_load((ROOT / "docs" / "runs" / "pending.yaml").read_text())["pending"]
+    for entry in pending:
+        assert entry["status"] == "blocked", entry["run"]
+        assert entry["blocked_on"], entry["run"]
+        assert (ROOT / entry["how"].split(",")[0]).is_file(), entry["how"]
+    # FG-301's runs stay inside the story's 1.5 GPU hours (plan section 3.8).
+    assert sum(e["est_gpu_hours"] for e in pending if e["story"] == "FG-301") <= 1.5
