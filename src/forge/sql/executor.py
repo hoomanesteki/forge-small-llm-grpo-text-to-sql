@@ -5,10 +5,10 @@ rule 9). It is read-only and immutable, so SQLite never writes, locks or journal
 file, and its authorizer is default-deny: only ``SQLITE_SELECT``, ``SQLITE_READ``,
 ``SQLITE_FUNCTION`` and ``SQLITE_RECURSIVE`` pass, so writes, DDL, ``ATTACH``, ``VACUUM``,
 ``PRAGMA`` and transactions fail as they are prepared, before anything runs. Its
-``LIMITS``, measured against what Spider needs, keep the work in one row small: no string,
-blob or table row over 4 kB, LIKE and GLOB patterns of at most 100 characters, SQL text of
-at most 8 kB, at most 200 columns, and no attached databases, which also stops ``VACUUM
-INTO``.
+``LIMITS``, measured against what Spider needs, keep each value, and so each call on it,
+small: no string, blob or table row over 4 kB, LIKE and GLOB patterns of at most 100
+characters, SQL text of at most 8 kB, at most 200 columns, and no attached databases,
+which also stops ``VACUUM INTO``.
 
 ``SqliteExecutor.run`` adds the rest and never raises for bad SQL: one statement per
 call, and only a query; a deadline; a row cap; and a byte budget for the rows it keeps.
@@ -22,15 +22,16 @@ Each failure comes back as an ``ExecResult`` with an ``ErrorKind``:
   when its keyword (``statement_keyword``) is ``SELECT`` or ``VALUES``; any other
   statement keyword is denied, even when SQLite would fail first on a missing name. One
   that returns no columns is denied too.
-- ``timeout``: the deadline passed while the query ran or its rows were fetched. A
-  progress handler checks it every ``PROGRESS_STEPS`` VM steps, and a watchdog thread
-  interrupts SQLite at the deadline; the watchdog covers queries that run too few steps
-  for the handler to fire. SQLite only looks at either between rows, so the work inside
-  one row runs to the end. For ``instr``, ``replace``, ``LIKE`` and ``GLOB`` the limits
-  hold that to a few hundredths of a second (measured), but other string functions are
-  slower: one row of ``ltrim`` calls with a large character set, or ``unhex`` with a
-  large ignore set, can run a second or two. So this deadline is soft and its overrun is
-  not bounded in general; only a ``SandboxPool`` kill is a hard bound.
+- ``timeout``: a check found the deadline passed while the query ran or its rows were
+  fetched. A progress handler checks every ``PROGRESS_STEPS`` VM steps, and a watchdog
+  thread interrupts SQLite at the deadline itself, for steps so slow that the handler's
+  next check comes late or never: how soon the handler alone stops a query depends on
+  what its steps cost. SQLite can't stop the work inside one row, so it runs to the end,
+  and a query with no loop that ends within about ``PROGRESS_STEPS`` steps can end after
+  its deadline and still come back ok. The limits keep each call small but not the number
+  of calls in a row: a common table expression referenced several times is copied into
+  each reference, so nesting multiplies them. So this deadline is soft and its overrun has
+  no bound (ADR-0014); only a ``SandboxPool`` kill is a hard bound.
 - ``syntax``, ``no_such_table``, ``no_such_column``: from SQLite's error message.
 - ``empty_sql``: nothing but whitespace, comments and semicolons.
 - ``other``: any other error, such as an unknown function, a ``?`` placeholder, a value
@@ -72,11 +73,11 @@ ALLOWED_ACTIONS = frozenset(
 # sqlite_master through the length limit too, whenever it prepares a query, and soccer_1's
 # is 1,191 bytes: every gold query runs at that limit, and soccer_1's fail one byte under
 # it. The cost of instr, LIKE, GLOB or replace grows with the product of their inputs'
-# lengths, so for those the length and SQL limits hold one row to a few hundredths of a
-# second, where FG-191's 100 kB allowed 18 s. Not every function is that cheap (ltrim with
-# a large character set, unhex with a large ignore set, run a second or two in one row), so
-# the in-process deadline is soft; the SandboxPool kill is the hard bound (ADR-0014). With
-# no attached database allowed, ATTACH and VACUUM INTO fail on any connection.
+# lengths, so the length and pattern limits keep each call cheap, where FG-191's 100 kB
+# let one row of instr calls run for seconds. They don't bound how many calls a row makes,
+# and slower functions such as unhex still take milliseconds a call, so the in-process
+# deadline is soft and the SandboxPool kill is the hard bound (ADR-0014). With no attached
+# database allowed, ATTACH and VACUUM INTO fail on any connection.
 MAX_VALUE_BYTES = 4_096
 LIMITS: Mapping[int, int] = MappingProxyType(
     {
@@ -459,9 +460,12 @@ def _decode(raw: bytes) -> str:
 
 
 def row_size(row: tuple[Any, ...]) -> int:
-    """The bytes a fetched row holds: the tuple, its values and its slot in the list.
+    """The bytes a fetched row holds by ``sys.getsizeof``: the tuple, its values and its
+    slot in the list.
 
-    A shared object such as ``None`` or a small int counts each time, so this errs high.
+    A shared object such as ``None`` counts each time, but the allocator's rounding of
+    each object goes uncounted, so the real memory can be more or less than this by a
+    small factor (ADR-0014, known limits).
     """
     return sys.getsizeof(row) + 8 + sum(map(sys.getsizeof, row))
 
