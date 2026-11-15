@@ -1,6 +1,6 @@
 # Run 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7: official EX 47.2% [43.1%, 51.1%] on val
 
-Generated: 2026-11-15 17:32:53 UTC
+Generated: 2026-11-15 18:51:53 UTC
 
 Written by `forge report run 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7` from the run's stored files and checked
 against them by `forge report rebuild 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7`; don't edit it by hand.

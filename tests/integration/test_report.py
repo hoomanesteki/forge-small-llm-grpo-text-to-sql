@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import forge.eval.report as report_module
 from forge import cli
 
 
@@ -19,7 +20,9 @@ def runs(spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev
 
 
 @pytest.mark.phase(2)
-def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> None:
+def test_reports_on_eval_runs_through_the_cli(
+    runs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cli_runner = CliRunner()
     for model, run_id in (("gold", "gold-run"), ("select-1", "select-one")):
         args = ["eval", "run", "--backend", "fake", "--model", model, "--run-id", run_id]
@@ -69,6 +72,16 @@ def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> Non
         f"{runs / 'select-one' / 'eval' / 'val-hardness.png'}: matches its rebuild\n"
         f"{path}: matches its rebuild\n"
     )
+    # Where another renderer draws, the chart isn't compared, and the output says why.
+    chart, here = runs / "select-one" / "eval" / "val-hardness.png", report_module.chart_renderer()
+    with monkeypatch.context() as patched:
+        patched.setattr(report_module, "chart_renderer", lambda: "another renderer")
+        elsewhere = cli_runner.invoke(cli.app, ["report", "rebuild", "select-one"])
+    assert elsewhere.exit_code == 0, elsewhere.output
+    assert (
+        f"\n{chart}: not compared, as it was drawn with {here}, and this machine draws with "
+        "another renderer\n"
+    ) in elsewhere.stdout
 
     # A number edited by hand fails the rebuild, which shows where.
     report = runs / "select-one" / "eval" / "val-report.md"

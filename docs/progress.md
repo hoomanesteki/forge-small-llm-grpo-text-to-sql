@@ -121,6 +121,7 @@ Work discovered along the way that is not a plan story.
 | FG-197 | Gate 1 fixes: final polish | done | Official EX counts only a worker's death as a miss, so a pool that can't start raises again; a reply the parent can't unpickle keeps its worker; `statement_keyword` reads byte order marks, Tcl-style parameters, ASCII keywords and the `WITH` grammar as SQLite does; a forced Hub download that fails shows its cause, the bad zip and the hint; the timing tests assert the kill and use the worst rows the limits allow, gold is measured as the evaluator runs it, and ADR-0014 lists the known limits |
 | FG-291 | Local pilot baseline on Apple silicon | done | `local-mps` platform (ADR-0016), counted in neither the Kaggle quota nor GPU hours; `forge eval run --device` (`cpu` by default, `mps` refused on dev) and `--config` for `configs/eval/*.yaml`; Qwen2.5-Coder-0.5B-Instruct pinned as `pilot`; the full val run on the M4's GPU is in `docs/runs/` with its generated report, val only |
 | FG-292 | Gate 2 fixes: run provenance | done | A run's commit and dirty check cover the whole checkout `FORGE_ROOT` names, wherever the run starts, and outside a checkout `forge eval run` prints one `error:` line; run locks are gitignored under `docs/runs`; `make smoke` prints its report and writes the marker only with every phase (PHASE unset or 8); `--split train --limit N` takes the first N in file order, train_spider before the rowless train_others, while val and dev stay in id order; `HfBackend` checks adapter and dtype before loading, and a test ends rows of one batch at different steps; `forge eval run --help` names the first-tries file |
+| FG-293 | Gate 2 fixes: statistics and reports | done | McNemar's exact test pairs gold clusters, which key on gold queries with whitespace collapsed; the taxonomy reads a whole ORDER BY alias as SQLite does and drops derived-table and CTE qualifiers; `rebuild` masks only the Generated line's time, fails without the chart and compares its bytes where the renderer its PNG names is this machine's; `compare --out` that resolves to the default path is the default; a spy shows retried SQL runs in `SandboxPool`; the pilot's report regenerated |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -462,8 +463,13 @@ Work discovered along the way that is not a plan story.
   FG-303 should set `kaggle` for runs there (FG-202).
 - Spider asks most questions twice in other words with one gold query, so `summarize` and
   `compare` take `clusters`, and `gold_clusters` puts each such pair in one (val: 872 questions
-  in 456 clusters). FG-205 should pass them for val and dev, or the intervals come out too
-  narrow. McNemar's p-value still takes each question as an independent pair (FG-203).
+  in 455 clusters). FG-205 should pass them for val and dev, or the intervals come out too
+  narrow (FG-203).
+- Gold queries of one pair can differ in spacing alone, so `gold_clusters` compares them with
+  each run of whitespace as one space; on val that joins one pair the raw text split. With
+  clusters, McNemar's exact test counts the clusters each run gets more right and drops ties,
+  as the intervals draw clusters; reports keep the table of questions and say what the test
+  paired (FG-293).
 - `compare` gives McNemar's table but no p-value when a question has several samples, which
   are not independent pairs; the change in EX keeps its interval (FG-203).
 - Each interval reseeds `default_rng(0)`, so it depends only on the scores it covers, and
@@ -483,6 +489,11 @@ Work discovered along the way that is not a plan story.
   questions (seed 0), every change landed in a class its rule allows, which
   `tests/integration/test_taxonomy.py` checks on the fixture. A classification takes about 1 ms on
   the laptop (FG-204).
+- The taxonomy reads a whole ORDER BY term that names a select alias as the alias, as SQLite
+  does even when a column has that name, and drops the names of derived tables and CTEs from
+  their columns. All 8,656 gold queries still classify as `other` against themselves, and of
+  the pilot's 191 stored classes that the two queries decide, none changes with the fix, so its
+  stored scores stand (FG-293).
 - A query nested in a condition counts in that condition, so a filter whose subquery is missing or
   picks another column or aggregate is `where`. Dropping the condition that held a table's only use
   is `wrong_tables`, since tables come first (FG-204).
@@ -503,18 +514,26 @@ Work discovered along the way that is not a plan story.
 - Error classes count the failures of official EX. A failure only official EX finds has no class,
   since a run classifies the misses of fast EX, so reports count it as `unclassified`; a compare
   report gives a paired change for official EX only (FG-205).
-- `rebuild` diffs the markdown and leaves the chart out. The PNG's bytes repeat on one machine
-  (matplotlib's default style whatever a matplotlibrc says, and no `Software` text chunk), but
-  nothing yet shows they match across machines, such as Kaggle's Linux and the Mac, and the
-  by-hardness table holds every number the chart draws (FG-205).
+- `rebuild` diffs the markdown, masking only a `Generated:` line that holds the time as the
+  report writes it, and fails when the chart is missing. The chart's bytes repeat on one machine,
+  in matplotlib's default style whatever a matplotlibrc says, but CI's Linux draws other bytes
+  than the Mac with the same releases. So the PNG's `Software` text names the releases and the
+  platform that drew it, and `rebuild` compares the bytes only where that is the same and says
+  so of a chart drawn elsewhere. Render a committed run's reports where its rebuild will run, as
+  the pilot's were on the Mac (FG-205, FG-293).
 - `rebuild <b>` checks the compare reports in run b's `eval` folder; one written with `--out`
-  isn't checked and doesn't say it is. FG-307 and FG-405 commit reports under `docs/runs/`, so
-  their checks should diff those copies against the run store's or rebuild in place (FG-205).
-- For FG-207's I4: in a report the title, tables and headings hold the numbers; prose lines hold
-  only constants (95%, 1,000 resamples and seed 0, the 5 failures of 3 classes, and Spider's
-  citation: 1.0, 2018 and 4.0), and the `Generated:` line the time. Question lines and code
-  blocks quote the data and the generations, and cluster counts come from `gold_clusters` over
-  the scored questions (FG-205).
+  isn't checked and doesn't say it is, unless `--out` resolves to that folder's file. FG-307 and
+  FG-405 commit reports under `docs/runs/`, so their checks should diff those copies against the
+  run store's or rebuild in place (FG-205, FG-293).
+- For FG-207's I4: numbers from the stored files are in a report's title, its table rows and the
+  headings over example failures, and in some prose lines: in a run report the checkers'
+  disagreement and the questions and clusters in the line on intervals; in a compare report the
+  questions and samples both runs answered, the questions and clusters on intervals, the
+  questions they disagree on, the clusters each wins and McNemar's p-value. Table headers hold
+  95%, the other prose lines only constants (1,000 resamples and seed 0, the 5 failures of 3
+  classes, and Spider's citation: 1.0, 2018 and 4.0), and the `Generated:` line the time and
+  nothing more. Question lines and code blocks quote the data and the generations, and cluster
+  counts come from `gold_clusters` over the scored questions (FG-205, FG-293).
 - Official EX can match a first query the executor rejects: the evaluator drops `DISTINCT`
   and turns `> =` into `>=` before running, so `SELECT count(DISTINCT *) FROM Aircraft`, a
   syntax error to SQLite, matches `SELECT count(*) FROM Aircraft`. EX without retry therefore

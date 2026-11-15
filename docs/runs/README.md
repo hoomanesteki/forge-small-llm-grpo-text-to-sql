@@ -10,8 +10,10 @@ FORGE_RUNS_DIR=docs/runs uv run forge report rebuild <run_id>
 ```
 
 That needs the data the run was made on, whose hash is in its manifest
-(`FORGE_DATA_DIR=data/spider` for the full Spider download). Reports and generations quote
-Spider 1.0 (Yu et al., EMNLP 2018), licensed CC BY-SA 4.0.
+(`FORGE_DATA_DIR=data/spider` for the full Spider download). It compares a chart byte for
+byte only where the releases and platform its PNG names draw it, and elsewhere says it
+didn't. Reports and generations quote Spider 1.0 (Yu et al., EMNLP 2018), licensed CC BY-SA
+4.0.
 
 ## Pilot runs
 

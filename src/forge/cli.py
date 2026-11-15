@@ -694,7 +694,8 @@ def report_rebuild(
 ) -> None:
     """Render the run's report and chart, and each compare report in its eval folder,
     again from the stored files; exit 1 unless each matches the stored one, a report's
-    Generated line aside.
+    Generated line aside. A chart drawn on another platform, or with other releases of
+    what draws it, isn't compared, and the output says so.
     """
     from forge.eval.report import rebuild
 
@@ -708,6 +709,8 @@ def report_rebuild(
             typer.echo(f"{check.path}: differs from its rebuild")
             for line in check.diff:
                 typer.echo(line)
+        elif check.skipped:
+            typer.echo(f"{check.path}: not compared, as {check.skipped}")
         else:
             typer.echo(f"{check.path}: matches its rebuild")
     differ = sum(bool(check.diff) for check in checks)

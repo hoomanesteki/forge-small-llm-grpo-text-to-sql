@@ -35,10 +35,12 @@ writes it. ``rebuild`` renders a run's report and chart, and each compare report
 folder, again from the stored files and compares each with the stored one: a report line
 for line, with only a ``Generated:`` line of exactly that form masked, so anything more
 on it is a difference, and the chart byte for byte. The chart draws the by-hardness table
-on Agg, in matplotlib's default style whatever a matplotlibrc says, and without the text
-that names matplotlib's version, so its bytes change only with its numbers or with the
-matplotlib and Pillow releases that draw and compress it. With the locked releases they
-are the same on macOS and on CI's Linux (``test_chart_is_the_same_bytes_each_time``).
+on Agg, in matplotlib's default style whatever a matplotlibrc says, so its bytes change
+only with its numbers and with what draws and compresses it, which machines don't share:
+with the same releases, CI's Linux writes other bytes than macOS. So the PNG's
+``Software`` text names the releases and the platform that drew it (``chart_renderer``),
+and ``rebuild`` compares the chart only where they are the same, and says so of one drawn
+elsewhere instead of failing it. A chart that names no renderer is compared.
 
 Each kind of number has one format, so FG-207's I4 check can find every number in the
 stored files: a rate as a percentage with one decimal and its 95% interval in brackets
@@ -58,10 +60,14 @@ and the replies.
 from __future__ import annotations
 
 import difflib
+import functools
 import hashlib
 import io
 import os
+import platform
 import re
+import struct
+import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -121,6 +127,7 @@ UNCLASSIFIED_NOTE = (
 )
 
 _ORDER = (*ERROR_CLASSES, UNCLASSIFIED)
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # The Generated line as _generated writes it, and nothing else.
 _GENERATED_LINE = re.compile(
     rf"^{GENERATED}\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}:\d{{2}} UTC$", re.MULTILINE
@@ -184,6 +191,9 @@ class Check:
 
     path: Path
     diff: tuple[str, ...]
+    # Why the file wasn't compared, for a chart another renderer drew (``chart_renderer``);
+    # None for a file that was.
+    skipped: str | None = None
 
 
 @dataclass(frozen=True)
@@ -252,7 +262,7 @@ def rebuild(
 ) -> list[Check]:
     """Render the run's report, its chart and each ``compare-<a>.md`` in its ``eval``
     folder again, and compare each with the stored file, a report's ``Generated:`` line
-    aside. Writes nothing.
+    aside, and the chart only where its ``chart_renderer`` drew it. Writes nothing.
     """
     data, root = _data(data_dir), runs_root or runs_dir()
     run = _load(run_id, data, root)
@@ -448,9 +458,29 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
     return "\n".join(lines) + "\n"
 
 
+@functools.cache
+def chart_renderer() -> str:
+    """What draws and compresses a chart here: a chart's bytes are the same wherever this
+    is, and can differ where it isn't."""
+    import matplotlib
+    import numpy
+    import PIL
+    from matplotlib import ft2font
+    from PIL import features
+
+    # Pillow's wheels deflate with zlib-ng, whose output can differ from zlib's.
+    zlib_ng = features.version("zlib_ng")
+    deflate = f"zlib-ng {zlib_ng}" if zlib_ng else f"zlib {features.version('zlib')}"
+    return (
+        f"matplotlib {matplotlib.__version__} (FreeType {ft2font.__freetype_version__}), "
+        f"numpy {numpy.__version__}, Pillow {PIL.__version__} ({deflate}), "
+        f"{sys.platform} {platform.machine()}"
+    )
+
+
 def render_chart(run: ReportRun) -> bytes:
     """Official EX at each hardness level with its interval, as PNG bytes that are the same
-    on every rendering on one machine."""
+    on every rendering with one ``chart_renderer``, which the file names."""
     # matplotlib takes about half a second to import, and only the chart needs it.
     import matplotlib.style
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -514,9 +544,11 @@ def render_chart(run: ReportRun) -> bytes:
             va="top",
         )
         buffer = io.BytesIO()
-        # Without the Software entry the file doesn't name matplotlib's version, so its
-        # bytes change only with the drawing.
-        figure.savefig(buffer, format="png", dpi=_CHART_DPI, metadata={"Software": None})
+        # In place of matplotlib's own Software text, what rebuild needs to know whether it
+        # can compare the bytes.
+        figure.savefig(
+            buffer, format="png", dpi=_CHART_DPI, metadata={"Software": chart_renderer()}
+        )
     return buffer.getvalue()
 
 
@@ -604,6 +636,13 @@ def _check_chart(path: Path, rebuilt: bytes) -> Check:
     stored = path.read_bytes()
     if stored == rebuilt:
         return Check(path, ())
+    # Another renderer's bytes can differ for the same numbers, so they show nothing; a
+    # chart that names this machine's renderer, or none, is compared.
+    drawn_with, here = _software(stored), chart_renderer()
+    if drawn_with is not None and drawn_with != here:
+        return Check(
+            path, (), skipped=f"it was drawn with {drawn_with}, and this machine draws with {here}"
+        )
     return Check(
         path,
         (
@@ -613,6 +652,22 @@ def _check_chart(path: Path, rebuilt: bytes) -> Check:
             f"rebuilt: {len(rebuilt):,} bytes, sha256 {hashlib.sha256(rebuilt).hexdigest()}",
         ),
     )
+
+
+def _software(png: bytes) -> str | None:
+    """The ``Software`` text of a PNG file, or None when it has none or isn't one."""
+    if not png.startswith(_PNG_SIGNATURE):
+        return None
+    at = len(_PNG_SIGNATURE)
+    # Each chunk: its data's length, its type, the data, then a 4-byte checksum.
+    while at + 8 <= len(png):
+        size, kind = struct.unpack_from(">I4s", png, at)
+        if kind == b"tEXt":
+            key, _, text = png[at + 8 : at + 8 + size].partition(b"\0")
+            if key == b"Software":
+                return text.decode("latin-1")
+        at += 12 + size
+    return None
 
 
 def _masked(text: str) -> str:

@@ -7,16 +7,24 @@ questions (``spider-train-00010`` to ``00029`` on flight_1, five of each hardnes
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
+import platform
 import shutil
 import struct
+import subprocess
+import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import matplotlib
 import pytest
+from PIL import Image
 
+import forge.eval.report as report_module
 from forge.core.hashing import canonical_json
 from forge.core.types import Generation, RunManifest, Score, Split
 from forge.data.manifest import data_manifest_hash
@@ -24,7 +32,14 @@ from forge.data.spider import load_raw
 from forge.data.splits import split_examples
 from forge.eval.config import EvalConfig
 from forge.eval.metrics import Estimate, Rate, compare, gold_clusters, summarize
-from forge.eval.report import load_run, rebuild, write_compare_report, write_run_report
+from forge.eval.report import (
+    Check,
+    chart_renderer,
+    load_run,
+    rebuild,
+    write_compare_report,
+    write_run_report,
+)
 from forge.eval.run_files import RunCorrupt, RunUnfinished
 from forge.ops.dev_usage import log_dev_use, read_uses
 from forge.ops.manifest import config_hash
@@ -222,6 +237,18 @@ def _png_chunks(data: bytes) -> list[bytes]:
     return kinds
 
 
+def _without_text(data: bytes) -> bytes:
+    """The PNG ``data`` without its text chunks. Each chunk carries its own checksum, so
+    what is left is still a PNG."""
+    kept, at = [data[:8]], 8
+    while at < len(data):
+        (size,) = struct.unpack(">I", data[at : at + 4])
+        if data[at + 4 : at + 8] != b"tEXt":
+            kept.append(data[at : at + 12 + size])
+        at += 12 + size
+    return b"".join(kept)
+
+
 @pytest.mark.phase(2)
 def test_report_renders_from_scores(runs: Path) -> None:
     root = _store(runs, "mixed", MIXED)
@@ -312,9 +339,13 @@ def test_report_renders_from_scores(runs: Path) -> None:
     assert "Error: no_sql. There is no query to execute." in failures
 
     chart = written.chart.read_bytes()
-    # No Software text chunk, so the bytes don't name matplotlib's version.
-    assert _png_chunks(chart) == [b"IHDR", b"pHYs", b"IDAT", b"IEND"]
-    assert struct.unpack(">II", chart[16:24]) == (640, 360)
+    # Its one text names what drew it, so rebuild knows whether it can compare the bytes.
+    assert _png_chunks(chart) == [b"IHDR", b"tEXt", b"pHYs", b"IDAT", b"IEND"]
+    with Image.open(io.BytesIO(chart)) as image:
+        assert image.size == (640, 360)
+        assert image.text == {"Software": chart_renderer()}
+    assert chart_renderer().startswith(f"matplotlib {matplotlib.__version__} (FreeType ")
+    assert chart_renderer().endswith(f"{sys.platform} {platform.machine()}")
 
 
 @pytest.mark.phase(2)
@@ -604,22 +635,84 @@ def test_model_text_cannot_break_the_markdown(
     assert "\n| Model | `` m\\|`x` `` |\n" in text
 
 
-# The chart of MIXED, as the locked matplotlib and Pillow draw and compress it.
-MIXED_CHART_SHA256 = "b4176b20421cef837ef0bb5193e7517d8c30e30c633c031f24f228d4e5cdfe39"
+# What a matplotlibrc could change in the chart, were it read.
+MATPLOTLIBRC = """\
+font.family: monospace
+font.size: 14
+text.antialiased: False
+figure.dpi: 300
+savefig.dpi: 50
+savefig.transparent: True
+"""
+# A fresh interpreter's rendering of a stored run's chart: what it read from the
+# matplotlibrc, then the chart's hash.
+RENDER = """\
+import hashlib, sys
+from pathlib import Path
+import matplotlib
+from forge.eval.report import load_run, render_chart
+chart = render_chart(load_run(sys.argv[1], runs_root=Path(sys.argv[2])))
+print(matplotlib.rcParams["font.family"], hashlib.sha256(chart).hexdigest())
+"""
 
 
 @pytest.mark.phase(2)
-def test_chart_is_the_same_bytes_each_time(runs: Path) -> None:
+def test_chart_is_the_same_bytes_each_time(runs: Path, tmp_path: Path) -> None:
     _store(runs, "mixed", MIXED)
     first = write_run_report("mixed", runs_root=runs, now=AT).chart.read_bytes()
     assert write_run_report("mixed", runs_root=runs, now=LATER).chart.read_bytes() == first
     _store(runs, "other", dict.fromkeys(VAL, RIGHT))
     assert write_run_report("other", runs_root=runs, now=AT).chart.read_bytes() != first
-    # The same bytes in every process and on every machine, macOS and CI's Linux, so
-    # rebuild can compare a chart committed on one with its rendering on another. A
-    # matplotlib or Pillow release can change them: then write the committed reports
-    # again with `forge report run` and pin the new hash here.
-    assert hashlib.sha256(first).hexdigest() == MIXED_CHART_SHA256
+    # Another process draws the same bytes, with other hash seeds and a matplotlibrc that
+    # changes matplotlib's defaults, as when rebuild runs where the report was written.
+    # Only on one machine: CI's Linux draws other bytes than macOS with the same releases,
+    # so a chart names its renderer, and rebuild compares it only where that is the same.
+    rc = tmp_path / "matplotlibrc"
+    rc.write_text(MATPLOTLIBRC)
+    outputs = {
+        subprocess.run(
+            [sys.executable, "-c", RENDER, "mixed", str(runs)],
+            env={**os.environ, "PYTHONHASHSEED": hash_seed, "MATPLOTLIBRC": str(rc)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for hash_seed in ("1", "2")
+    }
+    assert outputs == {f"['monospace'] {hashlib.sha256(first).hexdigest()}\n"}
+
+
+@pytest.mark.phase(2)
+def test_rebuild_skips_a_chart_drawn_elsewhere(runs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _store(runs, "mixed", MIXED)
+    chart = write_run_report("mixed", runs_root=runs, now=AT).chart
+    drawn, here = chart.read_bytes(), chart_renderer()
+    # Where another renderer draws, the chart's bytes can't be compared, and the check
+    # says why instead of failing.
+    with monkeypatch.context() as patched:
+        patched.setattr(report_module, "chart_renderer", lambda: "another renderer")
+        chart_check = rebuild("mixed", runs_root=runs)[1]
+    assert chart_check == Check(
+        chart, (), skipped=f"it was drawn with {here}, and this machine draws with another renderer"
+    )
+    # Back here, it is compared again.
+    assert rebuild("mixed", runs_root=runs)[1] == Check(chart, ())
+
+    # A chart that names no renderer, like those drawn before charts named theirs, is
+    # compared, and differs from its rebuild.
+    bare = _without_text(drawn)
+    with Image.open(io.BytesIO(bare)) as image:
+        assert image.text == {}
+    chart.write_bytes(bare)
+    assert rebuild("mixed", runs_root=runs)[1] == Check(
+        chart,
+        (
+            f"--- {chart}",
+            "+++ rebuilt from the stored files",
+            f"stored: {len(bare):,} bytes, sha256 {hashlib.sha256(bare).hexdigest()}",
+            f"rebuilt: {len(drawn):,} bytes, sha256 {hashlib.sha256(drawn).hexdigest()}",
+        ),
+    )
 
 
 # SQLite can't parse it, but official EX drops DISTINCT first and runs count(*).
