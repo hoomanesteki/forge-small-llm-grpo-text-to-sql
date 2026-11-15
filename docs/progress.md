@@ -112,6 +112,7 @@ Work discovered along the way that is not a plan story.
 | FG-091 | Gate 0 fixes: run log hardening | done | Locked appends, strict ledger fields, strict repo root, hashing refuses non-JSON |
 | FG-092 | Gate 0 fixes: doctor and .env | done | `six` for the Kaggle CLI, .env reaches the CLI, file tokens masked |
 | FG-093 | Gate 0 fixes: backlog labels and test checks | done | GPU spike labeled GPU (11), phase and skip marks checked, gitignore |
+| FG-191 | Gate 1 fixes: sandbox safety | done | Statements denied by keyword before SQLite runs them, SQLite limits on every connection (the evaluator's too), a watchdog at the deadline, a 64 MiB result budget, `\v` counted as SQLite does; official EX vets what the evaluator runs and strips leading `;` |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -168,9 +169,10 @@ Work discovered along the way that is not a plan story.
 - SQLite runs `DROP TABLE|INDEX|VIEW|TRIGGER IF EXISTS` on a missing object as a no-op without
   asking the authorizer, so it would come back ok with no rows and match an empty gold result.
   The executor reports any statement without result columns as `denied`.
-- A write that names a missing table fails with `no_such_table` before the authorizer is asked,
-  so `denied` is not the only error a non-SELECT statement can get. FG-501's `non_select` guard
-  should look at the SQL (sqlglot), not only at `error_kind`.
+- A write that names a missing table or column fails on the name before SQLite asks the authorizer.
+  Since FG-191 the executor denies by statement keyword first (`statement_keyword`), so every
+  statement that isn't `SELECT`, `VALUES` or `WITH ... SELECT` gets `denied`, `EXPLAIN` included, and
+  FG-501's `non_select` guard can rely on `error_kind`.
 - Eight gold queries return more than the 10,000-row cap: baseball_1 train 03661-03664 (18,228
   and 16,049 rows), flight_4 val 06877-06878 (10,507) and wta_1 dev 00455-00456 (20,662). Their
   results come back truncated, so FG-107 has to decide how a truncated result compares, or
@@ -181,12 +183,12 @@ Work discovered along the way that is not a plan story.
 - `run_many` starts a spawn pool per call (about a second of start-up), and a script that calls it
   needs `if __name__ == "__main__":`. FG-503 may want one long-lived pool; FG-303's Kaggle entry
   needs the guard.
-- `SQLITE_FUNCTION` allows `randomblob` and `zeroblob`, which can allocate up to SQLite's 1 GB
-  length limit in one VM step, before the deadline is checked. If reward workers run short of
-  memory, lower `SQLITE_LIMIT_LENGTH` in `connect_readonly` (FG-503).
+- `SQLITE_FUNCTION` allows `randomblob` and `zeroblob`, which could allocate up to SQLite's 1 GB
+  length limit in one VM step. FG-191 sets `SQLITE_LIMIT_LENGTH` to 100 kB in `connect_readonly`.
 - The vendored evaluator still opens its own connections (read-only in `exec_eval`, read-write in
   `get_schema` and `isValidSQL`). The one-module rule test covers `src/forge` only; FG-108 decides
-  how official EX opens databases.
+  how official EX opens databases. Since FG-191 `exec_eval`'s connections have the executor's
+  authorizer and limits; `isValidSQL` commits any DDL it is given and must never see a prediction.
 - A truncated result never matches an untruncated one (with the same cap their row counts differ),
   and two truncated results compare on the rows kept, so the six train and val golds over the cap
   still match themselves. That is exact only for the same query: FG-202 and FG-503 should run gold,
@@ -212,7 +214,8 @@ Work discovered along the way that is not a plan story.
   models do that.
 - Official EX opens databases through the vendored evaluator's own read-only connections, after
   `forge.sql.executor` has vetted the prediction for 100 ms (empty, comment-only and denied SQL is false
-  without running). The one-module rule test still covers `src/forge` only.
+  without running). The one-module rule test still covers `src/forge` only. Since FG-191 it also vets
+  the string the evaluator will run after its rewrites (`DISTINCT ATTACH ...` becomes an `ATTACH`).
 - `eval_exec_match` compares on every file whose name contains `.sqlite` in the database's folder, so
   unpacking the test-suite databases beside Spider's turns classical EX into test-suite EX (FG-508).
 - The evaluator's per-query timeout stays upstream's 60 s: it is a default argument bound when the module
@@ -223,3 +226,20 @@ Work discovered along the way that is not a plan story.
 - Timings on the laptop: `forge eval gold --split val` about 10 s, `forge eval agreement --mutations 2000`
   about 20 s, `scripts/smoke/phase_1.sh` about 20 s. `make smoke` stays FG-207's.
 - `forge eval gold --split dev` runs gold queries only, no model, so like `prompt-stats` it is not a dev use.
+- A read-only connection still runs `ATTACH` and `VACUUM INTO`, which create the files they name.
+  Before FG-191 a prediction that SQLite rejected for a syntax error, such as an `ATTACH` with `> =`
+  that the evaluator then rewrote, reached the evaluator and could plant an empty `.sqlite` beside a
+  database; every later official evaluation of it then raised `GoldQueryFailed`.
+  `SQLITE_LIMIT_ATTACHED` 0 stops both on any connection.
+- SQLite checks the progress handler and interrupts only between rows, at loop jumps, so the work
+  inside one row can't be stopped: a row of 20 `instr` calls over 100 kB strings ran 1.6 s past a
+  100 ms watchdog. The length limit bounds each call (the slowest measured, a `LIKE` with a 1,000-character
+  pattern on 100 kB, takes about 0.2 s; at 1 MB one `instr` takes seconds), so only a statement that
+  packs many such calls into one row still overruns. If reward workers ever see that, run them in
+  processes that can be killed (FG-503). The watchdog thread costs about 40 µs per `run` (8 µs to
+  52 µs for `SELECT 1` on the laptop).
+- SQLite reads `\v` as whitespace only inside a run that starts with one of space, tab, newline, form
+  feed or return, and Python's check after the first statement never skips it. `statement_count`
+  follows both rules; sqlite3 on 3.11.15 and 3.12.13 agrees on the cases in the unit tests.
+- Re-running `forge eval agreement --mutations 2000 --split val --seed 0` on the FG-191 code gives the
+  same report as `docs/audit/agreement-2026-11-14.md` apart from the date and commit, so it stands.

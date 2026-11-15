@@ -36,6 +36,17 @@ def test_changed_files_carry_a_change_notice() -> None:
 
 
 @pytest.mark.phase(1)
+def test_evaluator_connection_matches_the_executor() -> None:
+    # The vendored package keeps its own copy so it imports without Forge; they must agree.
+    from test_suite_eval import exec_eval
+
+    from forge.sql import executor
+
+    assert exec_eval.ALLOWED_ACTIONS == executor.ALLOWED_ACTIONS
+    assert dict(executor.LIMITS) == exec_eval.LIMITS
+
+
+@pytest.mark.phase(1)
 def test_evaluator_imports_without_nltk() -> None:
     # Execution matching and hardness from Spider's parsed `sql` field must not need nltk.
     from test_suite_eval import evaluation, exec_eval
