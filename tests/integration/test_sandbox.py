@@ -134,6 +134,19 @@ def test_pool_calls_run_in_a_worker(spider_mini: Path) -> None:
 
 
 @pytest.mark.phase(1)
+def test_pool_reports_a_result_it_cannot_send_back(spider_mini: Path) -> None:
+    with SandboxPool(1) as pool:
+        pid = pool.call(jobs.worker_pid, timeout_s=5)
+        # A job whose return value can't be pickled used to crash the worker, which came
+        # back as "died with exit code 1". Now the pickling error is reported by name.
+        with pytest.raises(SandboxError, match="result could not be sent back: Unsendable"):
+            pool.call(jobs.returns_unsendable, timeout_s=5)
+        # The worker stayed up: same pid, nothing restarted.
+        assert pool.call(jobs.worker_pid, timeout_s=5) == pid
+        assert pool.restarts == 0
+
+
+@pytest.mark.phase(1)
 def test_pool_starts_workers_for_work_and_stops_them_on_close(spider_mini: Path) -> None:
     with pytest.raises(ValueError, match="workers must be at least 1"):
         SandboxPool(0)
