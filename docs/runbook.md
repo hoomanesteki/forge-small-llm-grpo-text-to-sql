@@ -91,10 +91,10 @@ code (the code dataset's `GIT_SHA` must be the pushed commit), install (`pip ins
 that the image lacks), data (`spider.sha256` found by glob, `database.zip` unpacked if
 Kaggle left it packed, every file checked), secrets, preflight (the same job on 5 examples,
 in `preflight/`), job, and upload (`runs/<run_id>/` to the Hub run store, only with an
-`HF_TOKEN`). Whatever happens, it writes `runs/<run_id>/status.json` and marks a manifest
-left `running` as failed. It exits 0 even when the job fails, since a kernel that ends in
-an error might not keep its output, so a COMPLETE kernel is not yet a finished job:
-`forge kaggle wait` reads `status.json` and exits 0 only for `finished`.
+`HF_TOKEN`; see Run store). Whatever happens, it writes `runs/<run_id>/status.json` and
+marks a manifest left `running` as failed. It exits 0 even when the job fails, since a
+kernel that ends in an error might not keep its output, so a COMPLETE kernel is not yet a
+finished job: `forge kaggle wait` reads `status.json` and exits 0 only for `finished`.
 
 Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
 kernel, which only the web editor can do. Without them the job still runs, nothing is
@@ -115,6 +115,41 @@ preflight. `--emit-notebook out.ipynb` writes the job as a Colab notebook and pu
 nothing: a cell fetches both datasets with the kaggle CLI (a `KAGGLE_API_TOKEN` Colab
 secret), the next holds `entry.py` with the same arguments and `--host colab`, and the
 last runs it. Add its hours with `forge ledger add --platform colab`.
+
+## Run store
+
+Runs keep their files off the machine that made them, in the private Hub model repo
+`FORGE_RUN_STORE` (`hoomanesteki/forge-runs` by default), laid out as plan section 3.9 says:
+`runs/<run_id>/manifest.json`, `config.yaml`, `eval/...`, and for training jobs
+`checkpoints/step-NNNNNN/` and `checkpoints/best/`. `forge.ops.hub` holds the stores:
+`HubRunStore` for the repo and `LocalRunStore` for a folder.
+
+```bash
+uv run forge runs list                          # run ids in the store; --store local for runs/
+uv run forge runs show <run_id>                 # its manifest and latest checkpoint
+uv run forge runs pull <run_id>                 # mirror it into runs/<run_id>/
+uv run forge runs pull <run_id> --store kaggle  # the same as forge kaggle output
+uv run forge runs push <run_id>                 # make the store's copy runs/<run_id>/
+```
+
+- A pull replaces each top-level file or folder of the run that the store holds and keeps the
+  rest, such as `kernels.json`, as `forge kaggle output` does.
+- `forge eval run --store hub` fetches the run from the store when `runs/<run_id>/` has no
+  manifest, so a run another machine started resumes here, and puts the folder in the store
+  when the run ends, finished or failed. If that upload fails after the run finished, the
+  command exits 1 and says so; `forge runs push <run_id>` tries again.
+- The end of an eval run and a push replace the store's copy: files it has that the folder lacks
+  are deleted, such as the `error.txt` of an attempt that failed. The kernel's upload stage only
+  adds, since a kernel that failed early may hold part of a run.
+- A Hub call that fails on the network (a dropped connection, a timeout, 408, 429 or 5xx, a
+  failed upload or Xet transfer) is tried 3 more times, 2, 4 and 8 seconds apart. A missing
+  repo or a refused token fails at once.
+- The token is `HF_TOKEN` from the environment or `.env`; without one, huggingface_hub uses a
+  saved login. Nothing creates the repo: make it private by hand (Accounts, step 2), and
+  `forge doctor` checks it.
+- Retention keeps a run's latest 2 `step-NNNNNN` checkpoints and `best/`
+  (`prune_checkpoints`), for training jobs, which push a checkpoint every 50 steps (plan
+  section 3.8). `latest_checkpoint` picks the highest step, which a resumed job starts from.
 
 ## Resume after a session limit
 
