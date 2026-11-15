@@ -72,6 +72,8 @@ class Score(BaseModel):
     ex_fast: bool  # forge.sql.compare
     ex_official: bool | None = None  # test-suite evaluator, when run
     error_class: str | None = None  # taxonomy label (FG-204)
+    attempts: int = 1  # replies the sample took: 2 when its first query failed to run (FG-206)
+    first_try_ex: bool | None = None  # official EX of the first reply when there were 2 (ADR-0015)
 
 
 class RunManifest(BaseModel):
