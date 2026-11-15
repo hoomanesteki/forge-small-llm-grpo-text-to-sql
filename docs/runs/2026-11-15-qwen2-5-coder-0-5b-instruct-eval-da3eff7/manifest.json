@@ -1,0 +1,47 @@
+{
+  "run_id": "2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7",
+  "kind": "eval",
+  "git_sha": "da3eff7afa2c101f55ba23a541a73001704cf0b9",
+  "config": {
+    "adapter": null,
+    "backend": "hf",
+    "device": "mps",
+    "execution": {
+      "gold_timeout_ms": 10000,
+      "max_rows": 100000,
+      "official_item_timeout_s": 10.0,
+      "timeout_ms": 2000
+    },
+    "generation": {
+      "max_new_tokens": 256,
+      "n": 1,
+      "seed": 0,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "limit": null,
+    "max_prompt_tokens": 1536,
+    "model": "Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25",
+    "prompt_version": "p1",
+    "retry": 0,
+    "split": "val"
+  },
+  "config_hash": "1a6a046e457b3b33df0ca9e7e6bade640c4aa6a6c7a5cab4949b72f8e36d9f4d",
+  "data_manifest_hash": "e10958d3b7a9490c15623285275d2840fbce551c32432fc62c0ad440cb06651e",
+  "model_ref": "Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25",
+  "adapter_ref": null,
+  "parent_run": null,
+  "platform": "local-mps",
+  "gpu": null,
+  "seed": 0,
+  "started_at": "2026-11-15T16:04:19.719525Z",
+  "ended_at": "2026-11-15T16:14:26.162259Z",
+  "gpu_hours": 0.0,
+  "cost_usd": 0.0,
+  "outputs": {
+    "config": "config.yaml",
+    "generations": "eval/val-generations.jsonl",
+    "scores": "eval/val-scores.jsonl"
+  },
+  "status": "finished"
+}

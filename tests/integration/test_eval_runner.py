@@ -29,6 +29,7 @@ from forge.infer import hf_backend
 from forge.infer.base import FakeBackend
 from forge.ops.dev_usage import read_uses
 from tests.fakes import WordTokenizer
+from tests.report_trace import untraced
 
 ROOT = Path(__file__).resolve().parents[2]
 # Runs until the executor's deadline stops it, in constant memory.
@@ -388,7 +389,7 @@ def test_hf_backend_is_built_from_the_options(
     spider_mini: Path, runs: Path, dev_log: Path, with_dev: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     val = _val()
-    built: list[tuple[str, str | None]] = []
+    built: list[tuple[str, str | None, str]] = []
     tokenizer = WordTokenizer()
 
     class StubHf:
@@ -396,8 +397,10 @@ def test_hf_backend_is_built_from_the_options(
 
         name = "hf"
 
-        def __init__(self, model_ref: str, *, adapter_ref: str | None = None) -> None:
-            built.append((model_ref, adapter_ref))
+        def __init__(
+            self, model_ref: str, *, adapter_ref: str | None = None, device: str = "auto"
+        ) -> None:
+            built.append((model_ref, adapter_ref, device))
             self.tokenizer = tokenizer
             self._fake = FakeBackend(_gold_reply(val), model_ref=model_ref)
 
@@ -410,15 +413,17 @@ def test_hf_backend_is_built_from_the_options(
         allow_dirty=True,
         workers=1,
     )
-    assert built == [("org/model@abc123", "org/adapter")]
+    # The device is asked for by name, so a run on a Mac doesn't drift onto MPS unasked.
+    assert built == [("org/model@abc123", "org/adapter", "cpu")]
     assert (run.manifest.model_ref, run.manifest.adapter_ref) == ("org/model@abc123", "org/adapter")
+    assert (run.manifest.platform, run.manifest.config["device"]) == ("local-cpu", "cpu")
     # The prompts were measured with the model's own tokenizer, assistant turn opened.
     assert len(tokenizer.calls) == 2
     assert all(kwargs["add_generation_prompt"] for _, kwargs in tokenizer.calls)
     assert all(s.ex_fast and s.ex_official for s in run.scores)
 
     # A model that fails to load is found out before dev is read, so no look is spent.
-    def unloadable(model_ref: str, *, adapter_ref: str | None = None) -> StubHf:
+    def unloadable(model_ref: str, *, adapter_ref: str | None = None, device: str) -> StubHf:
         raise OSError(f"{model_ref} is not on the Hub")
 
     monkeypatch.setattr(hf_backend, "HfBackend", unloadable)
@@ -431,6 +436,41 @@ def test_hf_backend_is_built_from_the_options(
     assert not dev_log.exists()
     failed = RunManifest.model_validate_json((runs / "no-model" / "manifest.json").read_bytes())
     assert failed.status == "failed"
+
+
+@pytest.mark.phase(2)
+def test_mps_run_is_labeled_a_local_mps_pilot(
+    spider_mini: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    val = _val()
+    devices: list[str] = []
+
+    class StubHf:
+        name = "hf"
+
+        def __init__(self, model_ref: str, *, adapter_ref: str | None, device: str) -> None:
+            devices.append(device)
+            self.tokenizer = WordTokenizer()
+            self._fake = FakeBackend(_gold_reply(val), model_ref=model_ref)
+
+        def generate(self, prompts: Sequence[Prompt], params: GenParams) -> list[Generation]:
+            return self._fake.generate(prompts, params)
+
+    monkeypatch.setattr(hf_backend, "HfBackend", StubHf)
+    cli_runner = CliRunner()
+    args = ["--model", "org/model@abc123", "--device", "mps", "--limit", "3", "--run-id", "pilot"]
+    result = cli_runner.invoke(cli.app, ["eval", "run", *args, "--workers", "1", "--allow-dirty"])
+    assert result.exit_code == 0, result.output
+    assert "platform local-mps\n" in result.stdout
+    assert devices == ["mps"]
+    manifest = RunManifest.model_validate_json((runs / "pilot" / "manifest.json").read_bytes())
+    assert (manifest.platform, manifest.config["device"]) == ("local-mps", "mps")
+
+    # The report says where the numbers were made, and every number still traces (I4).
+    assert cli_runner.invoke(cli.app, ["report", "run", "pilot"]).exit_code == 0
+    report = (runs / "pilot" / "eval" / "val-report.md").read_text(encoding="utf-8")
+    assert "\n| Platform | `local-mps` |\n" in report
+    assert untraced(report, runs / "pilot", data_dir=spider_mini) == []
 
 
 @pytest.mark.phase(2)

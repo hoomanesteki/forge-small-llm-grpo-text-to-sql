@@ -153,3 +153,12 @@ def test_scores_stored_before_retry_read_as_one_reply() -> None:
     assert (old.attempts, old.first_try_ex) == (1, None)
     retried = old.model_copy(update={"attempts": 2, "first_try_ex": False})
     assert Score.model_validate_json(retried.model_dump_json()) == retried
+
+
+@pytest.mark.phase(2)
+def test_manifest_names_a_run_on_apple_silicon_gpu() -> None:
+    # Pilot runs on the laptop's GPU say so rather than pass for CPU runs (ADR-0016).
+    pilot = _manifest(kind="eval", platform="local-mps", gpu=None)
+    assert RunManifest.model_validate_json(pilot.model_dump_json()).platform == "local-mps"
+    with pytest.raises(ValidationError, match="platform"):
+        _manifest(platform="mps")

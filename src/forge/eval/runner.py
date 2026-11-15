@@ -155,6 +155,7 @@ def run_eval(
         model_ref=config.model,
         seed=config.params.seed,
         run_id=config.run_id,
+        platform=config.platform,
         adapter_ref=config.adapter,
         allow_dirty=allow_dirty,
         data_dir=root,
@@ -256,7 +257,7 @@ def _hf_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
     # Imported here: torch and transformers take seconds to load, and only this needs them.
     from forge.infer.hf_backend import HfBackend
 
-    hf = HfBackend(config.model, adapter_ref=config.adapter)
+    hf = HfBackend(config.model, adapter_ref=config.adapter, device=config.device)
     return hf, chat_token_counter(hf.tokenizer)
 
 

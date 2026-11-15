@@ -34,6 +34,16 @@ def test_auto_device_prefers_cuda_then_mps(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.phase(2)
+def test_mps_by_name_is_refused_where_torch_cant_use_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A run whose manifest says local-mps must not have run on the CPU instead (ADR-0016).
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    with pytest.raises(ValueError, match="device mps needs Apple silicon"):
+        resolve_device("mps")
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    assert resolve_device("mps") == torch.device("mps")
+
+
+@pytest.mark.phase(2)
 def test_dtype_is_float32_unless_named() -> None:
     assert resolve_dtype(None) is torch.float32
     assert resolve_dtype("bfloat16") is torch.bfloat16

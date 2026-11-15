@@ -66,6 +66,7 @@ PromptVersionName = Literal["p1", "p2"]
 # The agreement check mutates training-side gold queries only (plan FG-108).
 AgreementSplitName = Literal["train", "val"]
 BackendName = Literal["hf", "vllm", "llamacpp", "fake"]
+DeviceName = Literal["cpu", "mps"]
 StoreName = Literal["local", "hub"]
 
 # Printed by the commands that read dev without a model, so nobody logs them as dev uses
@@ -306,6 +307,24 @@ def _sql_value(value: object) -> str:
     return str(value)
 
 
+def _eval_config_file(ctx: typer.Context, path: Path | None) -> Path | None:
+    """Make the options an eval config file sets the defaults of ``forge eval run``.
+
+    click's default map holds them, so an option given on the command line still wins,
+    and each value is checked by its option's type as if it had been typed.
+    """
+    if path is None:
+        return None
+    from forge.eval.config import read_config_file
+
+    try:
+        options = read_config_file(path)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    ctx.default_map = {**(ctx.default_map or {}), **options}
+    return path
+
+
 @eval_app.command("run")
 def eval_run(
     model: Annotated[
@@ -315,12 +334,31 @@ def eval_run(
             "fake, gold or select-1."
         ),
     ],
+    config_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            exists=True,
+            dir_okay=False,
+            is_eager=True,
+            callback=_eval_config_file,
+            help="YAML file of options, such as configs/eval/*.yaml, keyed by option name "
+            "(prompt_version for --prompt-version); options given here override it.",
+        ),
+    ] = None,
     adapter: Annotated[
         str | None, typer.Option(help="LoRA adapter to load on the model, Hub id or directory.")
     ] = None,
     backend: Annotated[
         BackendName, typer.Option(help="hf runs transformers; fake answers without a model.")
     ] = "hf",
+    device: Annotated[
+        DeviceName,
+        typer.Option(
+            help="Where hf runs the model: cpu, or mps for Apple silicon's GPU, which makes "
+            "the run a local-mps pilot (ADR-0016)."
+        ),
+    ] = "cpu",
     split: Annotated[SplitName, typer.Option(help="Which questions to answer.")] = "val",
     reason: Annotated[
         str | None,
@@ -363,7 +401,8 @@ def eval_run(
 ) -> None:
     """Generate, execute and score a split; resume a run by passing its --run-id.
 
-    Files go to runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
+    With --config, a file in configs/eval/ gives the options it sets. Files go to
+    runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
     eval/<split>-generations.jsonl and -scores.jsonl. Exits 1 if the run fails.
     """
     from forge.eval.config import EvalConfig, NotAvailable
@@ -378,6 +417,7 @@ def eval_run(
         model=model,
         adapter=adapter,
         backend=backend,
+        device=device,
         split=split,
         reason=reason,
         limit=limit,
@@ -421,10 +461,13 @@ def eval_run(
     scores = run.scores
     samples = f"{n} samples" if n > 1 else "1 sample"
     typer.echo(f"run {run.manifest.run_id}: {run.paths.root}")
+    if config_file is not None:
+        typer.echo(f"options from {config_file}, and the command line's over them")
     typer.echo(
         f"split {split}: {run.questions} questions, {samples} each, prompt {prompt_version}, "
         f"backend {backend}, model {model}" + (f", adapter {adapter}" if adapter else "")
     )
+    typer.echo(f"platform {run.manifest.platform}")
     if run.resumed:
         typer.echo(f"resumed: {run.resumed} scores were stored by an earlier attempt")
     if len(scores) > run.resumed:
@@ -680,7 +723,7 @@ def _report_git_sha() -> str:
 
 @ledger_app.command("add")
 def ledger_add(
-    platform: str = typer.Option(..., help="kaggle, colab or modal"),
+    platform: str = typer.Option(..., help="kaggle, colab, modal, local-mps or local-cpu"),
     hours: float = typer.Option(..., help="wall-clock GPU hours"),
     run_id: str = typer.Option(..., "--run-id"),
     purpose: str = typer.Option(...),

@@ -620,6 +620,8 @@ def _header(run: ReportRun, page: Path, *, shared: bool = True) -> list[tuple[st
         ("Model", _code(manifest.model_ref)),
         ("Adapter", adapter),
         ("Backend", _code(options.backend)),
+        # A local-mps run is a pilot on the laptop's GPU, and must read as one (ADR-0016).
+        ("Platform", _code(manifest.platform)),
         ("Prompt version", _code(options.prompt_version)),
         *([("Split", _split(run))] if shared else []),
         ("Generation", _generation(options.generation)),

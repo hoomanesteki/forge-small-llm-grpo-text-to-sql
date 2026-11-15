@@ -325,7 +325,7 @@ class RunManifest(BaseModel):
     model_ref: str
     adapter_ref: str | None = None
     parent_run: str | None = None
-    platform: Literal["local-cpu", "kaggle", "colab", "modal"]
+    platform: Literal["local-cpu", "local-mps", "kaggle", "colab", "modal"]  # local-mps: ADR-0016
     gpu: str | None = None
     seed: int
     started_at: datetime

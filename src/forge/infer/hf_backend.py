@@ -182,7 +182,11 @@ class GumbelSampler(LogitsProcessor):
 
 
 def resolve_device(device: str) -> torch.device:
-    """``auto`` is CUDA when there is a GPU, then Apple's MPS, then the CPU."""
+    """``auto`` is CUDA when there is a GPU, then Apple's MPS, then the CPU.
+
+    ``mps`` asked for by name must be there: an eval run's manifest names the device it
+    asked for (ADR-0016), so the run must not quietly fall back to another one.
+    """
     if device == "auto":
         if torch.cuda.is_available():
             device = "cuda"
@@ -190,6 +194,11 @@ def resolve_device(device: str) -> torch.device:
             device = "mps"
         else:
             device = "cpu"
+    elif device == "mps" and not torch.backends.mps.is_available():
+        raise ValueError(
+            "device mps needs Apple silicon and a torch build with MPS, and torch can't "
+            "use it here; run on the cpu device instead"
+        )
     return torch.device(device)
 
 
