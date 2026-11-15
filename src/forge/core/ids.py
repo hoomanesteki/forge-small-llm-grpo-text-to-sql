@@ -23,11 +23,17 @@ _HUB_REPO_ID = re.compile(r"(?:\w(?:[\w.-]*\w)?/)?\w(?:[\w.-]*\w)?")
 
 
 def _model_slug(model_ref: str) -> str:
-    repo, at, _ = model_ref.partition("@")
-    # Only a hub ref, "<repo id>@<revision>", carries a revision, which may hold slashes
-    # (refs/pr/1). In a local path such as ./runs/a@b/ckpt the '@' belongs to a directory
-    # name. "@main" names a revision of no model, so it gets no slug.
-    is_hub_ref = bool(at) and (not repo or _HUB_REPO_ID.fullmatch(repo) is not None)
+    repo, at, revision = model_ref.partition("@")
+    # Only a hub ref, "<repo id>@<revision>", has a revision to drop. As in huggingface_hub's
+    # hf:// URIs, a '/' after the '@' belongs to the revision only in a ref (refs/pr/1), and
+    # a model ref names no file in a repo, so runs/a@b/ckpt is a path with '@' in a folder
+    # name, like any path not shaped like a repo id before its '@'. "@main" names a revision
+    # of no model, so it gets no slug.
+    is_hub_ref = (
+        bool(at)
+        and (not repo or _HUB_REPO_ID.fullmatch(repo) is not None)
+        and ("/" not in revision or revision.startswith("refs/"))
+    )
     name = (repo if is_hub_ref else model_ref).rstrip("/").rsplit("/", 1)[-1]
     slug = _NOT_SLUG.sub("-", name.lower()).strip("-")
     if not slug:

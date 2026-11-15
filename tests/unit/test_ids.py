@@ -43,6 +43,11 @@ def test_run_id_format() -> None:
         ("hoomanesteki/forge-qwen3-4b-sft@3f2a9c1", "forge-qwen3-4b-sft"),
         # Hub repo ids can't contain '@', so everything after the first one is the revision.
         ("hoomanesteki/forge-qwen3-4b-sft@refs/pr/1", "forge-qwen3-4b-sft"),
+        ("Qwen/Qwen3-4B@refs/pr/1", "qwen3-4b"),
+        ("xlangai/spider@refs/convert/parquet", "spider"),
+        # A relative path with its '@' in the last name looks just like a hub ref and is
+        # read as one; a local checkpoint is unambiguous as ./runs/... or an absolute path.
+        ("runs/ckpt@v2", "ckpt"),
         ("runs/x/checkpoints/best/", "best"),
         ("__Model__V2__", "model-v2"),
         ("Qwen3-4B", "qwen3-4b"),
@@ -61,10 +66,16 @@ def test_model_slug_is_last_segment_slugified(model_ref: str, slug: str) -> None
         ("../exports/qwen@2", "qwen-2"),
         ("~/models/qwen3@base", "qwen3-base"),
         ("runs/a/b@c", "b-c"),
+        # Shaped like a hub repo id before the '@', but a '/' after it outside refs/ means a path.
+        ("runs/x@y/ckpt", "ckpt"),
+        ("ckpt@v2/final", "final"),
+        ("checkpoints@2026/best/", "best"),
+        ("./runs/ckpt@v2", "ckpt-v2"),
     ],
 )
 def test_at_sign_in_a_local_path_is_part_of_its_name(model_ref: str, slug: str) -> None:
-    # A path that can't be a hub repo id before its '@' has no revision to strip.
+    # Only "<repo id>@<revision>" has a revision to strip, and a '/' after the '@' is part
+    # of one only in a ref such as refs/pr/1, so these paths keep their last name.
     assert make_run_id("eval", model_ref, SHA, on=DAY) == f"2026-11-03-{slug}-eval-a1b2c3d"
 
 
