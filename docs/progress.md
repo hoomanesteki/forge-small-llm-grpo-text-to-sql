@@ -122,6 +122,7 @@ Work discovered along the way that is not a plan story.
 | FG-197 | Gate 1 fixes: final polish | done | Official EX counts only a worker's death as a miss, so a pool that can't start raises again; a reply the parent can't unpickle keeps its worker; `statement_keyword` reads byte order marks, Tcl-style parameters, ASCII keywords and the `WITH` grammar as SQLite does; a forced Hub download that fails shows its cause, the bad zip and the hint; the timing tests assert the kill and use the worst rows the limits allow, gold is measured as the evaluator runs it, and ADR-0014 lists the known limits |
 | FG-292 | Gate 2 fixes: run provenance | done | A run's commit and dirty check cover the whole checkout `FORGE_ROOT` names, wherever the run starts, and outside a checkout `forge eval run` prints one `error:` line; run locks are gitignored under `docs/runs`; `make smoke` prints its report and writes the marker only with every phase (PHASE unset or 8); `--split train --limit N` takes the first N in file order, train_spider before the rowless train_others, while val and dev stay in id order; `HfBackend` checks adapter and dtype before loading, and a test ends rows of one batch at different steps; `forge eval run --help` names the first-tries file |
 | FG-293 | Gate 2 fixes: statistics and reports | done | McNemar's exact test pairs gold clusters, which key on gold queries with whitespace collapsed; the taxonomy reads a whole ORDER BY alias as SQLite does and drops derived-table and CTE qualifiers; `rebuild` masks only the Generated line's time, fails without the chart and compares its bytes where the renderer its PNG names is this machine's; `compare --out` that resolves to the default path is the default; a spy shows retried SQL runs in `SandboxPool`; the pilot's report regenerated |
+| FG-294 | Gate 2 fixes: plan and pilot notes | done | FG-291 gets a Phase 2 story block whose Tests line names its 15 tests, so traceability covers 22 Phase 0 to 2 stories, and moves to the Phase 2 table; section 5.5 lets a pilot or found story hold `FG-N91`, with gate fixes from the next free number; the pilot's unfenced replies and rule-3 cuts counted; the Phase 2 demo says `make smoke` prints its report from a scratch folder |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -590,6 +591,14 @@ Work discovered along the way that is not a plan story.
 - In the pilot's report `schema_link` is the most common class of official EX failures, well
   ahead of `wrong_tables`: the 0.5B model mostly names tables and columns its database
   doesn't have. Worth watching in FG-307's baselines and in what SFT and GRPO change (FG-291).
+- Counted from the pilot's committed generations and scores: 763 of its 872 replies have no
+  ```` ```sql ```` block although p1 asks for one, so `extract_sql` read them by rule 3, the
+  last line that starts with SELECT or WITH and parses as a query. In 12 the query ran over
+  several lines and rule 3 kept only the first, the select list without its FROM, so all 12
+  fail as `schema_link`: 12 of that class's 266 come from extraction, not from names the
+  database lacks. A prompt or model that leaves the fence off loses multi-line queries this
+  way, which FG-307's p1/p2 choice (ADR-0007) should count apart from schema errors. The
+  extraction rules are unchanged (FG-294).
 - `docs/runs/<run_id>/` holds a run whole (manifest, config, generations, scores, report and
   chart), so `FORGE_RUNS_DIR=docs/runs forge report rebuild <run_id>` checks it, and
   `tests/integration/test_artifacts.py` checks the pilot offline and, with the full data, its
