@@ -124,7 +124,18 @@ other templates are rendered by `render_chat`, as on the laptop. Decoding takes 
 config's settings, never a checkpoint's `generation_config.json` defaults, and each question
 has a seed of its own. The preflight and the job share one engine, loaded once, since a
 second might not fit beside the first. `forge eval run --backend vllm` on the laptop is
-refused: its manifest would call a GPU run `local-cpu` (ADR-0016).
+refused: its manifest would call a GPU run `local-cpu` (ADR-0016). A config with
+`quantization: bitsandbytes` loads the weights in 4-bit, for a reference model too big for
+the T4 in fp16; the manifest's config then records it.
+
+Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
+is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
+`forge kaggle run` writes its row, with the run id and the reason, right after the push. In
+the kernel the preflight answers 5 val questions instead, so dev loads once, in the job,
+whose own row goes to `dev-usage.md` in the kernel's output. A dev job has no
+`--emit-notebook`, since a notebook can run any number of times and log none of them. Name
+a dev run with `--run-id` when the same model's val run was pushed from the same commit on
+the same day, since both would get the same default id.
 
 Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
 kernel, which only the web editor can do. Without them the job still runs, nothing is

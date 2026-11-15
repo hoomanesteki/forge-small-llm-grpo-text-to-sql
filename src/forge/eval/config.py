@@ -12,7 +12,9 @@ the option says where hf runs. ``read_config_file`` reads the options a file in
 ``configs/eval/`` sets, which ``forge eval run --config`` takes as its defaults. A file may
 also hold an ``ops`` section saying how a job is run rather than what it computes, such as
 the GPU hours ``forge kaggle run`` budgets for it; ``read_config_sections`` returns it
-apart.
+apart. ``quantization`` loads a vllm model's weights in 4-bit, for a reference model too
+big for a T4 in fp16 (plan section 3.13, FG-307); the manifest records it, as it changes
+the scores, but only when set, so a run made before the option keeps its config hash.
 """
 
 from __future__ import annotations
@@ -42,10 +44,14 @@ Device = Literal["cpu", "mps"]
 Store = Literal["local", "hub"]
 # The hosted machines a kernel job runs on: kaggle/entry.py names the one it is on.
 Host = Literal["kaggle", "colab"]
+# How vllm may load weights in fewer bits: bitsandbytes' 4-bit, as forge.infer.vllm_backend
+# allows, and nothing else.
+Quantization = Literal["bitsandbytes"]
 BACKENDS: tuple[Backend, ...] = get_args(Backend)
 DEVICES: tuple[Device, ...] = get_args(Device)
 STORES: tuple[Store, ...] = get_args(Store)
 HOSTS: tuple[Host, ...] = get_args(Host)
+QUANTIZATIONS: tuple[Quantization, ...] = get_args(Quantization)
 # The fake backend's models: one answers with each question's gold query, the other
 # always with SELECT 1. Tests build other fakes with FakeBackend(fn).
 FAKE_MODELS = ("gold", "select-1")
@@ -72,13 +78,14 @@ FILE_OPTIONS: Mapping[str, str] = {
     "n": "a whole number",
     "temperature": "a number",
     "retry": "a whole number",
+    "quantization": "text",
 }
 _KINDS: Mapping[str, tuple[type, ...]] = {
     "text": (str,),
     "a whole number": (int,),
     "a number": (int, float),
 }
-_NULLABLE = frozenset({"adapter", "limit"})
+_NULLABLE = frozenset({"adapter", "limit", "quantization"})
 # The key of a config file's ops section, and what that section may set. Ops change no
 # score, so they stay out of the manifest's config and out of forge eval run's options.
 OPS_SECTION = "ops"
@@ -115,6 +122,7 @@ class EvalConfig:
     n: int = 1
     temperature: float = 0.0
     retry: int = 0
+    quantization: Quantization | None = None
     run_id: str | None = None
     store: Store = "local"
     # Set only by kaggle/entry.py, for a job in a kernel; no option or config file sets it.
@@ -139,7 +147,8 @@ class EvalConfig:
         """What the manifest records and hashes: everything that can change a score.
 
         The reason is in the dev usage log, and the store says only where files go. A run
-        pushed over budget has ``allow_over_budget``, which no other run's config holds.
+        pushed over budget has ``allow_over_budget``, and a model loaded in fewer bits its
+        ``quantization``, which no other run's config holds.
         """
         config: dict[str, Any] = {
             "backend": self.backend,
@@ -159,6 +168,8 @@ class EvalConfig:
                 "official_item_timeout_s": OFFICIAL_ITEM_TIMEOUT_S,
             },
         }
+        if self.quantization is not None:
+            config["quantization"] = self.quantization
         if self.allow_over_budget:
             config["allow_over_budget"] = True
         return config
@@ -206,6 +217,15 @@ def check_config(config: EvalConfig) -> None:
             "backend vllm runs on a CUDA GPU, which Forge uses in kernel jobs only: run it "
             "with forge kaggle run --job eval"
         )
+    if config.quantization is not None:
+        if config.quantization not in QUANTIZATIONS:
+            raise ValueError(
+                f"quantization must be one of {', '.join(QUANTIZATIONS)}, "
+                f"got {config.quantization!r}"
+            )
+        if config.backend != "vllm":
+            # hf runs on the CPU or MPS, where bitsandbytes' 4-bit kernels don't.
+            raise ValueError(f"quantization is for backend vllm, not {config.backend}")
     check_version(config.prompt_version)
     if config.limit is not None and config.limit < 1:
         raise ValueError(f"limit must be at least 1, got {config.limit}")

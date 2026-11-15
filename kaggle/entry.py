@@ -19,11 +19,16 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
 - preflight: the job on ``PREFLIGHT_EXAMPLES`` examples through the same path, in a run
   of its own under ``preflight/``, so a broken job fails in minutes. The job then runs on
   the model the preflight loaded: a vLLM engine holds most of the GPU's memory while it
-  lives, so a second one might not fit beside it, and loading once saves GPU time.
+  lives, so a second one might not fit beside it, and loading once saves GPU time. A dev
+  job's preflight answers val questions, so dev loads once, in the job.
 - job: the job itself, its files in ``<work>/runs/<run_id>/``. On a resume, the earlier
   attempt's files come from its kernel's output, mounted under the input folder.
 - upload: that folder to the Hub run store (``forge.ops.hub``, which tries again on
   network errors), only when there is an ``HF_TOKEN``.
+
+A dev job's ``load_dev`` logs its look in ``dev-usage.md`` in the output folder, since a
+kernel has no checkout; the repo's ``docs/dev-usage.md`` got the row when ``forge kaggle
+run`` pushed the job.
 
 Whatever happens, a ``finally`` marks a manifest still ``running`` as failed and writes
 ``runs/<run_id>/status.json``: the stage reached, how the job ended (finished, failed or
@@ -65,6 +70,8 @@ GIT_SHA_FILE = "GIT_SHA"
 REQUIREMENTS_FILE = "requirements-gpu.txt"
 CHECKSUM_FILE = "spider.sha256"
 CODE_SHA_ENV = "FORGE_CODE_SHA"
+DEV_USAGE_ENV = "FORGE_DEV_USAGE"
+DEV_USAGE_FILE = "dev-usage.md"
 HOSTS = ("kaggle", "colab")
 PIP = (sys.executable, "-m", "pip", "install", "--no-input", "--progress-bar", "off")
 
@@ -298,6 +305,10 @@ def eval_job(kernel: Kernel, preflight: bool) -> str:
     if preflight:
         options["limit"] = min(options.get("limit") or PREFLIGHT_EXAMPLES, PREFLIGHT_EXAMPLES)
         options["run_id"] = f"{kernel.args.run_id}-preflight"
+        if options.get("split") == "dev":
+            # Every load of dev is a look, and the push paid for one: the job's.
+            options["split"] = "val"
+            del options["reason"]
     else:
         options["run_id"] = kernel.args.run_id
     config = EvalConfig(**options, host=kernel.args.host)
@@ -367,6 +378,7 @@ def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
     kernel = Kernel(args, run or _run, status)
     os.environ["FORGE_RUNS_DIR"] = str(kernel.work / "runs")
     os.environ["FORGE_CACHE_DIR"] = str(Path(args.temp_dir) / "cache")
+    os.environ[DEV_USAGE_ENV] = str(kernel.work / DEV_USAGE_FILE)
     # Outside any checkout, so a manifest's commit is FORGE_CODE_SHA's: the wheel's own.
     kernel.work.mkdir(parents=True, exist_ok=True)
     os.chdir(kernel.work)

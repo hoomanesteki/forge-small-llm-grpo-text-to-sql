@@ -21,6 +21,7 @@ from forge.eval.config import (
     BACKENDS,
     DEVICES,
     FILE_OPTIONS,
+    QUANTIZATIONS,
     STORES,
     EvalConfig,
     NotAvailable,
@@ -29,6 +30,7 @@ from forge.eval.config import (
     read_config_file,
     read_config_sections,
 )
+from forge.infer import vllm_backend
 
 BASE = EvalConfig(model="org/model")
 
@@ -143,6 +145,40 @@ def test_a_kernel_job_pushed_over_budget_says_so_in_its_config() -> None:
     # A laptop run spends no GPU budget, so it can't be over it.
     with pytest.raises(ValueError, match="allow_over_budget is for a kernel job"):
         check_config(dataclasses.replace(over, host=None))
+
+
+@pytest.mark.phase(3)
+def test_quantization_loads_a_vllm_model_in_4bit_and_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FG-307's reference model is too big for a T4 in fp16, so vllm loads it in 4-bit.
+    kernel = EvalConfig(model="org/model", backend="vllm", host="kaggle")
+    four_bit = dataclasses.replace(kernel, quantization="bitsandbytes")
+    check_config(four_bit)
+    recorded = {**kernel.manifest_config(), "quantization": "bitsandbytes"}
+    assert four_bit.manifest_config() == recorded
+    # Left out when unset, so a run made before the option keeps its config hash.
+    assert "quantization" not in BASE.manifest_config()
+    for wrong, message in (
+        (dataclasses.replace(four_bit, quantization="awq"), "one of bitsandbytes, got 'awq'"),
+        (dataclasses.replace(BASE, quantization="bitsandbytes"), "for backend vllm, not hf"),
+        (
+            EvalConfig(model="gold", backend="fake", quantization="bitsandbytes"),
+            "for backend vllm, not fake",
+        ),
+    ):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            check_config(wrong)  # type: ignore[arg-type]
+    # The backend allows the same ones, and a config file and the command line set it.
+    assert QUANTIZATIONS == vllm_backend.QUANTIZATIONS
+    hint = get_type_hints(cli.eval_run, include_extras=False)["quantization"]
+    assert get_args(get_args(hint)[0]) == QUANTIZATIONS
+    path = tmp_path / "eval.yaml"
+    path.write_text("model: org/model\nbackend: vllm\nquantization: bitsandbytes\n")
+    assert read_config_file(path)["quantization"] == "bitsandbytes"
+    configs = _captured(monkeypatch)
+    CliRunner().invoke(cli.app, ["eval", "run", "--model", "x", "--quantization", "bitsandbytes"])
+    assert [config.quantization for config in configs] == ["bitsandbytes"]
 
 
 @pytest.mark.phase(2)

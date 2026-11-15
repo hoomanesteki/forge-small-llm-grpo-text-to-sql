@@ -20,6 +20,11 @@ Before a push, in the plan's order (FG-303):
    push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait and
    output read to find the run's kernel.
 
+A dev eval job takes ``--reason``, as ``forge eval run --split dev`` does, and is refused
+once the six dev looks are spent (ADR-0004). The push spends its look: ``log_dev_look``
+writes the row in ``docs/dev-usage.md`` here, where the repo is, since the kernel's own
+log stays in its output. A notebook can run any number of times, so a dev job has none.
+
 The ``spike`` job pushes FG-301's throughput script instead of the entry script. It runs
 without Forge, so it mounts no dataset and has no preflight.
 """
@@ -49,6 +54,7 @@ from forge.eval.config import (
     read_config_sections,
     read_ops,
 )
+from forge.ops.dev_usage import MAX_DEV_USES, count_dev_uses, log_dev_use
 from forge.ops.kaggle import (
     CODE_SLUG,
     DATA_SLUG,
@@ -121,6 +127,10 @@ class JobPlan:
     def allow_over_budget(self) -> bool:
         return bool(self.options.get("allow_over_budget"))
 
+    @property
+    def reads_dev(self) -> bool:
+        return self.options.get("split") == "dev"
+
 
 @dataclass(frozen=True)
 class Budget:
@@ -174,13 +184,17 @@ def plan_job(
     resume: bool = False,
     preflight: bool | None = None,
     allow_over_budget: bool = False,
+    reason: str | None = None,
+    notebook: bool = False,
     today: date | None = None,
 ) -> JobPlan:
-    """What pushing ``job`` with ``config`` at ``sha`` would push, checked.
+    """What pushing ``job`` with ``config`` at ``sha`` would push, checked, or what its
+    notebook would run, with ``notebook``.
 
-    ``preflight`` is on by default for entry jobs. Raises ``JobRefused`` for a job that
-    can't go yet or a run that clashes with an earlier push, ``ValueError`` for a bad
-    config, and ``NotAvailable`` for options a later story builds.
+    ``preflight`` is on by default for entry jobs. ``reason`` goes with a dev eval job,
+    and only with one. Raises ``JobRefused`` for a job that can't go yet, a run that
+    clashes with an earlier push, a dev job once the dev looks are spent or as a notebook,
+    ``ValueError`` for a bad config, and ``NotAvailable`` for options a later story builds.
     """
     if job in LATER_JOBS:
         raise JobRefused(f"--job {job} comes with {LATER_JOBS[job]}")
@@ -191,15 +205,32 @@ def plan_job(
     if job == "spike":
         if preflight:
             raise JobRefused("the spike runs without Forge, so it has no preflight")
+        if reason is not None:
+            raise JobRefused("the spike reads no split, so it takes no --reason")
         argv, ops = read_spike_config(config)
         options = {"argv": argv, **({"allow_over_budget": True} if allow_over_budget else {})}
         default_id = f"{day:%Y-%m-%d}-throughput-spike-{sha[:7]}"
     else:
         file_options, ops = read_config_sections(config)
-        options = {**file_options, **({"allow_over_budget": True} if allow_over_budget else {})}
+        options = {
+            **file_options,
+            **({"reason": reason} if reason is not None else {}),
+            **({"allow_over_budget": True} if allow_over_budget else {}),
+        }
         # Checked here as the kernel will check it, so a bad option costs no GPU time.
         eval_config = EvalConfig(**options, host="kaggle")
         check_config(eval_config)
+        if eval_config.split == "dev":
+            if notebook:
+                raise JobRefused(
+                    "a notebook can run any number of times, so it can't log its dev look; "
+                    "push a dev job with forge kaggle run, which logs the one look it spends"
+                )
+            if count_dev_uses() >= MAX_DEV_USES:
+                raise JobRefused(
+                    f"the dev split has had its {MAX_DEV_USES} looks (docs/dev-usage.md, "
+                    "ADR-0004), so no dev job can go"
+                )
         default_id = make_run_id("eval", eval_config.model, sha, on=day)
     est = ops.est_gpu_hours
     if est is None:
@@ -232,7 +263,7 @@ def plan_job(
             )
         if record["options"] != options:
             raise JobRefused(
-                f"run {run_id} was pushed with other options (its config's, or "
+                f"run {run_id} was pushed with other options (its config's, --reason or "
                 "--allow-over-budget); resume it with the same ones"
             )
         last = record["kernels"][-1]
@@ -345,6 +376,14 @@ def check_budget(est_gpu_hours: float, ledger: Summary, client: KaggleClient) ->
     except KaggleError as exc:
         left, note = None, f"unavailable ({exc})"
     return Budget(est_gpu_hours, ledger.remaining_week, ledger.weekly_quota, left, note)
+
+
+def log_dev_look(plan: JobPlan) -> int | None:
+    """Log the dev look a pushed dev job spends, and return how many are spent; ``None``
+    for a job that reads no dev."""
+    if not plan.reads_dev:
+        return None
+    return log_dev_use(plan.run_id, str(plan.options["reason"]))
 
 
 def entry_argv(plan: JobPlan, run_store: str) -> list[str]:

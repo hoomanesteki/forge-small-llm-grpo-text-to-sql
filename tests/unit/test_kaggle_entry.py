@@ -125,6 +125,8 @@ def test_a_finished_job_runs_every_stage_in_order(
     assert job.env["FORGE_CODE_SHA"] == SHA
     assert job.env["FORGE_DATA_DIR"] == str(kernel_root / "input" / "forge-spider")
     assert job.env["FORGE_RUNS_DIR"] == str(kernel_root / "working" / "runs")
+    # A dev job's look is logged in its output: a kernel has no checkout to log it in.
+    assert job.env["FORGE_DEV_USAGE"] == str(kernel_root / "working" / "dev-usage.md")
     secrets = status["stages"]["secrets"]["result"]
     assert set(secrets) == {"HF_TOKEN", "WANDB_API_KEY"}
     assert status["stages"]["upload"]["result"].startswith("skipped: no HF_TOKEN")

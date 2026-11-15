@@ -351,7 +351,9 @@ def model_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
     if config.backend == "vllm":
         from forge.infer.vllm_backend import VllmBackend
 
-        vllm = VllmBackend(config.model, adapter_ref=config.adapter)
+        vllm = VllmBackend(
+            config.model, adapter_ref=config.adapter, quantization=config.quantization
+        )
         return vllm, chat_token_counter(vllm.tokenizer)
     raise ValueError(f"backend {config.backend} loads no model of its own")
 
