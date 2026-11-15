@@ -134,6 +134,14 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 
 - A pull replaces each top-level file or folder of the run that the store holds and keeps the
   rest, such as `kernels.json`, as `forge kaggle output` does.
+- A pull, from either store, also writes the run's row in `docs/compute-ledger.md` from its
+  manifest, once a run id: the UTC date it started, its platform and GPU, its wall-clock
+  hours from `started_at` to `ended_at`, what it was and its cost. A `local-cpu` run gets no
+  row, and a run still `running` none yet: pull it again once it ends. Kernel output with
+  no manifest, such as a spike's, gets none either; add it with `forge ledger add`.
+- Invariant I7 (`tests/integration/test_invariants.py`) checks that every `kaggle`, `colab`
+  or `modal` run under `docs/runs/` and `runs/` has a row, that a run's row names its
+  platform, and that the ledger's cash stays within $50.
 - `forge eval run --store hub` fetches the run from the store when `runs/<run_id>/` has no
   manifest, so a run another machine started resumes here, and puts the folder in the store
   when the run ends, finished or failed. If that upload fails after the run finished, the
@@ -163,8 +171,9 @@ before the next one.
   `forge.train.callbacks` goes in the trainer's callbacks, made when the job starts, since
   the deadline counts from then. When it fires, the trainer saves `checkpoint-<step>` in its
   output folder and stops after that step; the callback pushes the folder to the run's
-  `checkpoints/step-NNNNNN/` in the run store and marks the stored manifest
-  `stopped_time_guard`. A new session resumes from `latest_checkpoint`.
+  `checkpoints/step-NNNNNN/` in the run store, marks the stored manifest
+  `stopped_time_guard` and prunes the older checkpoints as retention says. A new session
+  resumes from `latest_checkpoint`.
 - Eval: `run_eval(..., deadline=Deadline(minutes))` asks before each batch. A stopped run
   keeps the batches it stored, leaves official EX to the attempt that finishes it, says
   `stopped_time_guard` in its manifest and goes to its run store like a run that ended.

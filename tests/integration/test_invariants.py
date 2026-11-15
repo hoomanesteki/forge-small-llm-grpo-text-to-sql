@@ -6,6 +6,7 @@ non-SELECT statements are denied.
 I4 (a run's report, for now): every number in it traces to the run's stored scores and
 manifest.
 I5: the fast comparator agrees with the official evaluator on at least 98% of predictions.
+I7: every GPU run kept here has a ledger row, and the ledger's cash stays within $50.
 """
 
 from __future__ import annotations
@@ -15,14 +16,14 @@ import math
 import re
 import shutil
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from itertools import combinations
 from pathlib import Path
 
 import pytest
 from test_suite_eval import exec_eval
 
-from forge.core.types import ErrorKind, Example, GenParams, Prompt
+from forge.core.types import ErrorKind, Example, GenParams, Prompt, RunManifest
 from forge.data.spider import db_path, load_raw
 from forge.data.splits import (
     MANIFEST_DIR,
@@ -46,11 +47,16 @@ from forge.eval.report import write_run_report
 from forge.eval.runner import run_eval
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend
+from forge.ops.hub import LocalRunStore, open_store
+from forge.ops.ledger import LedgerRow, append, audit, read_rows, record_run
+from forge.ops.paths import ledger_path
 from forge.sql import sandbox
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
 from tests.report_trace import untraced
 from tests.sandbox_jobs import review_query, run_with_fg191_limits
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.phase(1)
@@ -434,3 +440,58 @@ def test_i5_agreement_on_full_val() -> None:
     scores = score(agreement_mutations(load_val(), 2000, seed=0))
 
     assert agreement_rate(scores) >= AGREEMENT_TARGET
+
+
+def _gpu_run(run_id: str, platform: str, gpu: str | None) -> RunManifest:
+    started = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
+    return RunManifest(
+        run_id=run_id,
+        kind="eval",
+        git_sha="c" * 40,
+        config={"split": "val"},
+        config_hash="4" * 64,
+        data_manifest_hash="5" * 64,
+        model_ref="Qwen/Qwen3-4B",
+        platform=platform,  # type: ignore[arg-type]
+        gpu=gpu,
+        seed=0,
+        started_at=started,
+        ended_at=started + timedelta(minutes=30),
+        status="finished",
+    )
+
+
+@pytest.mark.phase(3)
+def test_i7_gpu_runs_in_ledger(tmp_path: Path) -> None:
+    # The gate's check: every run committed under docs/runs or kept in the local runs
+    # store, against the real ledger. No Kaggle run exists yet, so only the FG-291 pilot,
+    # whose local-mps row must name its platform, is checked for now.
+    stores = [LocalRunStore(ROOT / "docs" / "runs"), open_store("local")]
+    kept = [store.get_manifest(run) for store in stores for run in store.runs()]
+    assert kept, "docs/runs holds the FG-291 pilot"
+    assert audit(kept, read_rows(ledger_path())) == []
+
+    # On fixture runs, the same check catches what a gate must refuse.
+    store, ledger = LocalRunStore(tmp_path / "runs"), tmp_path / "compute-ledger.md"
+    kaggle = _gpu_run("2026-11-20-qwen3-4b-eval-abc1234", "kaggle", "Tesla T4")
+    pilot = _gpu_run("2026-11-20-qwen2-5-coder-eval-abc1234", "local-mps", "Apple M4")
+    laptop = _gpu_run("2026-11-20-tiny-eval-abc1234", "local-cpu", None)
+    for manifest in (kaggle, pilot, laptop):
+        store.put_manifest(manifest)
+    found = [store.get_manifest(run) for run in store.runs()]
+    # Only a run on a budget platform needs a row: a pilot's is welcome, not required.
+    assert audit(found, read_rows(ledger)) == [
+        f"run {kaggle.run_id} ran on kaggle, and the ledger has no row for it"
+    ]
+    # Pulling the run writes the row that settles it.
+    row, _ = record_run(kaggle, ledger)
+    assert row is not None and row.hours == 0.5
+    assert audit(found, read_rows(ledger)) == []
+
+    day = date(2026, 11, 20)
+    append(LedgerRow(day, "kaggle", "Apple M4", 0.5, pilot.run_id, "mislabeled pilot"), ledger)
+    append(LedgerRow(day, "modal", "L4", 2.0, "boost", "boost run", cost_usd=50.01), ledger)
+    assert audit(found, read_rows(ledger)) == [
+        f"run {pilot.run_id} ran on local-mps, but its ledger row of 2026-11-20 says kaggle",
+        "the ledger spends $50.01, over the $50 limit",
+    ]
