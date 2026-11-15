@@ -134,8 +134,6 @@ def check_config(config: EvalConfig) -> None:
         )
     if config.store == "hub":
         raise NotAvailable("--store hub is available after FG-304 (Hub run store)")
-    if config.retry == 1:
-        raise NotAvailable("--retry 1 is available after FG-206 (execution-guided retry)")
 
 
 def check_run_id(run_id: str) -> None:
