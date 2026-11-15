@@ -4,6 +4,8 @@ The layout is the run store's (plan section 3.9), under ``runs/<run_id>/``:
 ``manifest.json``, ``config.yaml``, ``eval/<split>-generations.jsonl`` and
 ``eval/<split>-scores.jsonl``, plus ``error.txt`` when the last attempt failed. The
 manifest's ``outputs`` lists whichever of these exist, as paths inside the folder.
+Reports of a finished run (``forge.eval.report``) add ``eval/<split>-report.md`` and its
+chart, which the finished manifest doesn't list.
 
 ``start`` writes the manifest with status ``running`` before any work, and ``finish``
 writes it again at the end: ``finished``, or ``failed`` with the traceback in
@@ -17,6 +19,9 @@ generations are appended before its scores, every line flushed to disk, so a kil
 leave generations without scores, or a last line cut short, but never a score without
 its generation. On opening, both are dropped (their questions run again) and the files
 rewritten. Anything else out of place, such as a line twice, raises ``RunCorrupt``.
+
+``read_run`` reads a finished run back for reports and changes nothing. A finished run
+has neither leftover, so there each is ``RunCorrupt`` too.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import fcntl
 import logging
 import os
 import traceback
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +41,8 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from forge.core.types import Generation, RunManifest, Score, Split
+from forge.data.splits import SPLITS
+from forge.ops.manifest import config_hash
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +50,14 @@ M = TypeVar("M", bound=BaseModel)
 Key = tuple[str, int]  # (example_id, sample_idx)
 
 LOCK_FILE = ".lock"
+MANIFEST_FILE = "manifest.json"
+
+# How read_run says what an unfinished run's status means.
+_UNFINISHED = {
+    "running": "is still running, or was stopped before it could say so",
+    "failed": "failed (its error.txt says why)",
+    "stopped_time_guard": "was stopped by the time guard",
+}
 
 
 class RunConflict(RuntimeError):
@@ -57,6 +72,10 @@ class RunCorrupt(ValueError):
     """A run's files can't be read, or contradict each other."""
 
 
+class RunUnfinished(RuntimeError):
+    """The run hasn't finished, so its files don't hold all of its results yet."""
+
+
 @dataclass(frozen=True)
 class RunPaths:
     """Where one eval run's files go."""
@@ -66,7 +85,7 @@ class RunPaths:
 
     @property
     def manifest(self) -> Path:
-        return self.root / "manifest.json"
+        return self.root / MANIFEST_FILE
 
     @property
     def config(self) -> Path:
@@ -83,6 +102,14 @@ class RunPaths:
     @property
     def error(self) -> Path:
         return self.root / "error.txt"
+
+    @property
+    def report(self) -> Path:
+        return self.root / "eval" / f"{self.split}-report.md"
+
+    @property
+    def chart(self) -> Path:
+        return self.root / "eval" / f"{self.split}-hardness.png"
 
     def outputs(self) -> dict[str, str]:
         """The run's files that exist, by logical name, as paths inside the run folder."""
@@ -200,21 +227,8 @@ class RunFiles:
         self.expected = expected
         scores = _read_lines(paths.scores, Score)
         generations = _read_lines(paths.generations, Generation)
-        generated: set[Key] = set()
-        for generation in generations:
-            if key(generation) in generated:
-                raise RunCorrupt(f"{paths.generations} has {_name(generation)} twice")
-            generated.add(key(generation))
-        self.done: set[Key] = set()
-        for score in scores:
-            if key(score) in self.done:
-                raise RunCorrupt(f"{paths.scores} has {_name(score)} twice")
-            if key(score) not in expected:
-                raise RunCorrupt(f"{paths.scores} has {_name(score)}, which this run never asks")
-            if key(score) not in generated:
-                raise RunCorrupt(f"{paths.scores} has {_name(score)}, which was never generated")
-            self.done.add(key(score))
-        unscored = len(generated) - len(self.done)
+        self.done = _paired(paths, generations, scores, expected)
+        unscored = len(generations) - len(self.done)
         if unscored:
             log.info("dropping %d generations stored without a score; they run again", unscored)
         self.scores = scores
@@ -241,6 +255,62 @@ class RunFiles:
         self.scores = list(scores)
 
 
+@dataclass(frozen=True)
+class StoredRun:
+    """A finished eval run as its folder holds it: what reports are made from."""
+
+    manifest: RunManifest
+    paths: RunPaths
+    scores: tuple[Score, ...]  # in file order
+    generations: Mapping[Key, Generation]
+
+
+def read_run(root: Path) -> StoredRun:
+    """The finished eval run in ``root``, read without changing a file.
+
+    Raises ``FileNotFoundError`` when ``root`` has no manifest, ``RunUnfinished`` unless
+    the run finished, ``ValueError`` for a run of another kind, and ``RunCorrupt`` for
+    files that can't be read, a config that doesn't hash to the manifest's
+    ``config_hash``, or scores and generations that don't pair up one to one.
+    """
+    path = root / MANIFEST_FILE
+    if not path.is_file():
+        raise FileNotFoundError(f"no run in {root}: it has no {MANIFEST_FILE}")
+    try:
+        manifest = RunManifest.model_validate_json(path.read_bytes())
+    except ValidationError as exc:
+        raise RunCorrupt(f"{path} is not a run manifest: {exc}") from exc
+    run = manifest.run_id
+    if run != root.name:
+        raise RunCorrupt(f"{path} is the manifest of run {run}, not of {root.name}")
+    if manifest.kind != "eval":
+        raise ValueError(f"run {run} is a {manifest.kind} run, not an eval run")
+    if manifest.status != "finished":
+        raise RunUnfinished(
+            f"run {run} {_UNFINISHED[manifest.status]}, so its scores are not all in; "
+            f"resume it with `forge eval run --run-id {run}` and the options it started with"
+        )
+    # Reports show the config, so one edited by hand must not pass for what the run used.
+    if config_hash(manifest.config) != manifest.config_hash:
+        raise RunCorrupt(f"{path}: its config doesn't hash to its config_hash")
+    split = next((name for name in SPLITS if name == manifest.config.get("split")), None)
+    if split is None:
+        raise RunCorrupt(f"{path}: its config names no split, so its files can't be found")
+    paths = RunPaths(root, split)
+    for output in (paths.scores, paths.generations):
+        if not output.is_file():
+            raise RunCorrupt(f"run {run} finished, but {output} is missing")
+    scores = _read_lines(paths.scores, Score, whole=True)
+    generations = _read_lines(paths.generations, Generation, whole=True)
+    scored = _paired(paths, generations, scores)
+    unscored = [g for g in generations if key(g) not in scored]
+    if unscored:
+        raise RunCorrupt(f"{paths.generations} has {_name(unscored[0])}, which has no score")
+    if not scores:
+        raise RunCorrupt(f"run {run} finished, but {paths.scores} holds no scores")
+    return StoredRun(manifest, paths, tuple(scores), {key(g): g for g in generations})
+
+
 def write_atomic(path: Path, data: bytes) -> None:
     """Replace ``path`` with ``data`` in one step, so a kill leaves the old file or the new."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,14 +331,42 @@ def _name(item: Generation | Score) -> str:
     return f"{item.example_id} sample {item.sample_idx}"
 
 
-def _read_lines(path: Path, model: type[M]) -> list[M]:
-    """Every complete line of a JSON lines file; a last line a kill cut short is left out."""
+def _paired(
+    paths: RunPaths,
+    generations: Sequence[Generation],
+    scores: Sequence[Score],
+    expected: Collection[Key] | None = None,
+) -> set[Key]:
+    """The samples scored, once no sample is stored twice and each score has its
+    generation, and is in ``expected`` when that is given."""
+    generated: set[Key] = set()
+    for generation in generations:
+        if key(generation) in generated:
+            raise RunCorrupt(f"{paths.generations} has {_name(generation)} twice")
+        generated.add(key(generation))
+    done: set[Key] = set()
+    for score in scores:
+        if key(score) in done:
+            raise RunCorrupt(f"{paths.scores} has {_name(score)} twice")
+        if expected is not None and key(score) not in expected:
+            raise RunCorrupt(f"{paths.scores} has {_name(score)}, which this run never asks")
+        if key(score) not in generated:
+            raise RunCorrupt(f"{paths.scores} has {_name(score)}, which was never generated")
+        done.add(key(score))
+    return done
+
+
+def _read_lines(path: Path, model: type[M], *, whole: bool = False) -> list[M]:
+    """Every complete line of a JSON lines file. A last line a kill cut short is left out,
+    or raises ``RunCorrupt`` when ``whole`` says the file can't have one."""
     try:
         data = path.read_bytes()
     except FileNotFoundError:
         return []
     *lines, tail = data.split(b"\n")
     if tail:
+        if whole:
+            raise RunCorrupt(f"{path} ends in a line cut short")
         log.warning("%s: dropping a last line cut short by a stopped run", path)
     items: list[M] = []
     for number, line in enumerate(lines, 1):

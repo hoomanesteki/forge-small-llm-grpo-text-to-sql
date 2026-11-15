@@ -32,6 +32,8 @@ eval_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(eval_app, name="eval")
+report_app = typer.Typer(help="Reports from runs' stored files.", no_args_is_help=True)
+app.add_typer(report_app, name="report")
 
 
 @app.callback()
@@ -557,6 +559,84 @@ def eval_agreement(
     typer.echo(f"report: {report}")
     if rate < AGREEMENT_TARGET:
         typer.echo(f"error: agreement is under the {AGREEMENT_TARGET:.0%} that I5 needs", err=True)
+        raise typer.Exit(1)
+
+
+def _report_errors() -> tuple[type[Exception], ...]:
+    """What reading runs for a report can raise: OSError for a missing run, report or data
+    (DataNotFound), ValueError for a corrupt run (RunCorrupt), one made on other data or
+    runs that can't be compared, and RunLocked while another process writes a run."""
+    from forge.eval.run_files import RunLocked, RunUnfinished
+    from forge.ops.paths import RepoRootNotFound
+
+    return (OSError, RepoRootNotFound, RunLocked, RunUnfinished, ValueError)
+
+
+@report_app.command("run")
+def report_run(
+    run_id: Annotated[str, typer.Argument(help="The run, a folder in runs/ (FORGE_RUNS_DIR).")],
+) -> None:
+    """Write runs/<run_id>/eval/<split>-report.md and its by-hardness chart.
+
+    Everything in it comes from the run's stored files and the questions of its split, in
+    data that must hash to the manifest's data hash (FORGE_DATA_DIR).
+    """
+    from forge.eval.report import write_run_report
+
+    try:
+        written = write_run_report(run_id)
+    except _report_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"report: {written.report}")
+    typer.echo(f"chart: {written.chart}")
+
+
+@report_app.command("compare")
+def report_compare(
+    a: Annotated[str, typer.Argument(help="The run compared against, such as the base model.")],
+    b: Annotated[str, typer.Argument(help="The run compared with it, on the same questions.")],
+    out: Annotated[
+        Path | None,
+        typer.Option(dir_okay=False, help="Write here, not runs/<b>/eval/compare-<a>.md."),
+    ] = None,
+) -> None:
+    """Run b against run a: the change in official EX with its interval, McNemar's test,
+    and the changes by hardness and by error class."""
+    from forge.eval.report import write_compare_report
+
+    try:
+        written = write_compare_report(a, b, out=out)
+    except _report_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"report: {written}")
+
+
+@report_app.command("rebuild")
+def report_rebuild(
+    run_id: Annotated[str, typer.Argument(help="The run, a folder in runs/ (FORGE_RUNS_DIR).")],
+) -> None:
+    """Render the run's report, and each compare report in its eval folder, again from
+    the stored files; exit 1 unless each matches the stored one, its Generated line aside.
+    """
+    from forge.eval.report import rebuild
+
+    try:
+        checks = rebuild(run_id)
+    except _report_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    for check in checks:
+        if check.diff:
+            typer.echo(f"{check.path}: differs from its rebuild")
+            for line in check.diff:
+                typer.echo(line)
+        else:
+            typer.echo(f"{check.path}: matches its rebuild")
+    differ = sum(bool(check.diff) for check in checks)
+    if differ:
+        typer.echo(f"error: {differ} of {len(checks)} reports differ from their rebuild", err=True)
         raise typer.Exit(1)
 
 

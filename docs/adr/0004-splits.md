@@ -44,6 +44,11 @@ seeing how a model does on dev is what can steer later choices. Resuming a dev r
 was cut off (`forge eval run --run-id`) loads dev again, so it adds a second row with the
 same run id and counts as another look.
 
+A report of a dev run shows the answers that run stored, which its own look already saw,
+so the report is part of that use rather than a new one: `forge.eval.report` reads dev's
+questions without `load_dev()`, needs the run's row in `docs/dev-usage.md`, refuses
+without it, and adds no row.
+
 Reading dev without a model is not a dev use, needs no reason and writes no row:
 
 - `forge eval gold --split dev`: each gold query scored against itself, which checks the

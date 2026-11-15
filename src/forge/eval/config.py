@@ -117,11 +117,8 @@ def check_config(config: EvalConfig) -> None:
         raise ValueError(f"limit must be at least 1, got {config.limit}")
     if config.retry not in (0, 1):
         raise ValueError(f"retry must be 0 or 1, got {config.retry}")
-    if config.run_id is not None and not _RUN_ID.fullmatch(config.run_id):
-        raise ValueError(
-            f"run id {config.run_id!r} names a folder, so it takes lowercase letters, digits "
-            "and '-', and starts with a letter or digit"
-        )
+    if config.run_id is not None:
+        check_run_id(config.run_id)
     if config.backend == "fake":
         if config.model not in FAKE_MODELS:
             raise ValueError(
@@ -139,3 +136,12 @@ def check_config(config: EvalConfig) -> None:
         raise NotAvailable("--store hub is available after FG-304 (Hub run store)")
     if config.retry == 1:
         raise NotAvailable("--retry 1 is available after FG-206 (execution-guided retry)")
+
+
+def check_run_id(run_id: str) -> None:
+    """Raise ``ValueError`` unless ``run_id`` is a plain folder name in the run id alphabet."""
+    if not _RUN_ID.fullmatch(run_id):
+        raise ValueError(
+            f"run id {run_id!r} names a folder, so it takes lowercase letters, digits "
+            "and '-', and starts with a letter or digit"
+        )
