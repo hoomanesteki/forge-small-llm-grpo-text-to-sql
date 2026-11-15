@@ -169,14 +169,18 @@ def chat_token_counter(tokenizer: ChatTokenizer) -> TokenCounter:
 
 
 def load_tokenizer(name: str) -> ChatTokenizer:
-    """A model's tokenizer, from the Hub or a local directory."""
+    """A model's tokenizer, from a local directory or the Hub, where ``<repo>@<revision>``
+    pins a commit as model refs do."""
     try:
         from transformers import AutoTokenizer
+
+        from forge.infer.hf_backend import split_ref
     except ImportError as exc:
         raise ImportError(
             "counting tokens needs transformers, from the cpu extra: run `make setup`"
         ) from exc
-    tokenizer: ChatTokenizer = AutoTokenizer.from_pretrained(name)
+    repo, revision = split_ref(name)
+    tokenizer: ChatTokenizer = AutoTokenizer.from_pretrained(repo, revision=revision)
     return tokenizer
 
 
