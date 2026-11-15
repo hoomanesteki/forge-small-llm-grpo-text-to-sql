@@ -307,6 +307,24 @@ def _sql_value(value: object) -> str:
     return str(value)
 
 
+def _eval_config_file(ctx: typer.Context, path: Path | None) -> Path | None:
+    """Make the options an eval config file sets the defaults of ``forge eval run``.
+
+    click's default map holds them, so an option given on the command line still wins,
+    and each value is checked by its option's type as if it had been typed.
+    """
+    if path is None:
+        return None
+    from forge.eval.config import read_config_file
+
+    try:
+        options = read_config_file(path)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    ctx.default_map = {**(ctx.default_map or {}), **options}
+    return path
+
+
 @eval_app.command("run")
 def eval_run(
     model: Annotated[
@@ -316,6 +334,18 @@ def eval_run(
             "fake, gold or select-1."
         ),
     ],
+    config_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            exists=True,
+            dir_okay=False,
+            is_eager=True,
+            callback=_eval_config_file,
+            help="YAML file of options, such as configs/eval/*.yaml, keyed by option name "
+            "(prompt_version for --prompt-version); options given here override it.",
+        ),
+    ] = None,
     adapter: Annotated[
         str | None, typer.Option(help="LoRA adapter to load on the model, Hub id or directory.")
     ] = None,
@@ -371,7 +401,8 @@ def eval_run(
 ) -> None:
     """Generate, execute and score a split; resume a run by passing its --run-id.
 
-    Files go to runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
+    With --config, a file in configs/eval/ gives the options it sets. Files go to
+    runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
     eval/<split>-generations.jsonl and -scores.jsonl. Exits 1 if the run fails.
     """
     from forge.eval.config import EvalConfig, NotAvailable
@@ -430,6 +461,8 @@ def eval_run(
     scores = run.scores
     samples = f"{n} samples" if n > 1 else "1 sample"
     typer.echo(f"run {run.manifest.run_id}: {run.paths.root}")
+    if config_file is not None:
+        typer.echo(f"options from {config_file}, and the command line's over them")
     typer.echo(
         f"split {split}: {run.questions} questions, {samples} each, prompt {prompt_version}, "
         f"backend {backend}, model {model}" + (f", adapter {adapter}" if adapter else "")

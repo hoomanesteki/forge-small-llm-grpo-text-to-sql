@@ -6,7 +6,8 @@ written. ``manifest_config`` is what a run's manifest records and hashes: every 
 that can change a score, the sandbox and official-EX bounds among them (ADR-0008), so a
 resumed run has to match it exactly. That includes the device, since greedy decoding on
 another device can pick another token where two are nearly tied; the manifest's platform
-follows it (ADR-0016).
+follows it (ADR-0016). ``read_config_file`` reads the options a file in ``configs/eval/``
+sets, which ``forge eval run --config`` takes as its defaults.
 """
 
 from __future__ import annotations
@@ -14,7 +15,10 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, get_args
+
+import yaml
 
 from forge.core.types import GenParams, Split
 from forge.data.prompts import MAX_PROMPT_TOKENS
@@ -44,6 +48,28 @@ PRED_TIMEOUT_MS = DEFAULT_TIMEOUT_MS
 # evaluator's own 60 s would let one adversarial prediction hold it for a minute while
 # its memory grows (ADR-0008).
 OFFICIAL_ITEM_TIMEOUT_S = 10.0
+
+# What a config file may set, with the kind of value each takes: the options that can
+# change a score. The run id, the store and a dev reason belong to one invocation, so
+# they stay on the command line.
+FILE_OPTIONS: Mapping[str, str] = {
+    "model": "text",
+    "adapter": "text",
+    "backend": "text",
+    "device": "text",
+    "split": "text",
+    "limit": "a whole number",
+    "prompt_version": "text",
+    "n": "a whole number",
+    "temperature": "a number",
+    "retry": "a whole number",
+}
+_KINDS: Mapping[str, tuple[type, ...]] = {
+    "text": (str,),
+    "a whole number": (int,),
+    "a number": (int, float),
+}
+_NULLABLE = frozenset({"adapter", "limit"})
 
 # Run ids name folders here and in the Hub run store, so they keep to make_run_id's
 # alphabet, and nothing like "../x" can leave the runs folder.
@@ -169,3 +195,33 @@ def check_run_id(run_id: str) -> None:
             f"run id {run_id!r} names a folder, so it takes lowercase letters, digits "
             "and '-', and starts with a letter or digit"
         )
+
+
+def read_config_file(path: Path) -> dict[str, Any]:
+    """The options the eval config file at ``path`` sets, by option name.
+
+    Raises ``OSError`` when the file can't be read, and ``ValueError`` unless it is a YAML
+    mapping of ``FILE_OPTIONS`` to values of their kinds. Whether a value is one its option
+    takes, such as a known backend, is checked as for the command line's.
+    """
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path} is not valid YAML: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path} must be a mapping of options, such as 'model: org/name'")
+    unknown = sorted(str(name) for name in loaded if name not in FILE_OPTIONS)
+    if unknown:
+        raise ValueError(
+            f"{path} sets {', '.join(unknown)}, which a config file can't: it takes "
+            f"{', '.join(FILE_OPTIONS)}, and the run id, store and dev reason go on the "
+            "command line"
+        )
+    for name, value in loaded.items():
+        kind = FILE_OPTIONS[name]
+        if value is None and name in _NULLABLE:
+            continue
+        # YAML reads true and false as booleans, which Python also counts as whole numbers.
+        if isinstance(value, bool) or not isinstance(value, _KINDS[kind]):
+            raise ValueError(f"{path}: {name} must be {kind}, got {value!r}")
+    return dict(loaded)
