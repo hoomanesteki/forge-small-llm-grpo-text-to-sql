@@ -66,6 +66,7 @@ def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> Non
     assert rebuilt.exit_code == 0, rebuilt.output
     assert rebuilt.stdout == (
         f"{runs / 'select-one' / 'eval' / 'val-report.md'}: matches its rebuild\n"
+        f"{runs / 'select-one' / 'eval' / 'val-hardness.png'}: matches its rebuild\n"
         f"{path}: matches its rebuild\n"
     )
 
@@ -77,7 +78,7 @@ def test_reports_on_eval_runs_through_the_cli(runs: Path, tmp_path: Path) -> Non
     assert f"{report}: differs from its rebuild\n" in edited.stdout
     assert "\n-| wrong_tables | 19 | 100.0% |\n+| wrong_tables | 20 | 100.0% |\n" in edited.stdout
     assert f"{path}: matches its rebuild\n" in edited.stdout
-    assert edited.stderr == "error: 1 of 2 reports differ from their rebuild\n"
+    assert edited.stderr == "error: 1 of 3 files differ from their rebuild\n"
 
     missing = cli_runner.invoke(cli.app, ["report", "run", "no-such-run"])
     assert missing.exit_code == 1

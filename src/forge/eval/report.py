@@ -30,20 +30,29 @@ shown that was retried shows both of its queries.
 A dev run's report shows the model's answers on dev, which belongs to the look the run
 logged (ADR-0004): it needs the run's row in ``docs/dev-usage.md`` and adds none.
 
-One line changes between renderings: ``Generated:`` and the time. ``rebuild`` renders a
-run's report, and each compare report in its folder, again from the stored files and
-compares each with the stored one, that line aside. The chart draws the by-hardness
-table; its bytes are the same on every rendering on one machine, so a committed chart
-changes only with its numbers. ``rebuild`` doesn't compare it: its pixels can change with
-the matplotlib version and aren't known to match between machines, while the table holds
-every number it draws.
+One line changes between renderings: ``Generated:`` and the time, as ``_generated``
+writes it. ``rebuild`` renders a run's report and chart, and each compare report in its
+folder, again from the stored files and compares each with the stored one: a report line
+for line, with only a ``Generated:`` line of exactly that form masked, so anything more
+on it is a difference, and the chart byte for byte. The chart draws the by-hardness table
+on Agg, in matplotlib's default style whatever a matplotlibrc says, and without the text
+that names matplotlib's version, so its bytes change only with its numbers or with the
+matplotlib and Pillow releases that draw and compress it. With the locked releases they
+are the same on macOS and on CI's Linux (``test_chart_is_the_same_bytes_each_time``).
 
 Each kind of number has one format, so FG-207's I4 check can find every number in the
 stored files: a rate as a percentage with one decimal and its 95% interval in brackets
 (``45.2% [41.8%, 48.6%]``), a change in percentage points with its sign and interval
 (``+5.2 [+1.0, +9.4]``), counts with thousands separators, and a p-value to four
-decimals (``< 0.0001`` below that). Constants (the interval level, resamples and seed,
-how many failures are shown, and Spider's citation) appear in prose lines only.
+decimals (``< 0.0001`` below that). Numbers from the stored files are in the title, the
+table rows and the headings over the example failures, and in these prose lines: in a run
+report, the checkers' disagreement and the questions and clusters in the line on
+intervals; in a compare report, the questions and samples both runs answered, the
+questions and clusters in the line on intervals, the questions they disagree on, the
+clusters each wins and McNemar's p-value. Table headers hold the interval level (95%), and
+the other prose lines hold only constants: the interval level, resamples and seed, how many
+failures are shown, and Spider's citation. Question lines and code blocks quote the data
+and the replies.
 """
 
 from __future__ import annotations
@@ -112,7 +121,10 @@ UNCLASSIFIED_NOTE = (
 )
 
 _ORDER = (*ERROR_CLASSES, UNCLASSIFIED)
-_GENERATED_LINE = re.compile(rf"^{GENERATED}.*$", re.MULTILINE)
+# The Generated line as _generated writes it, and nothing else.
+_GENERATED_LINE = re.compile(
+    rf"^{GENERATED}\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}:\d{{2}} UTC$", re.MULTILINE
+)
 # What markdown could read as markup in a question, escaped where it shows as text.
 _MARKUP = re.compile(r"([\\`*_\[\]<>|~&])")
 _BACKTICKS = re.compile(r"`+")
@@ -167,7 +179,8 @@ class RunReport:
 
 @dataclass(frozen=True)
 class Check:
-    """A stored report against its rebuild: their unified diff, empty when they match."""
+    """A stored file against its rebuild: what differs, nothing when they match. A report
+    gives a unified diff, and the chart, which has no lines, its sizes and hashes."""
 
     path: Path
     diff: tuple[str, ...]
@@ -237,18 +250,27 @@ def write_compare_report(
 def rebuild(
     run_id: str, *, runs_root: Path | None = None, data_dir: Path | None = None
 ) -> list[Check]:
-    """Render the run's report and each ``compare-<a>.md`` in its ``eval`` folder again,
-    and compare each with the stored file, its ``Generated:`` line aside. Writes nothing.
+    """Render the run's report, its chart and each ``compare-<a>.md`` in its ``eval``
+    folder again, and compare each with the stored file, a report's ``Generated:`` line
+    aside. Writes nothing.
     """
     data, root = _data(data_dir), runs_root or runs_dir()
     run = _load(run_id, data, root)
-    report = run.stored.paths.report
+    report, chart = run.stored.paths.report, run.stored.paths.chart
     if not report.is_file():
         raise FileNotFoundError(
             f"run {run_id} has no report to rebuild: write it with `forge report run {run_id}`"
         )
+    if not chart.is_file():
+        raise FileNotFoundError(
+            f"run {run_id}'s report shows {chart}, which is missing: write both again with "
+            f"`forge report run {run_id}`"
+        )
     now = datetime.now(UTC)
-    checks = [_check(report, render_run(run, generated=now))]
+    checks = [
+        _check(report, render_run(run, generated=now)),
+        _check_chart(chart, render_chart(run)),
+    ]
     for path in sorted(report.parent.glob(f"{COMPARE_PREFIX}*.md")):
         a = path.name.removeprefix(COMPARE_PREFIX).removesuffix(".md")
         checks.append(
@@ -323,6 +345,10 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
             f"run {a.run_id} answered {split} and run {b.run_id} {b.options.split}; "
             "compare runs on one split"
         )
+    # ``out`` can name the file rebuild checks another way, through '..' or a symlink.
+    # It is still that file, so it is written as rebuild renders it.
+    default = compare_path(b, a.run_id)
+    page = default if out.resolve() == default.resolve() else out
     overall = compare(a.stored.scores, b.stored.scores, clusters=a.clusters)
     levels = {
         level: compare(
@@ -342,7 +368,7 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
     written = (
         f"Written by `forge report compare {a.run_id} {b.run_id}` from both runs' stored files"
     )
-    if out.absolute() == compare_path(b, a.run_id).absolute():
+    if page == default:
         written += f" and checked against them by `forge report rebuild {b.run_id}`"
     samples = b.options.generation.n
     retried = _retried(a) or _retried(b)
@@ -362,7 +388,7 @@ def render_compare(a: ReportRun, b: ReportRun, *, out: Path, generated: datetime
         *(
             f"| {name} | {value_a} | {value_b} |"
             for (name, value_a), (_, value_b) in zip(
-                _header(a, out, shared=False), _header(b, out, shared=False), strict=True
+                _header(a, page, shared=False), _header(b, page, shared=False), strict=True
             )
         ),
         "",
@@ -574,8 +600,24 @@ def _check(path: Path, rebuilt: str) -> Check:
     return Check(path, tuple(diff))
 
 
+def _check_chart(path: Path, rebuilt: bytes) -> Check:
+    stored = path.read_bytes()
+    if stored == rebuilt:
+        return Check(path, ())
+    return Check(
+        path,
+        (
+            f"--- {path}",
+            "+++ rebuilt from the stored files",
+            f"stored: {len(stored):,} bytes, sha256 {hashlib.sha256(stored).hexdigest()}",
+            f"rebuilt: {len(rebuilt):,} bytes, sha256 {hashlib.sha256(rebuilt).hexdigest()}",
+        ),
+    )
+
+
 def _masked(text: str) -> str:
-    """``text`` with its first ``Generated:`` line, the one that changes, made constant."""
+    """``text`` with its first ``Generated:`` line that holds only the time, the one line
+    that changes, made constant."""
     return _GENERATED_LINE.sub(f"{GENERATED}(any time)", text, count=1)
 
 
