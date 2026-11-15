@@ -71,6 +71,9 @@ SOURCE_PARTS = {
     "competition_sources": 1,
     "model_sources": 5,
 }
+# Datasets and kernels may add /<version number>: kaggle 2.2.5 then mounts that version, not
+# the latest, which is how a job runs the code dataset version that was checked.
+VERSIONED_SOURCES = frozenset({"dataset_sources", "kernel_sources"})
 # The line of a kernel script that bundling replaces with the script's arguments: Kaggle
 # runs a script kernel with none, so they have to be written into the script itself.
 ARGV_LINE = "KERNEL_ARGV: list[str] = []"
@@ -78,6 +81,7 @@ ARGV_LINE = "KERNEL_ARGV: list[str] = []"
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 _PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
+_VERSION = re.compile(r"[1-9][0-9]*")
 
 
 def title_slug(title: str) -> str:
@@ -151,11 +155,22 @@ def check_kernel_metadata(meta: Mapping[str, Any]) -> list[str]:
             problems.append(f"{key} must be a list of strings, got {sources!r}")
             continue
         problems += [
-            f"{key} entry {source!r} must have {count} '/'-separated parts"
-            for source in sources
-            if len(source.split("/")) != count or not all(source.split("/"))
+            problem for source in sources if (problem := _source_problem(key, count, source))
         ]
     return problems
+
+
+def _source_problem(key: str, count: int, source: str) -> str | None:
+    """Why ``source`` can't be an entry of ``key``, or ``None`` when it can."""
+    parts = source.split("/")
+    if all(parts) and len(parts) == count:
+        return None
+    if all(parts) and key in VERSIONED_SOURCES and len(parts) == count + 1:
+        if _VERSION.fullmatch(parts[-1]):
+            return None
+        return f"{key} entry {source!r} must end in a version number, not {parts[-1]!r}"
+    pinned = f", or {count + 1} to pin a version" if key in VERSIONED_SOURCES else ""
+    return f"{key} entry {source!r} must have {count} '/'-separated parts{pinned}"
 
 
 def render_kernel_metadata(

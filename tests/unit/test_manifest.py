@@ -12,10 +12,13 @@ from pydantic import ValidationError
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.ops.manifest import (
+    CODE_SHA_ENV,
     DirtyTreeError,
     GitError,
+    NoCommitError,
     Platform,
     build_manifest,
+    code_sha,
     config_hash,
     git_sha,
 )
@@ -333,3 +336,51 @@ def test_outside_a_checkout_is_a_git_error(tmp_path: Path, monkeypatch: pytest.M
     # The checkout is required, so no build can name a commit it doesn't have.
     with pytest.raises(GitError):
         build_manifest("eval", {}, model_ref="m", seed=0, repo=plain, allow_dirty=True)
+
+
+# Built at run time, so no literal here looks like a real commit someone could mistake.
+KERNEL_SHA = "".join("0123456789abcdef"[(i * 7) % 16] for i in range(40))
+
+
+@pytest.mark.phase(3)
+def test_a_checkout_names_its_own_commit_whatever_the_kernel_variable_says(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(CODE_SHA_ENV, KERNEL_SHA)
+    clean = git_sha(repo)
+    assert code_sha(repo) == clean != KERNEL_SHA
+    assert build_manifest("eval", {}, model_ref="m", seed=0, repo=repo).git_sha == clean
+    # Nor does it excuse a dirty tree.
+    (repo / "a.txt").write_text("two\n")
+    with pytest.raises(DirtyTreeError, match="uncommitted changes"):
+        code_sha(repo)
+    assert code_sha(repo, allow_dirty=True) == f"{clean}-dirty"
+
+
+@pytest.mark.phase(3)
+def test_outside_a_checkout_the_commit_comes_from_the_kernel_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = tmp_path / "working"
+    kernel.mkdir()
+    monkeypatch.delenv(CODE_SHA_ENV, raising=False)
+    # A kernel has no checkout: without the variable the code's commit is unknown.
+    with pytest.raises(NoCommitError, match=f"not in a git checkout, and {CODE_SHA_ENV}"):
+        build_manifest("eval", {}, model_ref="m", seed=0, repo=kernel)
+
+    monkeypatch.setenv(CODE_SHA_ENV, KERNEL_SHA)
+    started = datetime(2026, 11, 3, 9, tzinfo=UTC)
+    manifest = build_manifest("eval", {}, model_ref="org/m", seed=0, repo=kernel, now=started)
+    assert manifest.git_sha == KERNEL_SHA
+    assert manifest.run_id == f"2026-11-03-m-eval-{KERNEL_SHA[:7]}"
+    # The working folder of a kernel is where build_manifest looks by default.
+    monkeypatch.chdir(kernel)
+    assert code_sha() == KERNEL_SHA
+    assert code_sha(env={CODE_SHA_ENV: KERNEL_SHA[::-1]}) == KERNEL_SHA[::-1]
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize("value", [f"{KERNEL_SHA}-dirty", KERNEL_SHA[:7], KERNEL_SHA.upper(), " "])
+def test_kernel_variable_must_be_a_full_clean_commit(tmp_path: Path, value: str) -> None:
+    with pytest.raises(ValueError, match=f"{CODE_SHA_ENV} must be a full 40-character commit"):
+        code_sha(tmp_path, env={CODE_SHA_ENV: value})

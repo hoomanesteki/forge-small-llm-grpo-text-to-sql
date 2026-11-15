@@ -37,9 +37,12 @@ Backend = Literal["hf", "vllm", "llamacpp", "fake"]
 # Where the hf backend runs the model: the CPU, or Apple silicon's GPU through MPS.
 Device = Literal["cpu", "mps"]
 Store = Literal["local", "hub"]
+# The hosted machines a kernel job runs on: kaggle/entry.py names the one it is on.
+Host = Literal["kaggle", "colab"]
 BACKENDS: tuple[Backend, ...] = get_args(Backend)
 DEVICES: tuple[Device, ...] = get_args(Device)
 STORES: tuple[Store, ...] = get_args(Store)
+HOSTS: tuple[Host, ...] = get_args(Host)
 # The fake backend's models: one answers with each question's gold query, the other
 # always with SELECT 1. Tests build other fakes with FakeBackend(fn).
 FAKE_MODELS = ("gold", "select-1")
@@ -111,6 +114,8 @@ class EvalConfig:
     retry: int = 0
     run_id: str | None = None
     store: Store = "local"
+    # Set only by kaggle/entry.py, for a job in a kernel; no option or config file sets it.
+    host: Host | None = None
 
     @property
     def params(self) -> GenParams:
@@ -118,8 +123,10 @@ class EvalConfig:
 
     @property
     def platform(self) -> Platform:
-        """Where the run's model runs, as its manifest names it: a run on MPS is a
-        ``local-mps`` pilot (ADR-0016)."""
+        """Where the run's model runs, as its manifest names it: the host of a kernel job,
+        else the laptop, where a run on MPS is a ``local-mps`` pilot (ADR-0016)."""
+        if self.host is not None:
+            return self.host
         return "local-mps" if self.device == "mps" else "local-cpu"
 
     def manifest_config(self) -> dict[str, Any]:
@@ -173,6 +180,11 @@ def check_config(config: EvalConfig) -> None:
         )
     if config.store not in STORES:
         raise ValueError(f"store must be one of {', '.join(STORES)}, got {config.store!r}")
+    if config.host is not None:
+        if config.host not in HOSTS:
+            raise ValueError(f"host must be one of {', '.join(HOSTS)}, got {config.host!r}")
+        if config.device == "mps":
+            raise ValueError(f"--device mps is Apple silicon's GPU, which {config.host} has not")
     check_version(config.prompt_version)
     if config.limit is not None and config.limit < 1:
         raise ValueError(f"limit must be at least 1, got {config.limit}")
