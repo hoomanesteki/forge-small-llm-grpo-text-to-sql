@@ -223,6 +223,9 @@ def test_order_that_cannot_change_the_rows_does_not_count() -> None:
     gold = "SELECT origin, count(*) FROM Flight GROUP BY origin ORDER BY count(*) DESC LIMIT 1"
     pred = "SELECT origin, count(*) AS n FROM flight GROUP BY origin ORDER BY n DESC LIMIT 2"
     assert _classify(gold, pred) == "value"
+    # Parentheses around a whole ORDER BY term change nothing.
+    pred = "SELECT origin, count(*) FROM flight GROUP BY origin ORDER BY (count(*)) DESC LIMIT 2"
+    assert _classify(gold, pred) == "value"
     # The order of ORDER BY keys does change the rows.
     gold = "SELECT name FROM Aircraft ORDER BY distance, name"
     assert _classify(gold, "SELECT name FROM aircraft ORDER BY name, distance") == "group_order"
@@ -242,6 +245,18 @@ def test_an_order_by_alias_wins_over_a_column_as_in_sqlite() -> None:
     assert _classify(gold, "SELECT aid, -aid AS distance FROM aircraft ORDER BY -aid LIMIT 5") == (
         "value"
     )
+    # In parentheses, or with COLLATE, the alias is still the whole term: SQLite's parser
+    # drops the parentheses and its resolver skips COLLATE.
+    pred = "SELECT aid, -aid AS distance FROM aircraft ORDER BY (distance) LIMIT 5"
+    assert _classify(gold, pred) == "value"
+    collated = "SELECT name AS distance FROM Aircraft ORDER BY name COLLATE NOCASE LIMIT 3"
+    for term in (
+        "distance COLLATE NOCASE",
+        "(distance) COLLATE NOCASE",
+        "(distance COLLATE NOCASE)",
+    ):
+        pred = f"SELECT name AS distance FROM aircraft ORDER BY {term} LIMIT 5"
+        assert _classify(collated, pred) == "value", term
     # Qualified, or inside an expression, the name is the column, as it is in WHERE.
     pred = "SELECT aid, -aid AS distance FROM aircraft ORDER BY aircraft.distance LIMIT 5"
     assert _classify(gold, pred) == "group_order"
@@ -277,6 +292,44 @@ def test_derived_tables_and_ctes_lose_their_names() -> None:
     assert _classify(gold, f"SELECT sub.n + 2 AS n FROM {derived} AS sub ORDER BY sub.n") == (
         "value"
     )
+
+
+@pytest.mark.phase(2)
+def test_a_derived_column_wins_over_an_alias_as_in_sqlite() -> None:
+    # A bare name that a derived table's or a CTE's select list outputs is that column in
+    # WHERE, GROUP BY, HAVING and inside an ORDER BY expression, though a select alias has
+    # the name too: SQLite filters these gold queries on origin, not on origin || 'x'.
+    derived = "SELECT T1.origin || 'x' AS origin FROM (SELECT origin FROM Flight) AS T1"
+    cte = "WITH T1 AS (SELECT origin FROM Flight) SELECT T1.origin || 'x' AS origin FROM T1"
+    for query in (derived, cte):
+        gold = f"{query} WHERE origin = 'Chicago'"
+        assert _classify(gold, f"{query} WHERE T1.origin = 'Boston'") == "value"
+        assert _classify(gold, f"{query} WHERE T1.origin || 'x' = 'Boston'") == "where"
+    grouped = "SELECT count(*) AS origin FROM (SELECT origin FROM Flight) AS T1 GROUP BY"
+    assert _classify(f"{grouped} origin LIMIT 3", f"{grouped} T1.origin LIMIT 5") == "value"
+    counts = "SELECT T1.n + 1 AS n FROM (SELECT count(*) AS n FROM Flight GROUP BY origin) AS T1"
+    gold = f"{counts} GROUP BY T1.n HAVING n > 1"
+    assert _classify(gold, f"{counts} GROUP BY T1.n HAVING T1.n > 2") == "value"
+    gold = f"{counts} ORDER BY n * -1 LIMIT 1"
+    assert _classify(gold, f"{counts} ORDER BY T1.n * -1 LIMIT 2") == "value"
+    # A CTE's column list names its columns.
+    listed = "WITH c(place) AS (SELECT origin FROM Flight) SELECT place || 'x' AS place FROM c"
+    assert _classify(f"{listed} WHERE place = 'Chicago'", f"{listed} WHERE c.place = 'Boston'") == (
+        "value"
+    )
+    # A name the derived table doesn't output isn't its column: a double-quoted one is a
+    # string, and a bare one that a table in scope has is that table's.
+    named = "SELECT T1.aid FROM (SELECT aid, name FROM Aircraft) AS T1 WHERE name ="
+    assert _classify(f"{named} 'Boeing 737-800'", f'{named} "Airbus A340-300"') == "value"
+    join = "SELECT T2.name FROM (SELECT aid FROM Certificate) AS T1 JOIN Aircraft AS T2"
+    gold = f"{join} ON T1.aid = T2.aid WHERE T2.distance > 1000"
+    assert _classify(gold, f"{join} ON T1.aid = T2.aid WHERE distance > 2000") == "value"
+    # Where a * hides the derived table's columns, a name it may have is left as written,
+    # neither its column nor the alias.
+    star = "SELECT T1.origin || 'x' AS origin FROM (SELECT * FROM Flight) AS T1"
+    gold = f"{star} WHERE origin = 'Chicago'"
+    assert _classify(gold, f"{star} WHERE origin = 'Boston'") == "value"
+    assert _classify(gold, f"{star} WHERE T1.origin || 'x' = 'Boston'") == "where"
 
 
 @pytest.mark.phase(2)
