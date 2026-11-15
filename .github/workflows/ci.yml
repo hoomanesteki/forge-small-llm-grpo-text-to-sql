@@ -59,6 +59,33 @@ jobs:
       - run: uv sync --locked --extra cpu
       - run: make test-int
 
+  smoke:
+    runs-on: ubuntu-latest
+    # The plan's bound for the whole CPU pipeline on a 2-core runner, setup included.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --extra cpu
+      - name: Read the tiny model's revision
+        id: tiny
+        run: >-
+          uv run python -c 'import yaml;
+          print("revision=" + yaml.safe_load(open("configs/models.yaml"))["tiny"]["revision"])'
+          >> "$GITHUB_OUTPUT"
+      # The only download CI makes besides packages; a new revision gets a new cache.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/huggingface
+          key: huggingface-${{ runner.os }}-tiny-${{ steps.tiny.outputs.revision }}
+      - run: make smoke
+      - name: Check the commit is marked
+        run: test -f ".smoke-ok-$(git rev-parse HEAD)"
+
   security:
     runs-on: ubuntu-latest
     steps:
