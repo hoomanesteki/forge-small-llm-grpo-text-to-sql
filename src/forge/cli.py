@@ -1440,6 +1440,47 @@ def runs_push(run_id: RunArgument) -> None:
     typer.echo(f"run {run_id} ({manifest.kind}, {manifest.status}): uploaded to {hub} as {path}")
 
 
+@runs_app.command("promote")
+def runs_promote(
+    run_id: RunArgument,
+    evals: Annotated[
+        list[str],
+        typer.Option(
+            "--eval",
+            help="An eval run in runs/ of one of the run's checkpoints on val; once for each.",
+        ),
+    ],
+    store: StoreOption = "hub",
+) -> None:
+    """Copy the SFT run's checkpoint that val scores highest to checkpoints/best.
+
+    Each --eval is a finished val run in runs/ (FORGE_RUNS_DIR) whose adapter is one of the
+    run's checkpoints, runs/<run_id>/checkpoints/step-NNNNNN or .../final, with the others'
+    settings. The one with the highest official EX, the later one on a tie, is copied to
+    runs/<run_id>/checkpoints/best/, and best.json beside the manifest records the scores and
+    the eval runs they come from. With --store hub, the default, the run store gets them
+    too, so pull the run first: its checkpoints must be here. Dev is never used.
+    """
+    from forge.eval.run_files import RunUnfinished
+    from forge.ops.hub import hub_store
+    from forge.ops.paths import runs_dir
+    from forge.train.sft import checkpoint_scores, promote_best
+
+    # An eval run that hasn't finished is a RuntimeError, which a store's errors are not.
+    errors: tuple[type[Exception], ...] = (*_runs_errors(), RunUnfinished)
+    try:
+        scores, sources = checkpoint_scores(run_id, evals, runs_root=runs_dir())
+        where = hub_store() if store == "hub" else None
+        promoted = promote_best(run_id, scores, sources=sources, runs_root=runs_dir(), store=where)
+    except errors as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    for rel, score in promoted.record["scores"].items():
+        typer.echo(f"{rel}: official EX {score:.2%} on val, in run {sources[rel]}")
+    copies = f"{promoted.best}" + (f" and {where}" if where is not None else "")
+    typer.echo(f"best: {promoted.checkpoint}, now checkpoints/best in {copies}")
+
+
 train_app = typer.Typer(help="Train LoRA adapters on the train split.", no_args_is_help=True)
 app.add_typer(train_app, name="train")
 
