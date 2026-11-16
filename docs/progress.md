@@ -49,7 +49,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-304 | Hub run store and resume | 5 | done |  |  | `forge.ops.hub`: `RunStore` (plan 3.5's methods plus `put_folder`, `runs` and `prune_checkpoints`), `LocalRunStore` and `HubRunStore` on the private model repo through huggingface_hub 2.4 (`upload_file`, `upload_folder`, `list_repo_files`, `hf_hub_download`, `snapshot_download`, `delete_files`), each call tried 3 more times, 2, 4 and 8 s apart, on network errors; `latest_checkpoint` by step number; retention keeps the latest 2 `step-NNNNNN` and `best/`; `forge runs list|show|pull|push`, `pull --store kaggle` being `forge kaggle output`; `forge eval run --store hub` fetches an earlier attempt to resume and stores the run when it ends; the kernel's upload stage goes through the store. Tested with the Hub client faked; no real Hub call yet, as the account doesn't exist (FG-303's pending job makes the first) |
 | FG-305 | Time guard and automatic ledger rows | 3 | done |  |  | `forge.ops.timeguard.Deadline` times steps on a monotonic clock and stops before one that might pass the deadline; `TimeGuardCallback` saves, stops, pushes `checkpoints/step-NNNNNN`, marks the stored manifest `stopped_time_guard` and prunes (tiny model on CPU, fake clock); `run_eval(deadline=)` stops between batches and resumes; manifests name their GPU (CUDA name, Apple chip) and count wall-clock GPU hours; `forge runs pull` adds one ledger row a run id under the append's lock; I7 on `docs/runs`, `runs/` and the ledger |
 | FG-306 | vLLM inference backend | 3 | done |  |  | `forge.infer.vllm_backend.VllmBackend`: fp16 (`dtype="half"`), `max_model_len` 2048, 85% of GPU memory, LoRA (rank up to 64) only with an adapter, by one `LoRARequest` (a folder, or a Hub snapshot at its revision), 4-bit bitsandbytes allowed and nothing else; Qwen3 templates through `LLM.chat` with thinking off, others through `render_chat` as token ids; `sampling_kwargs` maps `GenParams` with a seed per example id; vLLM imported only when a backend is made. `forge eval run --backend vllm` in kernel jobs only; the runner's `model_backend` builds hf and vllm, and the kernel loads one model for its preflight and job. `kaggle/requirements-gpu.txt` is now vllm 0.33.0, torch 2.14.0, transformers 5.20.2 and the lock's trl, peft and the rest (the spike's `trl-vllm` stack). Tested with vLLM faked; FG-307 proves it on a T4 |
-| FG-307 | GPU baselines and model choice | 3 | todo |  |  |  |
+| FG-307 | GPU baselines and model choice | 3 | blocked: the GPU runs need a phone-verified Kaggle account with an API token and `FORGE_KAGGLE_USER`, both datasets published, and FG-301's spike (4-bit vLLM, GRPO memory) |  |  | Built and tested on CPU: candidates Qwen3-1.7B, Qwen3-4B and Qwen2.5-Coder-1.5B-Instruct and the 4-bit reference Qwen3-8B, pinned with the Hub's license, gated flag and size (`scripts/check_models.py`), and a config per run with `ops.est_gpu_hours` (2.8 h in all); `quantization: bitsandbytes` for vllm; `forge kaggle run --reason` for dev jobs, logged at the push, with a val preflight in the kernel; I6 (`forge.eval.reproducibility.compare_runs`) on fake and tiny-model CPU runs, I5 on committed runs' stored verdicts; `gpu_story_runs` and `test_phase3_baseline_reports_present`, skipped while FG-307 is in `docs/runs/pending.yaml`; ADR-0012 and ADR-0007 proposed, the rule and the pilot's extraction counts (`scripts/count_extraction.py`), no measured table; `scripts/smoke/phase_3.sh`. Pending: the 8 runs in `docs/runs/pending.yaml` |
 
 ## Phase 4: Supervised fine-tuning (v0.4.0)
 
@@ -755,3 +755,37 @@ Work discovered along the way that is not a plan story.
   T4 idles at the end of each batch. A retry prompt near 1,536 tokens after a 256-token first
   reply can also leave the second reply less than 256 tokens before `max_model_len` 2048.
   FG-307 can measure both and raise the batch size or the length (FG-306).
+- The plan's Qwen2.5-Coder-3B-Instruct has the Hub license `other`, named `qwen-research`:
+  the Qwen Research License, non-commercial only. Qwen2.5-Coder-1.5B-Instruct (Apache-2.0)
+  takes its place among the candidates, and `test_models_config.py` keeps the 3B out
+  (FG-307).
+- `forge kaggle run` couldn't push a dev eval: a config file can't carry the reason, and
+  in a kernel `load_dev` would have failed to find `docs/dev-usage.md`, since `repo_root`
+  needs a checkout. The push now logs the look, the kernel logs its own in its output
+  (`FORGE_DEV_USAGE`), and a dev job's preflight answers val, so dev loads once a push. A
+  dev job has no `--emit-notebook` (FG-307).
+- `VllmBackend` took a `quantization` that nothing passed it, so the 8B reference couldn't
+  load in 4-bit from a config. `quantization` is now an eval option, in the manifest's
+  config only when set, so earlier runs keep their config hash (FG-307).
+- One model's runs from one commit on one day share a default run id
+  (`<date>-<model>-eval-<sha7>`), and the second push is refused. The runbook's
+  "Baselines" names each run `<date>-<config name>-<sha7>`; config names are spelled as run
+  ids, without dots, for that (FG-307).
+- `docs/runs/pending.yaml` keeps FG-301's one entry per run, with `since` added to every
+  entry. FG-307's entries list their `configs`, and those that run one of them (the top
+  candidate's p2, the chosen model's dev) say `pick`, so their estimate is the dearest
+  (FG-307).
+- `test_every_eval_config_is_runnable` refused `split: dev` in every config; it now does
+  for pilots (`device: mps`), and checks a vllm config with a kernel host and a dev config
+  with a reason, as `forge kaggle run` does (FG-307).
+- `scripts/count_extraction.py` counts what `scripts/count_pilot_extraction.py` (FG-295,
+  on the Gate 2 branch) counts for the pilot, 763 unfenced, 761 by rule 3, 2 with no SQL
+  and 12 cut, for any run, so ADR-0007 can compare p1 and p2; FG-295's also scores the cut
+  queries whole. When the stacks meet, one script can absorb the other (FG-307).
+- I6's CPU half runs the tiny model from `configs/models.yaml` in `tests/integration`,
+  whose CI job had downloaded no model before and has no Hugging Face cache: about 4 MB per
+  job (FG-307).
+- The estimates in FG-307's configs (0.15 to 0.5 GPU h a job) assume about a quarter hour
+  of install, download and engine start per kernel; FG-301's measurements should replace
+  them before the first push, as the kernel's timeout is the estimate and half again
+  (FG-307).

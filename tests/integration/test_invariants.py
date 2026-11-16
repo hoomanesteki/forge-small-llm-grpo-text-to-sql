@@ -6,6 +6,7 @@ non-SELECT statements are denied.
 I4 (a run's report, for now): every number in it traces to the run's stored scores and
 manifest.
 I5: the fast comparator agrees with the official evaluator on at least 98% of predictions.
+I6: the same greedy eval run twice agrees within 0.5 points of official EX.
 I7: every GPU run kept here has a ledger row, and the ledger's cash stays within $50.
 """
 
@@ -16,6 +17,8 @@ import math
 import re
 import shutil
 from collections import Counter
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from itertools import combinations
 from pathlib import Path
@@ -40,10 +43,18 @@ from forge.data.splits import (
     split_examples,
     val_databases,
 )
-from forge.eval.agreement import AGREEMENT_TARGET, agreement_mutations, agreement_rate, score
+from forge.eval.agreement import (
+    AGREEMENT_TARGET,
+    agreement_mutations,
+    agreement_rate,
+    score,
+    score_agreement,
+)
 from forge.eval.config import EvalConfig
 from forge.eval.mutations import CHANGES
 from forge.eval.report import write_run_report
+from forge.eval.reproducibility import Reproducibility, compare_runs
+from forge.eval.run_files import read_run
 from forge.eval.runner import run_eval
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend
@@ -440,6 +451,100 @@ def test_i5_agreement_on_full_val() -> None:
     scores = score(agreement_mutations(load_val(), 2000, seed=0))
 
     assert agreement_rate(scores) >= AGREEMENT_TARGET
+
+
+@pytest.mark.phase(3)
+def test_i5_agreement_on_committed_runs() -> None:
+    # Real model replies, each with both verdicts stored: the FG-291 pilot for now, and
+    # FG-307's baselines once they are committed beside it.
+    store = LocalRunStore(ROOT / "docs" / "runs")
+    rates = {run: score_agreement(read_run(store.root / run).scores) for run in store.runs()}
+    assert rates, "docs/runs holds the FG-291 pilot"
+    assert all(rate >= AGREEMENT_TARGET for rate in rates.values()), rates
+
+
+def _repeat(
+    config: EvalConfig, runs: Path, cache: Path, reply: Callable[[Prompt, GenParams, int], str]
+) -> Path:
+    run = run_eval(
+        config,
+        backend=FakeBackend(reply, model_ref=config.model),
+        allow_dirty=True,
+        runs_root=runs,
+        cache_root=cache,
+        workers=1,
+    )
+    return run.paths.root
+
+
+@pytest.mark.phase(3)
+def test_i6_greedy_eval_reproducible(
+    spider_mini: Path, tiny_model_ref: str, tmp_path: Path
+) -> None:
+    runs, cache = tmp_path / "runs", tmp_path / "cache"
+    val = sorted(load_val(), key=lambda example: example.id)
+    gold = {example.id: example.gold_sql for example in val}
+    wrong = {example.id for example in val[::3]}  # a third answered wrong, the same each run
+
+    def reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        sql = "SELECT 1" if prompt.example_id in wrong else gold[prompt.example_id]
+        return f"```sql\n{sql}\n```"
+
+    # Two fixture runs of the fake backend: the same scores, and the first ten questions
+    # alone repeat the start of the whole split.
+    config = EvalConfig(model="gold", backend="fake")
+    a = read_run(_repeat(replace(config, run_id="a"), runs, cache, reply))
+    b = read_run(_repeat(replace(config, run_id="b"), runs, cache, reply))
+    first = read_run(_repeat(replace(config, run_id="first", limit=10), runs, cache, reply))
+    same = compare_runs(a, b)
+    assert same.ok, same.describe()
+    assert (same.samples, same.verdicts_differ, same.replies_differ) == (len(val), (), ())
+    assert same.hits == (len(val) - len(wrong),) * 2
+    start = compare_runs(first, a)
+    assert (start.ok, start.samples) == (True, 10)
+
+    # A run whose reply to one question changed is caught: one sample of 20 is 5 points.
+    flipped = val[1].id
+    assert flipped not in wrong
+
+    def drifted(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        return (
+            "```sql\nSELECT 2\n```"
+            if prompt.example_id == flipped
+            else reply(prompt, params, sample_idx)
+        )
+
+    c = read_run(_repeat(replace(config, run_id="c"), runs, cache, drifted))
+    drift = compare_runs(a, c)
+    assert not drift.ok and drift.gap_points == 100 / len(val)
+    assert drift.verdicts_differ == drift.replies_differ == ((flipped, 0),)
+    assert "5.0 points apart (I6 allows 0.5)" in drift.describe()
+    # Only a repeat of the same eval compares: another prompt is another eval.
+    p2 = read_run(_repeat(replace(config, run_id="p2", prompt_version="p2"), runs, cache, reply))
+    with pytest.raises(ValueError, match="differ in prompt_version: a repeat changes only"):
+        compare_runs(a, p2)
+    # The tolerance holds at its edge: half a point is allowed, a whole one not.
+    assert Reproducibility(("x", "y"), 200, (100, 101), (), ()).ok
+    assert not Reproducibility(("x", "y"), 200, (100, 102), (), ()).ok
+
+    # Two real CPU runs of the tiny model on the fixture's val split, greedy: the same
+    # reply to every question, token for token.
+    tiny = EvalConfig(model=tiny_model_ref, backend="hf")
+    real = [
+        read_run(
+            run_eval(
+                replace(tiny, run_id=run_id),
+                allow_dirty=True,
+                runs_root=runs,
+                cache_root=cache,
+                workers=1,
+            ).paths.root
+        )
+        for run_id in ("tiny-a", "tiny-b")
+    ]
+    checked = compare_runs(*real)
+    assert checked.ok, checked.describe()
+    assert (checked.samples, checked.replies_differ) == (len(val), ())
 
 
 def _gpu_run(run_id: str, platform: str, gpu: str | None) -> RunManifest:

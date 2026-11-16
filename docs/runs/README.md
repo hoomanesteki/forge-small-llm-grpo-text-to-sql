@@ -49,5 +49,7 @@ FORGE_DATA_DIR=data/spider uv run forge report run <run_id>
 ## Pending runs
 
 [pending.yaml](pending.yaml) lists the runs a story needs that can't happen yet, what blocks
-each one and what it will fill in. FG-301's Kaggle spike is there until the Kaggle account
-exists.
+each one, since when, and what it will fill in. FG-301's Kaggle spike and FG-307's baselines
+are there until the Kaggle account exists. `tests/integration/test_artifacts.py` finds a GPU
+story's runs here by the configs they were made from, and skips its checks on them only
+while the story has an entry in pending.yaml; once it has none, a missing run fails.

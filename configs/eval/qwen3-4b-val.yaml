@@ -1,0 +1,16 @@
+# FG-307 baseline, a candidate: Qwen3-4B on the whole val split, greedy, with the p1 prompt,
+# as a kernel job on a Kaggle T4 (ADR-0012, docs/runbook.md "Baselines"):
+#
+#   uv run forge kaggle run --job eval --config configs/eval/qwen3-4b-val.yaml
+#
+# The model is configs/models.yaml's candidates.qwen3-4b, pinned to the same commit.
+model: Qwen/Qwen3-4B@1cfa9a7208912126459214e8b04321603b3df60c
+backend: vllm
+split: val
+limit: null
+prompt_version: p1
+n: 1
+temperature: 0.0
+retry: 0
+ops:
+  est_gpu_hours: 0.35

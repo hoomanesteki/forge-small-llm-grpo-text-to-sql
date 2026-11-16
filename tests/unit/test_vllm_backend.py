@@ -4,6 +4,7 @@ engine on a T4 is FG-307's to prove."""
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import sys
 from pathlib import Path
@@ -13,6 +14,8 @@ import pytest
 
 import forge.infer
 from forge.core.types import GenParams, Prompt
+from forge.eval.config import EvalConfig
+from forge.eval.runner import model_backend
 from forge.infer import vllm_backend
 from forge.infer.base import THINKING_FLAG, InferenceBackend, render_chat, sample_seed
 from forge.infer.vllm_backend import REQUIREMENTS, VllmBackend, sampling_kwargs
@@ -138,6 +141,16 @@ def test_engine_loads_the_model_in_fp16_with_lora_only_for_an_adapter(
     generations = tuned.generate(PROMPTS[:1], GenParams())
     assert vllm.calls[-1][1]["lora_request"] == tuned.lora_request
     assert [(g.model_ref, g.adapter_ref) for g in generations] == [(str(base), str(adapter))]
+
+
+@pytest.mark.phase(3)
+def test_an_eval_config_in_4bit_loads_its_engine_in_4bit(monkeypatch: pytest.MonkeyPatch) -> None:
+    vllm = FakeVllm(_sql_reply).install(monkeypatch)
+    config = EvalConfig(model="org/big@0123abc", backend="vllm", host="kaggle")
+    for quantization in (None, "bitsandbytes"):
+        backend, _ = model_backend(dataclasses.replace(config, quantization=quantization))
+        assert isinstance(backend, VllmBackend)
+    assert [engine["quantization"] for engine in vllm.engines] == [None, "bitsandbytes"]
 
 
 @pytest.mark.phase(3)

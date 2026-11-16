@@ -8,13 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from forge.core.types import ExecResult
+from forge.core.types import ExecResult, Score
 from forge.eval.agreement import (
     AgreementRun,
     ItemScore,
     agreement_rate,
     group_repeats,
     render_report,
+    score_agreement,
 )
 from forge.eval.mutations import Mutation, MutationKind
 
@@ -185,3 +186,25 @@ def test_report_carries_the_spider_attribution() -> None:
     assert spike == ROOT / "docs" / "spikes" / "data.md"
     assert match.group(2) == "2-license-and-attribution"
     assert "\n## 2. License and attribution\n" in spike.read_text()
+
+
+@pytest.mark.phase(3)
+def test_stored_scores_agree_where_both_verdicts_match() -> None:
+    def stored(n: int, fast: bool, official: bool | None) -> Score:
+        return Score(
+            example_id=f"spider-val-{n:05d}",
+            hardness="easy",
+            valid=True,
+            ex_fast=fast,
+            ex_official=official,
+        )
+
+    scores = [stored(0, True, True), stored(1, False, False), stored(2, True, False)]
+    scores.append(stored(3, False, True))
+    assert score_agreement(scores) == 0.5
+    assert score_agreement(scores[:2]) == 1.0
+    # A finished run has every official verdict, so a missing one is an error, not a miss.
+    with pytest.raises(ValueError, match="1 scores have no official verdict, spider-val-00004"):
+        score_agreement([*scores, stored(4, True, None)])
+    with pytest.raises(ValueError, match="at least one"):
+        score_agreement([])

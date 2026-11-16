@@ -6,6 +6,8 @@ same predictions. ``forge eval gold`` gives every gold query to both as its own
 prediction, which must score 100%; ``forge eval agreement`` gives them mutated gold
 queries (``forge.eval.mutations``) and writes how often they agree, with the first
 disagreements, to ``docs/audit/agreement-<date>.md``. Invariant I5 asks for 98%.
+``score_agreement`` measures it on a run's stored scores instead, which hold both
+verdicts on each real model reply.
 
 Items repeat: an unchanged gold query comes up again on each pass over the examples,
 and questions that share a gold query can get the same mutation. An item with the
@@ -26,7 +28,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from forge.core.types import Example, ExecResult
+from forge.core.types import Example, ExecResult, Score
 from forge.data.spider import resolve_data_dir
 from forge.eval.mutations import Mutation, MutationKind, make_mutations
 from forge.eval.testsuite import official_exec_match
@@ -143,6 +145,20 @@ def agreement_rate(scores: Sequence[ItemScore]) -> float:
     if not scores:
         raise ValueError("agreement needs at least one scored item")
     return sum(s.agree for s in scores) / len(scores)
+
+
+def score_agreement(scores: Sequence[Score]) -> float:
+    """How often the fast and the official verdict agree on a run's stored scores.
+
+    Raises ``ValueError`` for scores that lack an official verdict, which a finished run
+    never stores.
+    """
+    if not scores:
+        raise ValueError("agreement needs at least one scored item")
+    lacking = [score.example_id for score in scores if score.ex_official is None]
+    if lacking:
+        raise ValueError(f"{len(lacking)} scores have no official verdict, {lacking[0]} first")
+    return sum(score.ex_fast == score.ex_official for score in scores) / len(scores)
 
 
 def group_repeats(scores: Sequence[ItemScore]) -> list[list[ItemScore]]:
