@@ -147,6 +147,10 @@ class SftConfig(_Section):
     # TRL's default, set here so the manifest says it: the backward pass recomputes each
     # layer's activations rather than keep them, which long rows need on a laptop.
     gradient_checkpointing: StrictBool = True
+    # Pad each micro-batch to a multiple of this many tokens; None pads to its longest row.
+    # PyTorch's MPS backend builds and keeps a graph for each new sequence length, so rows
+    # of every length grow a run's memory; a multiple bounds how many lengths there are.
+    pad_to_multiple_of: Count | None = None
     # Train on this many of the rows that fit, a subset forge.train.sft draws by hash,
     # rather than on all of them; for a run with less time than an epoch takes.
     subset_rows: Count | None = None
