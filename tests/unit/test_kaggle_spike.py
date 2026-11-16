@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
@@ -24,6 +25,7 @@ import pytest
 import yaml
 
 from forge.data import prompts as forge_prompts
+from forge.data.splits import read_split_ids
 from forge.ops.kaggle import METADATA_FILE, bake_argv, check_kernel_metadata
 from forge.ops.ledger import read_rows
 from tests.spike import THROUGHPUT, load_script, throughput
@@ -1031,3 +1033,75 @@ def test_pending_runs_say_what_blocks_them() -> None:
     )
     assert spent > 0
     assert spent + sum(e["est_gpu_hours"] for e in pending if e["story"] == "FG-301") <= 1.5
+
+
+def _budget_rows() -> dict[str, float]:
+    """Plan section 3.8's GPU hour budget, as {the job's name before any colon or
+    parenthesis: its hours}, the total row as ``Total``."""
+    plan = (ROOT / "docs" / "PLAN.md").read_text(encoding="utf-8")
+    section = plan.split("\n### 3.8 ", 1)[1].split("\n### ", 1)[0]
+    table = section.split("**GPU hour budget**", 1)[1].split("\n\n")[1]
+    rows = {}
+    for line in table.splitlines()[2:]:
+        job, _, hours, _ = (cell.strip() for cell in line.strip("|").split("|"))
+        name = re.split(r"[:(]", job.strip("*"), maxsplit=1)[0].strip()
+        number = re.search(r"[\d.]+", hours)
+        assert number, line
+        rows[name] = float(number.group())
+    return rows
+
+
+@pytest.mark.phase(3)
+def test_budget_rows_follow_the_measurements() -> None:
+    # Each worked-out row of plan section 3.8, from the files its note names and by its
+    # formulas, so a row can't drift from them or be typed by hand.
+    report = json.loads((ROOT / "docs" / "spikes" / "kaggle-gpu" / "spike-report.json").read_text())
+    stages = {stage["name"]: stage["result"] for stage in report["stages"]}
+    job = ROOT / "docs" / "runs" / "2026-11-16-smoke-kaggle-50-val-c8f4b41" / "status.json"
+    kernel = json.loads(job.read_text())["stages"]
+    fixed = sum(kernel[name]["seconds"] for name in ("code", "install", "data", "secrets"))
+    models = {"1.7B": "Qwen/Qwen3-1.7B", "4B": "Qwen/Qwen3-4B"}
+
+    def up(hours: float) -> float:
+        return math.ceil(round(hours * 20, 6)) / 20
+
+    def grpo(steps: int, size: str, sessions: int = 1) -> float:
+        step = stages[f"grpo:trl:{models[size]}"]["median_step_seconds"]
+        return up(steps * step * 1.5 / 3600 + 0.25 * sessions)
+
+    def evaluate(questions: int, size: str) -> float:
+        bench = stages[f"vllm:{models[size]}"]
+        setup = fixed + stages[f"download:{models[size]}"]["seconds"] + bench["load_seconds"]
+        generate = questions * 256 / bench["completion_tokens_per_second"]
+        return up((setup + generate) * 1.5 / 3600)
+
+    # Spider's dev split is 1,034 questions (ADR-0004); only its size is used here.
+    val, dev = len(read_split_ids("val")), 1034
+    # The reference's own config estimates: no run has loaded an 8B model on the T4.
+    reference = 0.45 + 0.50
+    candidates = 2 * evaluate(val, "1.7B") + evaluate(val, "4B")
+    expected = {
+        "Baselines": candidates
+        + evaluate(val, "4B")
+        + evaluate(100, "1.7B")
+        + evaluate(dev, "4B")
+        + reference,
+        "SFT checkpoint evals": 2 * evaluate(val, "4B"),
+        "GRPO pilot": grpo(100, "1.7B", sessions=2),
+        "GRPO main": grpo(600, "4B", sessions=2),
+        "Checkpoint selection": 3 * evaluate(val, "4B") + 2 * evaluate(dev, "4B"),
+        "Hacking fix re-run": grpo(200, "4B") + evaluate(val, "4B"),
+    }
+    rows = _budget_rows()
+    for name, hours in expected.items():
+        assert rows[name] == pytest.approx(hours), name
+
+    # The spike's row is its ledger row, and the total adds the rows up within the 45 h
+    # the Phase 3 gate allows.
+    spike_run = json.loads((ROOT / "docs" / "spikes" / "kaggle-gpu" / "kernels.json").read_text())
+    ledger = read_rows(ROOT / "docs" / "compute-ledger.md")
+    assert [row.hours for row in ledger if row.run_id == spike_run["run_id"]] == [
+        rows["Throughput spike"]
+    ]
+    total = rows.pop("Total")
+    assert total == pytest.approx(sum(rows.values())) and total <= 45
