@@ -181,6 +181,53 @@ def test_quantization_loads_a_vllm_model_in_4bit_and_is_recorded(
     assert [config.quantization for config in configs] == ["bitsandbytes"]
 
 
+@pytest.mark.phase(3)
+def test_gpu_memory_utilization_is_a_vllm_option_recorded_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = EvalConfig(model="org/model", backend="vllm", host="kaggle")
+    tuned = dataclasses.replace(kernel, gpu_memory_utilization=0.7)
+    check_config(tuned)
+    check_config(dataclasses.replace(kernel, gpu_memory_utilization=1))
+    assert tuned.manifest_config() == {**kernel.manifest_config(), "gpu_memory_utilization": 0.7}
+    # Left out when unset, so a run made before the option keeps its config hash.
+    assert "gpu_memory_utilization" not in kernel.manifest_config()
+    share = "gpu_memory_utilization must be above 0 and at most 1"
+    for wrong, message in (
+        (dataclasses.replace(tuned, gpu_memory_utilization=0.0), f"{share}, got 0.0"),
+        (dataclasses.replace(tuned, gpu_memory_utilization=1.2), f"{share}, got 1.2"),
+        (dataclasses.replace(tuned, gpu_memory_utilization=float("nan")), f"{share}, got nan"),
+        # hf runs on the CPU or MPS, and vLLM's share of a GPU means nothing there.
+        (
+            dataclasses.replace(BASE, gpu_memory_utilization=0.7),
+            "gpu_memory_utilization is for backend vllm, not hf",
+        ),
+    ):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            check_config(wrong)
+    # A config file and the command line set it.
+    path = tmp_path / "eval.yaml"
+    path.write_text("model: org/model\nbackend: vllm\ngpu_memory_utilization: 0.7\n")
+    assert read_config_file(path)["gpu_memory_utilization"] == 0.7
+    path.write_text("model: org/model\ngpu_memory_utilization: most\n")
+    with pytest.raises(ValueError, match="gpu_memory_utilization must be a number, got 'most'"):
+        read_config_file(path)
+    configs = _captured(monkeypatch)
+    CliRunner().invoke(cli.app, ["eval", "run", "--model", "x", "--gpu-memory-utilization", "0.6"])
+    CliRunner().invoke(cli.app, ["eval", "run", "--model", "x"])
+    assert [config.gpu_memory_utilization for config in configs] == [0.6, None]
+
+
+@pytest.mark.phase(3)
+def test_a_temperature_vllm_would_raise_is_refused_up_front() -> None:
+    # vLLM would decode it at 0.01 while the manifest's generation said 0.005.
+    kernel = EvalConfig(model="org/model", backend="vllm", host="kaggle")
+    for config in (BASE, kernel):
+        with pytest.raises(ValueError, match=re.escape("temperature must be 0 or at least 0.01")):
+            check_config(dataclasses.replace(config, temperature=0.005))
+        check_config(dataclasses.replace(config, temperature=0.01))
+
+
 @pytest.mark.phase(2)
 def test_platform_follows_the_device() -> None:
     # A run on Apple silicon's GPU is a local-mps pilot; every other local run is local-cpu.

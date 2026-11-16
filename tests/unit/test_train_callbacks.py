@@ -74,6 +74,42 @@ def test_guard_without_a_store_saves_and_stops() -> None:
 
 
 @pytest.mark.phase(3)
+def test_guard_runs_nothing_but_its_save_after_the_stop() -> None:
+    args: Any = SimpleNamespace(output_dir="unused")
+    clock = Clock()
+    guard = TimeGuardCallback(1, clock=clock)
+    state, control = TrainerState(max_steps=100), TrainerControl()
+    guard.on_train_begin(args, state, control)
+    # An epoch that ends before the deadline is the trainer's to evaluate and save.
+    control.should_evaluate = control.should_save = True
+    guard.on_epoch_end(args, state, control)
+    assert control.should_evaluate and control.should_save
+
+    # The trainer's own callback asked to evaluate the step the guard stops after.
+    control = TrainerControl(should_evaluate=True)
+    clock.now += 45
+    state.global_step += 1
+    guard.on_step_end(args, state, control)
+    assert guard.stopped_at == 1
+    assert control.should_save and control.should_training_stop
+    assert not control.should_evaluate
+
+    # Something cleared the save before the trainer made it, and the epoch's end asks to
+    # evaluate: the guard asks for its save there, and no evaluation.
+    control.should_save = False
+    control.should_evaluate = True
+    guard.on_epoch_end(args, state, control)
+    assert control.should_save and not control.should_evaluate
+    guard.on_save(args, state, control)
+    assert guard.saved and guard.pushed is None
+
+    # Once the step is saved, the epoch's end saves it no second time.
+    control.should_save = control.should_evaluate = True
+    guard.on_epoch_end(args, state, control)
+    assert not control.should_save and not control.should_evaluate
+
+
+@pytest.mark.phase(3)
 def test_guard_leaves_the_last_step_to_the_trainer() -> None:
     clock = Clock()
     guard = TimeGuardCallback(1, clock=clock)

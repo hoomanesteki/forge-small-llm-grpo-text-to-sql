@@ -15,6 +15,10 @@ the GPU hours ``forge kaggle run`` budgets for it; ``read_config_sections`` retu
 apart. ``quantization`` loads a vllm model's weights in 4-bit, for a reference model too
 big for a T4 in fp16 (plan section 3.13, FG-307); the manifest records it, as it changes
 the scores, but only when set, so a run made before the option keeps its config hash.
+``gpu_memory_utilization`` is the share of the GPU's memory vllm's engine takes, the
+backend's default when unset; the manifest records it the same way, as the memory left for
+the KV cache sets how many requests vLLM batches together, and a batch can change which
+token fp16 rounding picks where two nearly tie.
 """
 
 from __future__ import annotations
@@ -79,13 +83,14 @@ FILE_OPTIONS: Mapping[str, str] = {
     "temperature": "a number",
     "retry": "a whole number",
     "quantization": "text",
+    "gpu_memory_utilization": "a number",
 }
 _KINDS: Mapping[str, tuple[type, ...]] = {
     "text": (str,),
     "a whole number": (int,),
     "a number": (int, float),
 }
-_NULLABLE = frozenset({"adapter", "limit", "quantization"})
+_NULLABLE = frozenset({"adapter", "limit", "quantization", "gpu_memory_utilization"})
 # The key of a config file's ops section, and what that section may set. Ops change no
 # score, so they stay out of the manifest's config and out of forge eval run's options.
 OPS_SECTION = "ops"
@@ -123,6 +128,7 @@ class EvalConfig:
     temperature: float = 0.0
     retry: int = 0
     quantization: Quantization | None = None
+    gpu_memory_utilization: float | None = None
     run_id: str | None = None
     store: Store = "local"
     # Set only by kaggle/entry.py, for a job in a kernel; no option or config file sets it.
@@ -147,8 +153,9 @@ class EvalConfig:
         """What the manifest records and hashes: everything that can change a score.
 
         The reason is in the dev usage log, and the store says only where files go. A run
-        pushed over budget has ``allow_over_budget``, and a model loaded in fewer bits its
-        ``quantization``, which no other run's config holds.
+        pushed over budget has ``allow_over_budget``, a model loaded in fewer bits its
+        ``quantization``, and an engine given its share of memory its
+        ``gpu_memory_utilization``, which no other run's config holds.
         """
         config: dict[str, Any] = {
             "backend": self.backend,
@@ -170,6 +177,9 @@ class EvalConfig:
         }
         if self.quantization is not None:
             config["quantization"] = self.quantization
+        if self.gpu_memory_utilization is not None:
+            # A float, so a file's 1 hashes as the command line's 1.0 does.
+            config["gpu_memory_utilization"] = float(self.gpu_memory_utilization)
         if self.allow_over_budget:
             config["allow_over_budget"] = True
         return config
@@ -226,6 +236,15 @@ def check_config(config: EvalConfig) -> None:
         if config.backend != "vllm":
             # hf runs on the CPU or MPS, where bitsandbytes' 4-bit kernels don't.
             raise ValueError(f"quantization is for backend vllm, not {config.backend}")
+    if config.gpu_memory_utilization is not None:
+        # Negated so that NaN fails too.
+        if not 0 < config.gpu_memory_utilization <= 1:
+            raise ValueError(
+                "gpu_memory_utilization must be above 0 and at most 1, got "
+                f"{config.gpu_memory_utilization}"
+            )
+        if config.backend != "vllm":
+            raise ValueError(f"gpu_memory_utilization is for backend vllm, not {config.backend}")
     check_version(config.prompt_version)
     if config.limit is not None and config.limit < 1:
         raise ValueError(f"limit must be at least 1, got {config.limit}")

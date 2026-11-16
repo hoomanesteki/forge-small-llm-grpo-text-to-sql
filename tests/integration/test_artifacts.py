@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -184,11 +185,13 @@ def _models() -> dict[str, Any]:
 CANDIDATES = list(_models()["candidates"])
 (REFERENCE,) = _models()["reference"]
 I6_MODEL = "qwen2-5-coder-1-5b"
-# FG-307's runs, each from one config, or for the top and the chosen candidate from one
-# of the candidates' (docs/runbook.md, "Baselines").
+# ADR-0012 leaves out a candidate whose val official EX leaves no visible headroom.
+HEADROOM = 0.75
+# FG-307's runs, each from one config, or for the chosen candidate from one of the
+# candidates' (docs/runbook.md, "Baselines").
 BASELINES = {
     **{f"{name} val": [EVAL_CONFIGS / f"{name}-val.yaml"] for name in CANDIDATES},
-    "top candidate val p2": [EVAL_CONFIGS / f"{name}-val-p2.yaml" for name in CANDIDATES],
+    "chosen val p2": [EVAL_CONFIGS / f"{name}-val-p2.yaml" for name in CANDIDATES],
     "reference val": [EVAL_CONFIGS / f"{REFERENCE}-val.yaml"],
     "I6 repeat": [EVAL_CONFIGS / f"{I6_MODEL}-val-100.yaml"],
     "chosen dev": [EVAL_CONFIGS / f"{name}-dev.yaml" for name in CANDIDATES],
@@ -200,13 +203,49 @@ def _official_ex(run: StoredRun) -> float:
     return sum(score.ex_official is True for score in run.scores) / len(run.scores)
 
 
+def assert_p2_ran_for_the_chosen_model(runs: Mapping[str, StoredRun]) -> None:
+    """Plan section 3.7 compares p1 and p2 for the chosen model (ADR-0007): the model
+    ADR-0012's rule chose, which is the one evaluated on dev. That is the best eligible
+    candidate, which needn't be the best p1 run, and it left headroom on val."""
+    chosen_ref = runs["chosen dev"].manifest.model_ref
+    assert runs["chosen val p2"].manifest.model_ref == chosen_ref
+    (chosen_val,) = [
+        runs[f"{name} val"]
+        for name in CANDIDATES
+        if runs[f"{name} val"].manifest.model_ref == chosen_ref
+    ]
+    assert _official_ex(chosen_val) < HEADROOM
+
+
+@pytest.mark.phase(3)
+def test_p2_is_checked_against_the_chosen_model() -> None:
+    def run(model: str, ex: int) -> Any:
+        """A stand-in for a stored run of ``model`` that matched ``ex`` of 10 questions."""
+        scores = [SimpleNamespace(ex_official=i < ex) for i in range(10)]
+        return SimpleNamespace(manifest=SimpleNamespace(model_ref=model), scores=scores)
+
+    # The best p1 run scores 80%, past the headroom, so ADR-0012 chooses the next one.
+    top, chosen, other = CANDIDATES
+    runs = {
+        f"{top} val": run("org/top", 8),
+        f"{chosen} val": run("org/chosen", 6),
+        f"{other} val": run("org/other", 4),
+        "chosen dev": run("org/chosen", 5),
+        "chosen val p2": run("org/chosen", 7),
+    }
+    assert_p2_ran_for_the_chosen_model(runs)
+    # p2 on the best p1 run would fix the prompt on a model that is never trained.
+    with pytest.raises(AssertionError):
+        assert_p2_ran_for_the_chosen_model({**runs, "chosen val p2": run("org/top", 8)})
+    # A chosen model without headroom breaks ADR-0012's rule.
+    with pytest.raises(AssertionError):
+        assert_p2_ran_for_the_chosen_model({**runs, f"{chosen} val": run("org/chosen", 9)})
+
+
 @pytest.mark.phase(3)
 def test_phase3_baseline_reports_present() -> None:
     runs = gpu_story_runs("FG-307", BASELINES)
-    # p2 ran for the candidate whose p1 val run scored best.
-    p1 = {name: _official_ex(runs[f"{name} val"]) for name in CANDIDATES}
-    top = max(p1, key=p1.__getitem__)
-    assert runs["top candidate val p2"].manifest.model_ref == runs[f"{top} val"].manifest.model_ref
+    assert_p2_ran_for_the_chosen_model(runs)
     # I6 on the T4: the first 100 val questions again agree with the whole run's.
     i6 = compare_runs(runs["I6 repeat"], runs[f"{I6_MODEL} val"])
     assert i6.ok, i6.describe()

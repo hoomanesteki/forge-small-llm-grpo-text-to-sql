@@ -57,8 +57,11 @@ def _manifest() -> RunManifest:
     )
 
 
-@pytest.mark.phase(3)
-def test_time_guard_stops_and_saves(tmp_path: Path, tiny_model_ref: str) -> None:
+def _trainer(
+    tmp_path: Path, tiny_model_ref: str, **options: Any
+) -> tuple[Trainer, TimeGuardCallback, LocalRunStore]:
+    """A trainer of the tiny model, for 10 steps of 2 rows, with the guard on a one-minute
+    deadline and its run in a local store; ``options`` are more ``TrainingArguments``."""
     repo, revision = split_ref(tiny_model_ref)
     model = AutoModelForCausalLM.from_pretrained(repo, revision=revision)
     generator = torch.Generator().manual_seed(0)
@@ -68,21 +71,35 @@ def test_time_guard_stops_and_saves(tmp_path: Path, tiny_model_ref: str) -> None
     store.put_manifest(_manifest())
     now = [0.0]
     guard = TimeGuardCallback(1, store=store, run_id=RUN, clock=lambda: now[0])
-    out = tmp_path / "out"
     args = TrainingArguments(
-        output_dir=str(out),
+        output_dir=str(tmp_path / "out"),
         max_steps=10,
         per_device_train_batch_size=2,
-        learning_rate=1e-3,
         use_cpu=True,
-        save_strategy="no",  # the only save is the guard's
         logging_strategy="no",
         report_to="none",
         disable_tqdm=True,
         dataloader_num_workers=0,
         seed=0,
+        **options,
     )
-    trainer = Trainer(model=model, args=args, train_dataset=rows, callbacks=[Ticker(now), guard])
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=rows,
+        eval_dataset=rows[:4],
+        callbacks=[Ticker(now), guard],
+    )
+    return trainer, guard, store
+
+
+@pytest.mark.phase(3)
+def test_time_guard_stops_and_saves(tmp_path: Path, tiny_model_ref: str) -> None:
+    out = tmp_path / "out"
+    # The only save is the guard's.
+    trainer, guard, store = _trainer(
+        tmp_path, tiny_model_ref, learning_rate=1e-3, save_strategy="no"
+    )
 
     trainer.train()
 
@@ -103,3 +120,46 @@ def test_time_guard_stops_and_saves(tmp_path: Path, tiny_model_ref: str) -> None
     assert manifest.status == "stopped_time_guard"
     assert manifest.ended_at is not None and manifest.ended_at >= manifest.started_at
     assert manifest.gpu_hours == 0.0  # a local-cpu run holds no GPU
+
+
+class Evaluations(TrainerCallback):
+    """Records the step of each evaluation the trainer runs."""
+
+    def __init__(self) -> None:
+        self.steps: list[int] = []
+
+    def on_evaluate(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
+    ) -> None:
+        self.steps.append(state.global_step)
+
+
+@pytest.mark.phase(3)
+def test_time_guard_saves_under_save_strategy_best(tmp_path: Path, tiny_model_ref: str) -> None:
+    # Keeping only the best checkpoint, the trainer saves a step when its evaluation is a
+    # new best. At learning rate 0 the eval loss never beats step 1's, so no later step is
+    # one, the guard's stop step included, which an evaluation there would leave unsaved.
+    trainer, guard, store = _trainer(
+        tmp_path,
+        tiny_model_ref,
+        learning_rate=0.0,
+        eval_strategy="steps",
+        eval_steps=1,
+        save_strategy="best",
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+    )
+    evaluations = Evaluations()
+    trainer.add_callback(evaluations)
+
+    trainer.train()
+
+    assert guard.stopped_at == trainer.state.global_step == 3
+    # The stop step isn't evaluated: the deadline kept no time for it.
+    assert evaluations.steps == [1, 2]
+    assert trainer.state.best_global_step == 1
+    out = tmp_path / "out"
+    assert sorted(p.name for p in out.iterdir()) == ["checkpoint-1", "checkpoint-3"]
+    assert guard.pushed == str(store.root / RUN / checkpoint_dir(3))
+    assert store.latest_checkpoint(RUN) == "checkpoints/step-000003"
+    assert store.get_manifest(RUN).status == "stopped_time_guard"

@@ -85,10 +85,10 @@ pending:
       - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
       - docs/adr/0012-model-choice.md, the measured table
   - story: FG-307
-    run: top-candidate-val-p2
+    run: chosen-val-p2
     platform: kaggle
     accelerator: NvidiaTeslaT4
-    pick: the candidate whose p1 val run has the best official EX
+    pick: the candidate ADR-0012's rule chooses from the val runs
     configs:
       - configs/eval/qwen3-1-7b-val-p2.yaml
       - configs/eval/qwen3-4b-val-p2.yaml
@@ -99,6 +99,7 @@ pending:
     blocked_on:
       - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
       - both datasets published once (FG-302's pending publish)
+      - FG-301's GRPO memory measurements, which ADR-0012's rule needs
     how: docs/runbook.md, "Baselines", step 2
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop

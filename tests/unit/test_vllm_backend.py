@@ -17,8 +17,19 @@ from forge.core.types import GenParams, Prompt
 from forge.eval.config import EvalConfig
 from forge.eval.runner import model_backend
 from forge.infer import vllm_backend
-from forge.infer.base import THINKING_FLAG, InferenceBackend, render_chat, sample_seed
-from forge.infer.vllm_backend import REQUIREMENTS, VllmBackend, sampling_kwargs
+from forge.infer.base import (
+    MIN_TEMPERATURE,
+    THINKING_FLAG,
+    InferenceBackend,
+    render_chat,
+    sample_seed,
+)
+from forge.infer.vllm_backend import (
+    GPU_MEMORY_UTILIZATION,
+    REQUIREMENTS,
+    VllmBackend,
+    sampling_kwargs,
+)
 from tests.fakes import FakeLoRARequest, FakeVllm, VocabTokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,6 +87,14 @@ def test_sampling_params_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [sp.kwargs for sp in call["sampling_params"]] == [
         sampling_kwargs(params, prompt.example_id) for prompt in PROMPTS
     ]
+
+    # vLLM decodes a temperature between 0 and 0.01 at 0.01, so the backend sends none.
+    backend = VllmBackend("org/model")
+    with pytest.raises(ValueError, match=r"temperature must be 0 or at least 0\.01, got 0\.005"):
+        backend.generate(PROMPTS, GenParams(temperature=0.005))
+    assert len(vllm.calls) == 1
+    backend.generate(PROMPTS, GenParams(temperature=MIN_TEMPERATURE))
+    assert vllm.calls[-1][1]["sampling_params"][0].kwargs["temperature"] == 0.01
 
 
 @pytest.mark.phase(3)
@@ -154,6 +173,22 @@ def test_an_eval_config_in_4bit_loads_its_engine_in_4bit(monkeypatch: pytest.Mon
 
 
 @pytest.mark.phase(3)
+def test_an_eval_config_sets_the_engines_share_of_gpu_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vllm = FakeVllm(_sql_reply).install(monkeypatch)
+    config = EvalConfig(model="org/model@0123abc", backend="vllm", host="kaggle")
+    for share in (None, 0.6):
+        model_backend(dataclasses.replace(config, gpu_memory_utilization=share))
+    # Unset, the engine takes the backend's default.
+    assert [engine["gpu_memory_utilization"] for engine in vllm.engines] == [
+        GPU_MEMORY_UTILIZATION,
+        0.6,
+    ]
+    assert GPU_MEMORY_UTILIZATION == 0.85
+
+
+@pytest.mark.phase(3)
 def test_hub_adapter_is_fetched_at_its_revision_before_the_model_loads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,19 +212,22 @@ def test_hub_adapter_is_fetched_at_its_revision_before_the_model_loads(
 
 
 @pytest.mark.phase(3)
-def test_a_thinking_template_goes_through_chat_with_thinking_off(
+def test_a_thinking_template_is_rendered_by_render_chat_with_thinking_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vllm = FakeVllm(_sql_reply, tokenizer=VocabTokenizer(QWEN3_TEMPLATE)).install(monkeypatch)
     VllmBackend("Qwen/Qwen3-1.7B").generate(PROMPTS, GenParams())
+    # As any other template is, so a Qwen3 prompt is the hf backend's too, token for token
+    # (tests/smoke/test_prompt_rendering.py); vLLM's own chat rendering is never used.
     [(method, call)] = vllm.calls
-    assert method == "chat" and call["chat_template_kwargs"] == {THINKING_FLAG: False}
+    assert method == "generate" and "chat_template_kwargs" not in call
     assert call["use_tqdm"] is False and call["lora_request"] is None
-    # vLLM rendered each chat with the flag off and the assistant turn opened.
+    # Each chat rendered with the flag off and the assistant turn opened.
     assert [kwargs for _, kwargs in vllm.tokenizer.calls] == [
         {"tokenize": False, "add_generation_prompt": True, THINKING_FLAG: False}
     ] * 2
     assert [chat for chat, _ in vllm.tokenizer.calls] == [list(p.messages) for p in PROMPTS]
+    assert vllm.prompts == [render_chat(VocabTokenizer(), p.messages) for p in PROMPTS]
 
 
 @pytest.mark.phase(3)

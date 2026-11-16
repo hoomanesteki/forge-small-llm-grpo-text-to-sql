@@ -9,6 +9,13 @@ with a run store, the callback pushes that folder to ``checkpoints/step-NNNNNN``
 run (``forge.ops.hub.checkpoint_dir``), where the next session resumes from it, marks
 the run's stored manifest ``stopped_time_guard``, and prunes the run's older checkpoints
 as retention says. The last step needs no guard, since the trainer stops after it anyway.
+
+Once the guard stops training, nothing but that save runs: no evaluation, at the stop step
+or at its epoch's end, since the deadline kept no time for one. That also keeps the save
+whatever the save strategy: under ``save_strategy="best"`` an evaluation would make the
+trainer save the step only if its metric were a new best. The trainer runs its own
+``DefaultFlowCallback`` before any callback it is given, so the guard's flags are the last
+set. Should something still clear the save, the epoch's end asks for it again.
 """
 
 from __future__ import annotations
@@ -52,6 +59,7 @@ class TimeGuardCallback(TrainerCallback):
         self.store = store
         self.run_id = run_id
         self.stopped_at: int | None = None  # the step training stopped after
+        self.saved = False  # whether the trainer has saved that step
         self.pushed: str | None = None  # where the store holds that step's checkpoint
 
     def on_train_begin(
@@ -75,15 +83,26 @@ class TimeGuardCallback(TrainerCallback):
             self.stopped_at = state.global_step
             control.should_save = True
             control.should_training_stop = True
+            control.should_evaluate = False
+
+    def on_epoch_end(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
+    ) -> None:
+        # The trainer evaluates and saves once more after the stop step breaks its epoch.
+        if self.stopped_at is None:
+            return
+        control.should_evaluate = False
+        control.should_save = not self.saved
 
     def on_save(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
     ) -> None:
-        # Only the save the guard asked for, and only once: the trainer may save the same
-        # step again at the end of its epoch.
-        if self.stopped_at != state.global_step or self.pushed is not None:
+        # Only the save the guard asked for, and only once: another one of the same step
+        # pushes nothing again.
+        if self.stopped_at != state.global_step:
             return
-        if self.store is None or self.run_id is None:
+        self.saved = True
+        if self.pushed is not None or self.store is None or self.run_id is None:
             return
         if args.output_dir is None:  # the trainer fills it in before it saves anything
             raise ValueError("the trainer saved a checkpoint, but its args name no output_dir")

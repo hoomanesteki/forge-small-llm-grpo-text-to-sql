@@ -157,15 +157,18 @@ row.
 
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the
-GPU's memory, and LoRA (rank up to 64) only when the config names an `adapter`, a folder or
-a Hub repo fetched at its `@revision`. Qwen3 prompts go through `LLM.chat` with thinking off;
-other templates are rendered by `render_chat`, as on the laptop. Decoding takes only the
-config's settings, never a checkpoint's `generation_config.json` defaults, and each question
-has a seed of its own. The preflight and the job share one engine, loaded once, since a
-second might not fit beside the first. `forge eval run --backend vllm` on the laptop is
-refused: its manifest would call a GPU run `local-cpu` (ADR-0016). A config with
-`quantization: bitsandbytes` loads the weights in 4-bit, for a reference model too big for
-the T4 in fp16; the manifest's config then records it.
+GPU's memory unless the config sets another share in `gpu_memory_utilization` (which the
+manifest's config then records), and LoRA (rank up to 64) only when the config names an
+`adapter`, a folder or a Hub repo fetched at its `@revision`. Every prompt is rendered by
+`render_chat`, Qwen3's with thinking off, and sent as the token ids the hf backend gives its
+model on the laptop, never through vLLM's own `LLM.chat`. Decoding takes only the config's settings, never a
+checkpoint's `generation_config.json` defaults, and each question has a seed of its own.
+A temperature between 0 and 0.01 is refused, on every backend, since vLLM would decode it
+at 0.01. The preflight and the job share one engine, loaded once, since a second might not
+fit beside the first. `forge eval run --backend vllm` on the laptop is refused: its manifest
+would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: bitsandbytes`
+loads the weights in 4-bit, for a reference model too big for the T4 in fp16; the
+manifest's config then records it.
 
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
@@ -311,7 +314,8 @@ Push them in this order, from one clean commit that passed `make smoke`:
 
 1. The candidates on val with p1: `qwen3-1-7b-val`, `qwen3-4b-val` and
    `qwen2-5-coder-1-5b-val`.
-2. The top candidate by val official EX with p2: its `<name>-val-p2` (ADR-0007).
+2. The model ADR-0012's rule chooses from step 1's runs, with p2: its `<name>-val-p2`
+   (ADR-0007). The rule also needs FG-301's GRPO memory check, so this waits for it.
 3. The reference on val, in 4-bit: `qwen3-8b-val`.
 4. I6's repeat: `qwen2-5-coder-1-5b-val-100`, the first 100 val questions again.
 5. The model ADR-0012's rule chooses, and the reference, on dev, once each:

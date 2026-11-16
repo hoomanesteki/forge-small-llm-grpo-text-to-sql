@@ -128,6 +128,7 @@ Work discovered along the way that is not a plan story.
 | FG-392 | Gate 3 fixes: kernel jobs | done | A kernel's eval job stops at a deadline counted from the kernel's start to the push's timeout (`--timeout-s`), a tenth kept back for official EX and the upload, then uploads and resumes; `forge eval run --deadline-minutes` does the same; the restore is the first stage, so a resume that fails early still carries the run; every stage result, the error and `error.txt` are redacted, with secrets cleaned as huggingface_hub sends them; the data is checked against the wheel's pinned list; a dev look is logged as soon as Kaggle accepts the push, one row a run id across resumes (ADR-0004 notes); a push that dropped a source is recorded with a warning; run ids that make no kernel slug and `--resume --emit-notebook` are refused before any upload; the runbook says when the code dataset is published |
 | FG-393 | Gate 3 fixes: run store | done | Hub downloads retry network failures, and `get_manifest` tells a missing run (`RunNotFound`) from an outage (`StoreUnavailable`, with its cause); only refused or dropped connections, timeouts, 408, 429 and 5xx count, a `RuntimeError` only with such a cause; each failure is retried by huggingface_hub or by the store, never both, measured with the real client on an in-process transport (at most 23 s or 14 s of waits); a retried pull starts from an empty folder; `--store hub`, `forge runs push` and the kernel's upload compare the two copies' sessions (`forge.ops.run_copies`), fetch the store's when it is newer, and refuse copies that went separate ways; a pull and `forge kaggle output` leave no file the new copy lacks but `kernels.json`, `kernel/` and the lock; `publish-data` counts only a ready dataset as there, uploads a new version over a failed or deleted one, refuses one Kaggle is still processing, and removes `build/kaggle-data` after the upload (`--keep-build`) |
 | FG-394 | Gate 3 fixes: throughput spike | done | Fixed and tested on CPU with fakes, as FG-301 was; the spike itself still waits on the Kaggle account. The `trl` stack's venv is seeded with pip, which counts the image's torch where uv does not, and the install fails if a torch lands in the venv; every bench runs with `CUDA_VISIBLE_DEVICES=0` while `env` sees all GPUs, and a GRPO bench records `n_gpu` and the completions TRL scored a step; GRPO prompts are rendered with thinking off for every stack (a template without the switch fails the stage), with the mean completion length; `vllm:Qwen/Qwen3-8B:bnb` loads the 4-bit reference as FG-306's backend asks; each stage kind has a time cap (`stage_caps_minutes`) and the GRPO stacks run before vLLM's; in an IPython kernel the baked argv wins, children are marked with `FORGE_SPIKE_CHILD`, `launch` is written before parsing, and the children run this script's file or the cell's source written out |
+| FG-395 | Gate 3 fixes: time guard and vLLM backend | done | `TimeGuardCallback` turns evaluation off at its stop step and at that epoch's end, so `save_strategy="best"` can't drop the guard's save and no unbudgeted evaluation runs, and the epoch's end asks for the save again if something cleared it (tested on the tiny model); the vLLM backend renders every prompt with `render_chat` and sends `LLM.generate` the token ids the hf backend feeds its model, Qwen3's too, never `LLM.chat`, compared with the tiny model's real tokenizer on its own and a Qwen3-style template; `check_params` refuses a temperature between 0 and 0.01, which vLLM would raise to 0.01; `gpu_memory_utilization` is an eval option for vllm (config file or `--gpu-memory-utilization`), in the manifest's config only when set; the p2 run is for the model ADR-0012's rule chooses, as plan section 3.7 says (ADR-0007, `pending.yaml`, the runbook, `test_artifacts.py`) |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -779,9 +780,9 @@ Work discovered along the way that is not a plan story.
   "Baselines" names each run `<date>-<config name>-<sha7>`; config names are spelled as run
   ids, without dots, for that (FG-307).
 - `docs/runs/pending.yaml` keeps FG-301's one entry per run, with `since` added to every
-  entry. FG-307's entries list their `configs`, and those that run one of them (the top
-  candidate's p2, the chosen model's dev) say `pick`, so their estimate is the dearest
-  (FG-307).
+  entry. FG-307's entries list their `configs`, and those that run one of them (the chosen
+  model's p2 and dev; the p2 was the top candidate's before FG-395) say `pick`, so their
+  estimate is the dearest (FG-307).
 - `test_every_eval_config_is_runnable` refused `split: dev` in every config; it now does
   for pilots (`device: mps`), and checks a vllm config with a kernel host and a dev config
   with a reason, as `forge kaggle run` does (FG-307).
@@ -851,3 +852,16 @@ Work discovered along the way that is not a plan story.
 - publish-data uploads a new version over a failed or deleted `forge-spider`, which no real
   Kaggle account has tried yet; the first real publish (`docs/runs/pending.yaml`, FG-302) shows
   whether Kaggle takes a version there or wants the dataset deleted first (FG-393).
+- Under `save_strategy="best"` transformers 5.23 sets `should_save` to whether a step's
+  evaluation is a new best after every callback's `on_step_end`, so a callback keeps its save
+  only by turning that evaluation off. The guard can, since the Trainer runs its own
+  `DefaultFlowCallback` before the callbacks it is given (FG-395).
+- A temperature between 0 and 0.01 is now refused on hf too, where it sampled as asked: a
+  config decodes alike on both backends, so 0.01 is the lowest sampling temperature a run
+  takes (FG-395).
+- `gpu_memory_utilization` is also a `forge eval run` option, since a config file's keys are
+  that command's defaults; with hf it is refused, as vLLM's share of a GPU means nothing on
+  the CPU or MPS (FG-395).
+- The plan's FG-307 block still says "the top candidate with p2", against section 3.7's "for
+  the chosen model"; ADR-0007 records why section 3.7 holds. The p2 run now waits for
+  FG-301's memory check, as the chosen model's dev run does (FG-395).
