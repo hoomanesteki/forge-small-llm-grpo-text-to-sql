@@ -6,6 +6,9 @@ wheel is installed it needs only the standard library, and the job modules
 (``forge.eval.runner``, later ``forge.train``) are imported only when their stage runs, so
 the script can be tested on a laptop with fakes. The stages, in order (``STAGES``):
 
+- restore: on a resume, the run's files so far, copied from the last attempt's kernel
+  output, mounted under the input folder. It comes first, so that whatever fails after,
+  this attempt's output holds the run too and the next resume carries on from it.
 - env: the interpreter, the platform and the GPUs, for the log.
 - code: the code dataset under the input folder, whose ``GIT_SHA`` must be the commit the
   job was pushed at. That commit goes to the job in ``FORGE_CODE_SHA``, which a manifest
@@ -21,8 +24,8 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
   the model the preflight loaded: a vLLM engine holds most of the GPU's memory while it
   lives, so a second one might not fit beside it, and loading once saves GPU time. A dev
   job's preflight answers val questions, so dev loads once, in the job.
-- job: the job itself, its files in ``<work>/runs/<run_id>/``. On a resume, the earlier
-  attempt's files come from its kernel's output, mounted under the input folder. With
+- job: the job itself, its files in ``<work>/runs/<run_id>/``, where a resume carries on
+  from the files the restore stage brought back. With
   ``--timeout-s``, the push's timeout, an eval job stops between batches before Kaggle
   would end the session (``forge.ops.timeguard.eval_deadline``, counted from the kernel's
   start), as ``stopped_time_guard``, and its run is uploaded and resumed like any other.
@@ -41,8 +44,9 @@ an error might not keep its output; ``forge kaggle wait`` reads status.json inst
 The GPU is held from the kernel's start to its end, setup and upload included, so that is
 the session the ledger counts. status.json gives its ``started_at`` and ``ended_at``, and
 the same span goes into the run's ``sessions.json`` (``forge.ops.sessions``): the session
-the job began in this kernel is stretched to it, or, when none began, as when a resumed
-job fails before its run starts again, the kernel's session is added. ``session`` in
+the job began in this kernel, one past those the restore stage brought back, is stretched
+to it, or, when none began, as when a resumed job fails before its run starts again, the
+kernel's session is added. ``session`` in
 status.json is its number. The upload stage stretches it up to the upload first, so the
 run store's copy holds nearly all of it.
 """
@@ -72,7 +76,7 @@ KERNEL_ARGV: list[str] = []
 
 STATUS_SCHEMA = "forge-kaggle-job/1"
 STATUS_FILE = "status.json"
-STAGES = ("env", "code", "install", "data", "secrets", "preflight", "job", "upload")
+STAGES = ("restore", "env", "code", "install", "data", "secrets", "preflight", "job", "upload")
 PREFLIGHT_EXAMPLES = 5
 SECRET_LABELS = ("HF_TOKEN", "WANDB_API_KEY")
 # The names forge.ops.kaggle and forge.ops.manifest use; this script can't import them
@@ -115,6 +119,7 @@ class Kernel:
     model: tuple[Any, Any] | None = None
     clock: Clock = time.monotonic
     started: float = field(init=False)  # on clock, when the kernel's time began
+    sessions_before: int = 0  # the run's sessions the restore stage brought back
 
     def __post_init__(self) -> None:
         self.started = self.clock()
@@ -152,6 +157,23 @@ def _json_object(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise argparse.ArgumentTypeError(f"must be a JSON object, got {text!r}")
     return value
+
+
+def restore_stage(kernel: Kernel) -> dict[str, Any] | str:
+    """Copy the run's files from its last attempt's output, so the job carries on."""
+    if not kernel.args.resume:
+        return "skipped: a new run"
+    where = f"runs/{kernel.args.run_id}/{MANIFEST_FILE}"
+    manifest = _one(Path(kernel.args.input_dir), where, "the last attempt's output")
+    if kernel.run_dir.exists():
+        raise JobError(f"{kernel.run_dir} exists already, so the last attempt can't go there")
+    # status.json said how that attempt ended; this one writes its own.
+    shutil.copytree(manifest.parent, kernel.run_dir, ignore=shutil.ignore_patterns(STATUS_FILE))
+    files = sum(path.is_file() for path in kernel.run_dir.rglob("*"))
+    sessions = kernel.run_dir / SESSIONS_FILE
+    if sessions.is_file():
+        kernel.sessions_before = len(json.loads(sessions.read_text(encoding="utf-8")))
+    return {"from": str(manifest.parent), "files": files}
 
 
 def env_stage(kernel: Kernel) -> dict[str, Any]:
@@ -299,20 +321,9 @@ def preflight_stage(kernel: Kernel) -> dict[str, Any] | str:
 
 
 def job_stage(kernel: Kernel) -> dict[str, Any]:
-    if kernel.args.resume:
-        _restore(kernel)
     status = JOBS[kernel.args.job](kernel, False)
     kernel.status["status"] = status
     return {"status": status}
-
-
-def _restore(kernel: Kernel) -> None:
-    """Copy the run's files from its last attempt's output, so the job carries on."""
-    where = f"runs/{kernel.args.run_id}/manifest.json"
-    manifest = _one(Path(kernel.args.input_dir), where, "the last attempt's output")
-    if kernel.run_dir.exists():
-        raise JobError(f"{kernel.run_dir} exists already, so the last attempt can't go there")
-    shutil.copytree(manifest.parent, kernel.run_dir)
 
 
 def eval_job(kernel: Kernel, preflight: bool) -> str:
@@ -365,7 +376,7 @@ def upload_stage(kernel: Kernel) -> str:
     from forge.ops.hub import HubRunStore
 
     repo = kernel.args.run_store
-    _record_session(kernel.run_dir, kernel.status["started_at"], _now())
+    _record_session(kernel, _now())
     try:
         HubRunStore(repo, token=token).put_folder(kernel.args.run_id, kernel.run_dir)
     # The run is complete in the kernel output whatever the Hub says, so a failed upload
@@ -377,6 +388,7 @@ def upload_stage(kernel: Kernel) -> str:
 
 JOBS: Mapping[str, Callable[[Kernel, bool], str]] = {"eval": eval_job}
 STAGE_FUNCTIONS: Mapping[str, Callable[[Kernel], Any]] = {
+    "restore": restore_stage,
     "env": env_stage,
     "code": code_stage,
     "install": install_stage,
@@ -433,9 +445,7 @@ def main(
         signal.signal(signal.SIGTERM, previous)
         _close_manifest(kernel.run_dir)
         status["ended_at"] = _now()
-        status["session"] = _record_session(
-            kernel.run_dir, status["started_at"], status["ended_at"]
-        )
+        status["session"] = _record_session(kernel, status["ended_at"])
         _write_json(kernel.run_dir / STATUS_FILE, status)
         print(f"[forge] {args.job} {args.run_id}: {status['status']}", flush=True)
     return 0
@@ -451,27 +461,28 @@ def _close_manifest(run_dir: Path) -> None:
             _write_json(path, manifest)
 
 
-def _record_session(run_dir: Path, started_at: str, ended_at: str) -> int | None:
-    """Make the run's session in this kernel span ``started_at`` to ``ended_at``, the
-    kernel's, and return its number; None when the kernel holds no run.
+def _record_session(kernel: Kernel, ended_at: str) -> int | None:
+    """Make the run's session in this kernel span the kernel's start to ``ended_at``, and
+    return its number; None when the kernel holds no run.
 
-    The session the job began here is the run's last, begun after the kernel started. A
-    session still running then failed. When the job began none, the kernel's is added, with
-    the run's status if the run ended in this kernel, and failed if not.
+    The session the job began here is the run's last, past those the restore brought back;
+    counted rather than told by its start, since times here are whole seconds. A session
+    still running then failed. When the job began none, the kernel's is added, with the
+    run's status if the run ended in this kernel, and failed if not.
     """
+    run_dir, started_at = kernel.run_dir, kernel.status["started_at"]
     manifest_path = run_dir / MANIFEST_FILE
     if not manifest_path.is_file():
         return None
     path = run_dir / SESSIONS_FILE
     sessions = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
-    start = datetime.fromisoformat(started_at)
-    if sessions and datetime.fromisoformat(sessions[-1]["started_at"]) >= start:
+    if len(sessions) > kernel.sessions_before:
         session = sessions[-1]
         if session["status"] == "running":
             session["status"] = "failed"
     else:
         run = json.loads(manifest_path.read_text(encoding="utf-8"))
-        ended = run.get("ended_at")
+        ended, start = run.get("ended_at"), datetime.fromisoformat(started_at)
         here = ended is not None and datetime.fromisoformat(ended) >= start
         session = {"status": run["status"] if here else "failed"}
         sessions.append(session)

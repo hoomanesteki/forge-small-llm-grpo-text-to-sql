@@ -117,27 +117,32 @@ add` takes today's UTC date unless `--on` names another. West of UTC, a job push
 evening is dated the next day in all of them, and this week's window counts its hours at
 once. Rows already committed keep the dates they were written with.
 
-In the kernel, `entry.py` runs its stages in order: env (the interpreter, for the log),
-code (the code dataset's `GIT_SHA` must be the pushed commit), install (`pip install
---no-deps` the wheel, then `requirements-gpu.txt`; it names any package the wheel needs
-that the image lacks), data (`spider.sha256` found by glob, `database.zip` unpacked if
-Kaggle left it packed, every file checked), secrets, preflight (the same job on 5 examples,
-in `preflight/`), job, and upload (`runs/<run_id>/` to the Hub run store, only with an
-`HF_TOKEN`; see Run store). Whatever happens, it writes `runs/<run_id>/status.json` and
-marks a manifest left `running` as failed. It exits 0 even when the job fails, since a
-kernel that ends in an error might not keep its output, so a COMPLETE kernel is not yet a
-finished job: `forge kaggle wait` reads `status.json` and exits 0 only for `finished`.
+In the kernel, `entry.py` runs its stages in order: restore (on a resume, the run's files
+from the last attempt's output, first, so that an attempt failing at any later stage still
+carries the run to the next resume), env (the interpreter, for the log), code (the code
+dataset's `GIT_SHA` must be the pushed commit), install (`pip install --no-deps` the wheel,
+then `requirements-gpu.txt`; it names any package the wheel needs that the image lacks),
+data (`spider.sha256` found by glob, `database.zip` unpacked if Kaggle left it packed,
+every file checked), secrets, preflight (the same job on 5 examples, in `preflight/`), job,
+and upload (`runs/<run_id>/` to the Hub run store, only with an `HF_TOKEN`; see Run store).
+Whatever
+happens, it writes `runs/<run_id>/status.json` and marks a manifest left `running` as
+failed. It exits 0 even when the job fails, since a kernel that ends in an error might not
+keep its output, so a COMPLETE kernel is not yet a finished job: `forge kaggle wait` reads
+`status.json` and exits 0 only for `finished`.
 
 Sessions. The kernel holds its GPU from its start to its end, the setup, preflight, model
 load and upload included, so that is the session its ledger row counts. `status.json`
 gives the session's `started_at` and `ended_at` and its number in the run (`session`), and
 the run's `sessions.json` gets the same span: the session the job began is stretched to
 the kernel's, or, when a resumed job fails before its run starts again, the kernel's
-session is added as failed. A kernel that fails before its job holds no run and logs no
-row; add it with `forge ledger add`. The upload stage first stretches the session up to the
-upload, so the Hub's copy misses only the upload's own minutes; `forge kaggle wait` logs
-the whole session first. A resumed run's output holds every session so far, so a session
-that was never waited for still gets its row.
+session is added as failed. A resumed run's kernel holds the run from its restore stage,
+so one that fails before its job gets that failed session too. A new run's kernel that
+fails before its job holds no run and logs no row; add it with `forge ledger add`. The
+upload stage first stretches the session up to the upload, so the Hub's copy misses only
+the upload's own minutes; `forge kaggle wait` logs the whole session first. A resumed run's
+output holds every session so far, so a session that was never waited for still gets its
+row.
 
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the

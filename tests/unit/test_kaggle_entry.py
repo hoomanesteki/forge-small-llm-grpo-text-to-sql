@@ -134,6 +134,7 @@ def test_a_finished_job_runs_every_stage_in_order(
     secrets = status["stages"]["secrets"]["result"]
     assert set(secrets) == {"HF_TOKEN", "WANDB_API_KEY"}
     assert status["stages"]["upload"]["result"].startswith("skipped: no HF_TOKEN")
+    assert status["stages"]["restore"]["result"] == "skipped: a new run"
 
 
 @pytest.mark.phase(3)
@@ -319,6 +320,7 @@ def test_a_resume_starts_from_the_last_attempts_output(
     (last / "eval").mkdir(parents=True)
     (last / "manifest.json").write_text(json.dumps({"status": "failed"}))
     (last / "eval" / "val-scores.jsonl").write_text("{}\n")
+    (last / "status.json").write_text(json.dumps({"status": "failed", "stage": "job"}))
     seen: list[list[str]] = []
 
     def resumed(kernel: Any, preflight: bool) -> str:
@@ -330,9 +332,14 @@ def test_a_resume_starts_from_the_last_attempts_output(
 
     script.main(argv(kernel_root, "--resume"), run=lambda c: None)
 
-    assert status_of(kernel_root)["status"] == "finished"
-    # The preflight sees a fresh folder; the job, the last attempt's files.
-    assert seen == [[], ["eval", "eval/val-scores.jsonl", "manifest.json"]]
+    status = status_of(kernel_root)
+    assert status["status"] == "finished"
+    assert status["stages"]["restore"]["result"] == {"from": str(last), "files": 2}
+    # The files are back before any stage that can fail, the preflight's included, so
+    # this attempt's output holds the run whatever happens. The last attempt's status.json
+    # said how it ended; this one has its own.
+    restored = ["eval", "eval/val-scores.jsonl", "manifest.json"]
+    assert seen == [restored, restored]
 
 
 def _sessions_of(root: Path) -> list[dict[str, Any]]:
