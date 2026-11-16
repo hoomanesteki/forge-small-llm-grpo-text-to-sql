@@ -134,6 +134,7 @@ Work discovered along the way that is not a plan story.
 | FG-397 | Kaggle's answer for a missing dataset | done | The first real `forge kaggle publish-data` stopped at `kaggle datasets status`: for a slug in the owner's own namespace that holds no dataset, the live API answers 403, "You don't have access to this resource.", where the client expected the 404 "not found" the research notes describe, so a first publish could never create its dataset. Both answers now mean "no dataset yet", tested with the live API's exact text |
 | FG-398 | Kaggle live-run fixes | done | What the first live Kaggle runs on 2026-11-16 showed, each fixed after a test that failed first, with the kaggle CLI and vLLM faked: a kernel title or slug over Kaggle's 50 characters is refused before any push, and a run whose `forge-<run_id>` would pass it gets the run id cut at a dash and 8 hex digits of its sha256 (`kernel_name`), found by the run id through `kernels.json` as before (FG-303's 57-character case and its resume tested); training jobs install `kaggle/requirements-train-gpu.txt`, the spike's `trl` stack with no vLLM, published beside the eval list, and the install stage names the file; the 4-bit reference is `Qwen/Qwen3-8B-AWQ` at 4da05a8 with `quantization: awq` (`scripts/check_models.py` ok on 2026-11-16), bitsandbytes refused in one line, its estimates kept as no run has measured it; a push whose CLI fails is checked with `kaggle kernels status`, and counts as made, recorded with its dev look and a warning, when Kaggle has the attempt's kernel |
 | FG-492 | Gate 4 fixes: run checks | done | One parser of a checkpoint adapter, `forge.ops.adapters.checkpoint_ref` (`<folder>/<run_id>/checkpoints/<name>`, `final`, `best` or a step, a trailing `/` or a leading `./` alike), for `forge kaggle run --adapter`, which pushes it spelled the one way and refuses before any upload a checkpoint outside `runs/`, a folder on this machine, a bad name or a run this machine knows trained another model, for the kernel's fetch and for `forge runs promote`; an eval run with an adapter records its files' `adapter_sha256` in its outputs (a local folder, or the Hub repo's two files), a resume must find the same files, and an SFT run records `adapter_sha256:<checkpoint>` for each checkpoint it keeps, which promote checks; `forge runs promote --config <base val config>` and `checkpoint_scores(base=...)` take only eval runs of the base model's full val config with the checkpoint's files alone added, and `test_phase4_sft_runs_present` checks the same, with fixture runs in `test_sft_runs_are_scored_on_their_base_models_full_val`; `test_phase4_compare_report_rebuildable` and `test_sft_notes_cite_only_report_numbers` look for the main model's comparison (the val run of the main run's best/ against FG-307's run of its config) and skip only while FG-405 is in `docs/runs/pending.yaml`; a kept checkpoint whose push fails waits out of the trainer's rotation and is pushed again after the next push that goes through and at the end, tested on the tiny model; ADR-0017 records the `TrainBackend` signatures and `TrlBackend` on cpu, mps and cuda in plan section 3.5 and FG-402; `make smoke` failed at the pilots' commit db0d8d8 on one smoke assertion, which 510e07d fixed with no code change (`git diff --stat db0d8d8 510e07d -- src configs kaggle scripts Makefile pyproject.toml uv.lock` prints nothing, and `-- tests/smoke` shows `tests/smoke/test_sft_smoke.py`, 7 insertions and 1 deletion), recorded in `docs/runs/README.md`; the runs stand |
+| FG-493 | Gate 4 fixes: ADR and notes | done | ADR-0010 corrected with a dated note: `tiny-smoke.yaml` takes the starting values by omission, the base trains in float32 on the CPU and on MPS in bfloat16 from macOS 14 (float32 before), as `precision_for` and the pilot's manifest say, and the pilot's length, batch split, padding and subset are quoted from its config and manifest, which `test_adr_0010_says_what_the_configs_and_the_pilot_did` checks; `test_sft_notes_cite_only_report_numbers` finds each number of a bullet on the report row or section named before it, in the report's order, against the report its list reads, and the notes no longer say every class past schema linking grew or that all where, projection, group_order and value failures run; `forge data build-sft`, `forge train sft` and `forge runs promote` without the cpu extra print one `error:` line naming it; `check_targets` takes PEFT's suffix targets such as `self_attn.q_proj`; a section with nothing under it is called empty; `run_sft` checks the tree once and its manifest names that commit; `wandb/` is ignored; `forge ledger record` says to run it again for a run still going, and the ledger header names it; the stale FG-403 note on `date.today()` is marked fixed by FG-391 |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -1063,7 +1064,8 @@ Work discovered along the way that is not a plan story.
 - Five tests in `tests/unit/test_kaggle_runner.py` build the expected run id from
   `date.today()`, in local time, while `plan_job` dates run ids in UTC, so they fail on a
   machine west of UTC between UTC midnight and local midnight. CI runs in UTC; `TZ=UTC make
-  check` passes locally (FG-403).
+  check` passes locally (FG-403). Fixed by FG-391, which this note came after on the replay:
+  they take the UTC date (`_today()`), so they pass in any time zone (FG-493).
 - On the laptop (16 GB, about 8 GB of it held by a virtual machine), PyTorch's MPS memory
   grew past what was free when nothing capped it: the first SFT probes reached 9 to 11 GB
   and stalled in swap. `PYTORCH_MPS_HIGH_WATERMARK_RATIO` caps it as a share of the
@@ -1166,3 +1168,19 @@ Work discovered along the way that is not a plan story.
   SFT steps name `configs/eval/qwen3-1-7b-val.yaml` and `configs/eval/qwen3-4b-val.yaml`;
   if ADR-0012 or ADR-0007 pick another model or prompt, the config changes with them
   (FG-492).
+- `forge runs promote` imported `forge.train.sft`, and so datasets, outside its error
+  handling too, so it gets the same one-line cpu extra error as `forge data build-sft` and
+  `forge train sft` (FG-493).
+- A training config's `model_dump`, which a kernel job's options carry, writes the trainer
+  `run.kind` doesn't name as null, so only that section may be null; any other section
+  written with nothing under it is refused as empty (FG-493).
+- The notes check reads a number as cited for the report row or section the bullet named
+  last before it, so a sentence names its row before its numbers. Class names that are
+  English words (where, value, other, join) count as labels too: a stray one before a
+  number fails the check rather than passing it (FG-493).
+- Run b's committed scores show a few group_order and projection failures that never ran
+  (`valid` false), which the compare report can't show, so the notes say nearly all of
+  those classes' failures run; a valid-by-class count in `forge report compare` would let
+  the notes cite it (FG-493).
+- `forge.train.callbacks.wandb_callback` leaves `WANDB_DIR` unset, so W&B still writes
+  `wandb/` where training starts; `.gitignore` takes it at any depth (FG-493).

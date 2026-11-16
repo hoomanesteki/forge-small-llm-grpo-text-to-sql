@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 import yaml
 
 from forge.data.prompts import MAX_PROMPT_TOKENS
 from forge.eval.config import EvalConfig, read_config_file, read_config_sections
+from forge.train.backends import precision_for
 from forge.train.config import (
     LORA_TARGETS,
     GrpoConfig,
@@ -321,3 +325,68 @@ def test_sft_runs_wait_in_pending_within_the_story_budget() -> None:
         ), evaluated
     # Plan section 3.8: 1 h for the pilot, 2.5 h for the main run and 1 h of val runs.
     assert sum(entry["est_gpu_hours"] for entry in entries.values()) == pytest.approx(4.5)
+
+
+ADR_0010 = ROOT / "docs" / "adr" / "0010-lora-sft-starting-point.md"
+# FG-491's committed SFT pilot, trained from configs/sft/pilot-qwen25coder05b-mps.yaml.
+PILOT_SFT_MANIFEST = (
+    ROOT / "docs" / "runs" / "2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8" / "manifest.json"
+)
+# The starting values a config states, or leaves to ADR-0010 by omission.
+STARTING_SFT = {
+    "learning_rate",
+    "num_train_epochs",
+    "lr_scheduler_type",
+    "warmup_ratio",
+    "max_length",
+}
+
+
+def _quotes(text: str) -> list[str]:
+    """The ``key: value`` settings ``text`` quotes in code spans, as a YAML or JSON line."""
+    return [quote for quote in re.findall(r"`([^`\n]+)`", text) if ": " in quote]
+
+
+def _lines(text: str) -> set[str]:
+    """The settings of a YAML or JSON file, a line each, as a quote would give them."""
+    return {line.split("#", 1)[0].strip().rstrip(",") for line in text.splitlines()}
+
+
+@pytest.mark.phase(4)
+def test_adr_0010_says_what_the_configs_and_the_pilot_did(monkeypatch: pytest.MonkeyPatch) -> None:
+    adr = ADR_0010.read_text(encoding="utf-8")
+    assert "- Status: accepted" in adr
+    rows = {
+        cells[1].strip(): cells[2].strip()
+        for cells in (line.split("|") for line in adr.splitlines() if line.startswith("| "))
+    }
+    # The base's dtype on each device is the one precision_for trains in, on any macOS.
+    assert rows["Base on the CPU"] == precision_for("cpu").dtype
+    for macos_14 in (True, False):
+        monkeypatch.setattr(
+            torch.backends.mps, "is_macos_or_newer", lambda *_, newer=macos_14: newer
+        )
+        assert precision_for("mps").dtype in rows["Base on MPS"], macos_14
+    pilot = PILOT_SFT_MANIFEST.read_text(encoding="utf-8")
+    assert json.loads(pilot)["config"]["trainer"]["dtype"] in rows["Base on MPS"]
+
+    # A config that leaves a starting value out is named as taking it by omission, with the
+    # settings it does state quoted from its file.
+    decision = adr.split("## Decision", 1)[1].split("\n|", 1)[0]
+    for name in SFT_MODELS:
+        path = ROOT / "configs" / "sft" / name
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        omits = "lora" not in raw or not STARTING_SFT.issubset(raw["sft"])
+        assert (f"`configs/sft/{name}`" in decision) == omits, name
+    smoke = _lines((ROOT / "configs" / "sft" / "tiny-smoke.yaml").read_text(encoding="utf-8"))
+    assert _quotes(decision) and set(_quotes(decision)) <= smoke
+
+    # The note on the pilot quotes its config and manifest, and states no number that
+    # neither they nor the table above hold.
+    note = adr.split("## Notes", 1)[1]
+    config = (ROOT / "configs" / "sft" / LOCAL_PILOT).read_text(encoding="utf-8")
+    assert _quotes(note) and set(_quotes(note)) <= _lines(config) | _lines(pilot)
+    prose = re.sub(r"`[^`\n]*`|\b(?:FG|ADR)-\d+\b|\b\d{4}-\d{2}-\d{2}\b", " ", note)
+    table = "\n".join(line for line in adr.splitlines() if line.startswith("| "))
+    held = set(re.findall(r"\d[\d,.]*\d|\d", table + config + pilot))
+    assert set(re.findall(r"\d[\d,.]*\d|\d", prose)) <= held
