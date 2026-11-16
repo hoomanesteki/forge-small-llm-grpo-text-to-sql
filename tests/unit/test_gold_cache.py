@@ -9,15 +9,19 @@ from pathlib import Path
 import pytest
 
 from forge.core.types import Example, ExecResult
-from forge.data.splits import load_val
+from forge.data.manifest import data_manifest_hash
+from forge.data.spider import FAILING_GOLD_IDS
+from forge.data.splits import SplitLeak, load_train, load_val
 from forge.eval import gold_cache
 from forge.eval.gold_cache import (
     FORMAT,
     CacheHeader,
     GoldFailed,
+    SplitGold,
     cache_path,
     gold_results,
     read_cache,
+    split_gold,
     write_cache,
 )
 
@@ -119,3 +123,37 @@ def test_gold_runs_once_and_a_failing_gold_is_refused(
     with pytest.raises(GoldFailed, match=rf"{broken.id} fails on flight_1 \(no_such_column"):
         gold_results([broken], "val", "d" * 64, cache_root=tmp_path)
     assert not cache_path(tmp_path, "val", "d" * 64).exists()
+
+
+@pytest.mark.phase(5)
+def test_split_gold_serves_train_and_val_only(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = data_manifest_hash(spider_mini)
+    train = split_gold("train", cache_root=tmp_path)
+    assert train.built
+    assert train.path == cache_path(tmp_path, "train", digest)
+    assert train.results.keys() == {e.id for e in load_train() if e.id not in FAILING_GOLD_IDS}
+    # The file is the one gold_results reads, so the eval runner and the rewards share it.
+    with monkeypatch.context() as patched:
+        patched.setattr(gold_cache, "run_gold", _no_second_build)
+        again = split_gold("train", cache_root=tmp_path)
+        assert again == SplitGold(train.path, train.results, built=False)
+        assert gold_results(load_train(), "train", digest, cache_root=tmp_path) == train.results
+
+    val = split_gold("val", cache_root=tmp_path)
+    assert val.results.keys() == {example.id for example in load_val()}
+    assert sorted(path.name for path in (tmp_path / "gold").iterdir()) == [
+        f"train-{digest[:12]}.jsonl",
+        f"val-{digest[:12]}.jsonl",
+    ]
+    with pytest.raises(ValueError, match="for train and val only"):
+        split_gold("dev", cache_root=tmp_path)  # type: ignore[arg-type]
+    # Train passes the train-only guard as well as load_train.
+    monkeypatch.setattr(gold_cache, "load_train", lambda root: load_val(root))
+    with pytest.raises(SplitLeak):
+        split_gold("train", cache_root=tmp_path)
+
+
+def _no_second_build(*args: object, **kwargs: object) -> None:
+    raise AssertionError("the gold queries ran again")

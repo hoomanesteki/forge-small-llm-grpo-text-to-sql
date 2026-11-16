@@ -23,7 +23,7 @@ from forge.core.types import Example, Generation, GenParams, Prompt, RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.spider import FAILING_GOLD_IDS, ROWLESS_DBS
 from forge.data.splits import load_train, load_val
-from forge.eval import runner
+from forge.eval import gold_cache, runner
 from forge.eval.config import OFFICIAL_ITEM_TIMEOUT_S, PRED_TIMEOUT_MS, EvalConfig
 from forge.eval.run_files import ADAPTER_DIGEST, RunConflict
 from forge.eval.runner import run_eval
@@ -862,3 +862,23 @@ def test_retry_through_the_cli(
     report = (runs / "retry" / "eval" / "val-report.md").read_text()
     assert "\n## Retry\n" in report
     assert "\n| retried: the first query failed to run | 2 |\n" in report
+
+
+@pytest.mark.phase(5)
+def test_eval_reads_the_gold_that_cache_gold_built(
+    spider_mini: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = CliRunner().invoke(cli.app, ["data", "cache-gold", "--split", "val"])
+    assert built.exit_code == 0, built.output
+
+    def no_second_build(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the eval runner ran the gold queries again")
+
+    monkeypatch.setattr(gold_cache, "run_gold", no_second_build)
+    run = run_eval(
+        EvalConfig(model="gold", backend="fake", run_id="cached-gold"),
+        allow_dirty=True,
+        workers=1,
+    )
+    assert [s.example_id for s in run.scores] == [e.id for e in _val()]
+    assert all(score.ex_fast for score in run.scores)

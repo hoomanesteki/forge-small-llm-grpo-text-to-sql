@@ -65,6 +65,8 @@ SplitName = Literal["train", "val", "dev"]
 PromptVersionName = Literal["p1", "p2"]
 # The agreement check mutates training-side gold queries only (plan FG-108).
 AgreementSplitName = Literal["train", "val"]
+# Dev's gold cache is built only by a dev evaluation (forge.eval.gold_cache).
+GoldSplitName = Literal["train", "val"]
 BackendName = Literal["hf", "vllm", "llamacpp", "fake"]
 DeviceName = Literal["cpu", "mps"]
 StoreName = Literal["local", "hub"]
@@ -324,6 +326,37 @@ def data_build_sft(
     typer.echo(render_counts(meta.counts) + "\n")
     typer.echo(render_prompt_stats(meta.prompts) + "\n")
     typer.echo(f"sft dataset: {folder}\nhash: {meta.hash}")
+
+
+@data_app.command("cache-gold")
+def data_cache_gold(
+    split: Annotated[
+        GoldSplitName,
+        typer.Option(help="train for the GRPO rewards, val for evaluation."),
+    ] = "train",
+) -> None:
+    """Run a split's gold queries once and keep their results for rewards and evaluation.
+
+    The file is cache/gold/<split>-<data hash[:12]>.jsonl (FORGE_CACHE_DIR to move it),
+    which `forge eval run` and the rewards also build on first use; it holds while the
+    data does, so a second call only checks it.
+    """
+    import time
+
+    from forge.eval.gold_cache import split_gold
+    from forge.ops.paths import RepoRootNotFound
+
+    start = time.monotonic()
+    try:
+        gold = split_gold(split)
+    # OSError covers missing data and a failed write; ValueError a gold query that fails
+    # (GoldFailed) and a train split that holds other questions (SplitLeak).
+    except (OSError, RepoRootNotFound, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    seconds = time.monotonic() - start
+    done = f"built in {seconds:.1f} s" if gold.built else "already built for this data"
+    typer.echo(f"{split} gold: {len(gold.results)} results in {gold.path}, {done}")
 
 
 @sql_app.command("run")

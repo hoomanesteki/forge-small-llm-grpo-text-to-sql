@@ -17,6 +17,12 @@ float into ``null``: bytes as ``{"bytes": "<hex>"}`` and infinite floats as
 
 A gold query that fails raises ``GoldFailed``: that is a data problem, and no prediction
 could match it. Callers leave out the known failures (``FAILING_GOLD_IDS``).
+
+``split_gold`` serves a whole split the way the eval runner and the GRPO rewards read it,
+and ``forge data cache-gold`` calls it to build the file ahead of a run; any of them builds
+it on first use. Train comes from ``load_train`` alone, checked by ``assert_train_only``.
+Only train and val are built ahead: a dev file is built by the dev evaluation that reads
+it.
 """
 
 from __future__ import annotations
@@ -25,13 +31,18 @@ import logging
 import math
 import os
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from forge.core.types import Example, ExecResult, Split
+from forge.data.manifest import data_manifest_hash
+from forge.data.spider import FAILING_GOLD_IDS, resolve_data_dir
+from forge.data.splits import assert_train_only, load_train, load_val
 from forge.eval.agreement import GOLD_TIMEOUT_MS
+from forge.ops.paths import cache_dir
 from forge.sql.executor import SqliteExecutor
 
 log = logging.getLogger(__name__)
@@ -41,6 +52,9 @@ log = logging.getLogger(__name__)
 MAX_ROWS = 100_000
 # Raised whenever the line format changes, so older files are rebuilt, not misread.
 FORMAT = 1
+
+GoldSplit = Literal["train", "val"]
+GOLD_SPLITS: tuple[GoldSplit, ...] = ("train", "val")
 
 
 class GoldFailed(ValueError):
@@ -61,6 +75,15 @@ class CacheHeader(BaseModel, frozen=True):
     data_manifest_hash: str
     max_rows: int = MAX_ROWS
     examples: int
+
+
+@dataclass(frozen=True)
+class SplitGold:
+    """A split's gold results, by example id, and the file that holds them."""
+
+    path: Path
+    results: dict[str, ExecResult]
+    built: bool  # run just now, rather than read from the file
 
 
 class _Line(BaseModel, frozen=True):
@@ -87,15 +110,50 @@ def gold_results(
 
     ``examples`` should be the whole split, so that one file serves every run on it.
     """
+    return _read_or_build(examples, split, data_manifest_hash, cache_root, data_dir).results
+
+
+def split_gold(
+    split: GoldSplit, *, data_dir: Path | None = None, cache_root: Path | None = None
+) -> SplitGold:
+    """The gold results of every question of ``split`` but ``FAILING_GOLD_IDS``, the ones
+    the eval runner scores, as ``gold_results`` reads or builds them.
+
+    ``cache_root`` defaults to ``forge.ops.paths.cache_dir()``. Raises ``ValueError`` for
+    any other split, as dev's file is built only by a dev evaluation, and ``SplitLeak``
+    should train hold anything else.
+    """
+    root = resolve_data_dir(data_dir)
+    if split == "train":
+        loaded = load_train(root)
+        assert_train_only(loaded)
+    elif split == "val":
+        loaded = load_val(root)
+    else:
+        raise ValueError(f"gold is cached ahead of a run for {' and '.join(GOLD_SPLITS)} only")
+    examples = [example for example in loaded if example.id not in FAILING_GOLD_IDS]
+    if not examples:
+        raise ValueError(f"the {split} split has no questions in {root}")
+    digest = data_manifest_hash(root)
+    return _read_or_build(examples, split, digest, cache_root or cache_dir(), root)
+
+
+def _read_or_build(
+    examples: Sequence[Example],
+    split: Split,
+    data_manifest_hash: str,
+    cache_root: Path,
+    data_dir: Path | None,
+) -> SplitGold:
     path = cache_path(cache_root, split, data_manifest_hash)
     header = CacheHeader(split=split, data_manifest_hash=data_manifest_hash, examples=len(examples))
     cached = read_cache(path, header, examples)
     if cached is not None:
-        return cached
+        return SplitGold(path, cached, built=False)
     results = run_gold(examples, data_dir=data_dir)
     write_cache(path, header, examples, results)
     log.info("built the %s gold cache: %d results in %s", split, len(results), path)
-    return results
+    return SplitGold(path, results, built=True)
 
 
 def run_gold(examples: Sequence[Example], *, data_dir: Path | None = None) -> dict[str, ExecResult]:

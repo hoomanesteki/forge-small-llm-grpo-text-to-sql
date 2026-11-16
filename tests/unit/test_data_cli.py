@@ -1,7 +1,9 @@
-"""``forge data stats``, ``splits`` and ``prompt-stats``, and the CLI's spelled-out choices."""
+"""``forge data stats``, ``splits``, ``prompt-stats`` and ``cache-gold``, and the CLI's
+spelled-out choices."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import get_args, get_type_hints
 
@@ -12,11 +14,14 @@ from forge import cli
 from forge.core.types import Example
 from forge.data import prompts
 from forge.data.fetch import SOURCES, SourceName
+from forge.data.manifest import data_manifest_hash
 from forge.data.prompts import build_prompt, chat_token_counter
 from forge.data.schema import PROMPT_VERSIONS
 from forge.data.spider import load_raw, resolve_data_dir
 from forge.data.splits import MANIFEST_DIR, MANIFEST_FILE, SPLITS, split_examples
 from forge.data.stats import render_stats
+from forge.eval import gold_cache
+from forge.eval.gold_cache import GOLD_SPLITS
 from tests.fakes import WordTokenizer
 
 
@@ -230,3 +235,35 @@ def test_prompt_stats_cli_errors(spider_mini: Path, monkeypatch: pytest.MonkeyPa
     missing = CliRunner().invoke(cli.app, ["data", "prompt-stats"])
     assert missing.exit_code != 0
     assert "--tokenizer" in missing.output
+
+
+@pytest.mark.phase(5)
+def test_cache_gold_cli_builds_the_file_once(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_CACHE_DIR", str(tmp_path))
+    path = tmp_path / "gold" / f"train-{data_manifest_hash(spider_mini)[:12]}.jsonl"
+    built = CliRunner().invoke(cli.app, ["data", "cache-gold", "--split", "train"])
+    assert built.exit_code == 0, built.output
+    done = rf"train gold: 40 results in {re.escape(str(path))}, built in \d+\.\d s\n"
+    assert re.fullmatch(done, built.stdout)
+    assert path.is_file()
+
+    def no_second_build(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the gold queries ran again")
+
+    monkeypatch.setattr(gold_cache, "run_gold", no_second_build)
+    again = CliRunner().invoke(cli.app, ["data", "cache-gold"])
+    assert again.exit_code == 0, again.output
+    assert again.stdout == f"train gold: 40 results in {path}, already built for this data\n"
+
+    # Dev's file is built by a dev evaluation alone.
+    dev = CliRunner().invoke(cli.app, ["data", "cache-gold", "--split", "dev"])
+    assert dev.exit_code == 2
+    hints = get_type_hints(cli.data_cache_gold, include_extras=False)
+    assert get_args(hints["split"]) == GOLD_SPLITS
+
+    monkeypatch.setenv("FORGE_DATA_DIR", str(tmp_path / "nowhere"))
+    missing = CliRunner().invoke(cli.app, ["data", "cache-gold", "--split", "val"])
+    assert missing.exit_code == 1
+    assert missing.stderr.startswith("error: ")
