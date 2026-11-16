@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.spike import throughput
-from tests.tiny_hf import save_random_model
+from tests.tiny_hf import QWEN3, byte_tokenizer, save_random_model
 
 
 @pytest.mark.phase(3)
@@ -21,6 +21,8 @@ def test_grpo_bench_trains_on_cpu(tmp_path: Path) -> None:
     config = json.loads((model / "config.json").read_text(encoding="utf-8"))
     config["max_position_embeddings"] = 4096
     (model / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    # Qwen3's thinking switch, which the bench renders every prompt with, turned off.
+    byte_tokenizer(QWEN3).save_pretrained(model)
 
     out = tmp_path / "grpo.json"
     argv = [
@@ -61,10 +63,20 @@ def test_grpo_bench_trains_on_cpu(tmp_path: Path) -> None:
     assert len(result["step_seconds"]) == 2
     assert all(seconds > 0 for seconds in result["step_seconds"])
     assert result["median_step_seconds"] == result["step_seconds"][1]
-    assert result["completions_per_step"] == 2
+    # What TRL scored, counted by the reward, against what the settings ask for; no GPU
+    # here, so the trainer counts none.
+    assert result["completions_per_step"] == result["planned_completions_per_step"] == 2
+    assert result["n_gpu"] == 0
+    assert result["thinking_off"] is True
+    history = result["log_history"]
+    lengths = [entry["completions/mean_length"] for entry in history if "reward" in entry]
+    assert len(lengths) == 2
+    assert result["mean_completion_length"] == pytest.approx(sum(lengths) / len(lengths))
+    assert 0 < result["mean_completion_length"] <= 8
     settings = result["settings"]
     assert (settings["fp16"], settings["bf16"], settings["use_cpu"]) == (False, False, True)
-    assert settings["chat_template_kwargs"] == {"enable_thinking": False}
+    # The prompts arrive rendered, so no stack's trainer applies a template of its own.
+    assert "chat_template_kwargs" not in settings
     assert settings["generates_with_vllm"] is False
     assert result["memory"] is None  # no CUDA here
     assert result["versions"]["trl"] is not None
