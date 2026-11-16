@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import re
@@ -28,6 +29,7 @@ from forge.eval.runner import run_eval
 from forge.eval.taxonomy import ERROR_CLASSES
 from forge.infer import hf_backend
 from forge.infer.base import FakeBackend
+from forge.ops import timeguard
 from forge.ops.dev_usage import read_uses
 from forge.ops.hub import LocalRunStore
 from forge.ops.ledger import run_hours
@@ -450,6 +452,56 @@ def test_time_guard_stops_between_batches_then_resumes(
     assert run.manifest.started_at == manifest.started_at
     assert [s.example_id for s in run.scores] == [e.id for e in val]
     assert all(s.ex_official is True for s in run.scores)
+
+
+@pytest.mark.phase(3)
+def test_eval_run_deadline_minutes_stops_then_resumes(
+    spider_mini: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reply = _gold_reply(_val())
+    now = [0.0]
+
+    def slow_reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        now[0] += 10.0  # each reply takes 10 s, so a batch of 4 takes 40
+        return reply(prompt, params, sample_idx)
+
+    real = timeguard.eval_deadline
+    monkeypatch.setattr(
+        timeguard, "eval_deadline", lambda minutes: real(minutes, clock=lambda: now[0])
+    )
+    monkeypatch.setattr(
+        runner, "fake_backend", lambda model, _: FakeBackend(slow_reply, model_ref=model)
+    )
+    monkeypatch.setattr(runner, "run_eval", functools.partial(runner.run_eval, batch_size=4))
+    args = [
+        "eval",
+        "run",
+        "--backend",
+        "fake",
+        "--model",
+        "gold",
+        "--run-id",
+        "timed",
+        "--allow-dirty",
+    ]
+
+    # Two minutes, 12 s of them kept back: after two batches 40 s are left, under 40 + 12.
+    stopped = CliRunner().invoke(cli.app, [*args, "--deadline-minutes", "2"])
+
+    assert stopped.exit_code == 1, stopped.output
+    assert "error: the deadline stopped run timed with 8 of 20 samples scored" in stopped.stderr
+    assert "official EX" not in stopped.stdout
+    manifest, _, scores = _stored(runs / "timed")
+    assert manifest.status == "stopped_time_guard" and len(scores) == 8
+    assert "deadline" not in str(manifest.config)
+
+    resumed = CliRunner().invoke(cli.app, args)
+
+    assert resumed.exit_code == 0, resumed.output
+    assert "resumed: 8 scores were stored by an earlier attempt" in resumed.stdout
+    assert _summary("official EX", 20, 20) in resumed.stdout
+    refused = CliRunner().invoke(cli.app, [*args, "--run-id", "zero", "--deadline-minutes", "0"])
+    assert refused.exit_code == 1 and "a deadline is a positive number of minutes" in refused.stderr
 
 
 @pytest.mark.phase(2)

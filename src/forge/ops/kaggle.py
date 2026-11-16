@@ -16,7 +16,9 @@ commit with ``requirements-gpu.txt`` and ``GIT_SHA``, and ``<owner>/forge-spider
 Spider files ``spider.sha256`` lists, with that file. ``KaggleClient`` runs the kaggle CLI
 as an argument list, never through a shell, and reads what it prints as well as its exit
 code: ``datasets create`` and ``version`` report a refused upload and still exit 0, and so
-does ``kernels push`` for a push error or a dataset source it could not add.
+does ``kernels push`` for a push error. When ``kernels push`` says a source could not be
+added, Kaggle has still saved and started that version, without the source, so the push
+is returned with those lines in ``PushedKernel.dropped`` rather than refused.
 """
 
 from __future__ import annotations
@@ -87,6 +89,11 @@ _PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
 _VERSION = re.compile(r"[1-9][0-9]*")
 
 
+def valid_slug(slug: str) -> bool:
+    """Whether Kaggle takes ``slug``: lowercase letters and digits, single hyphens between."""
+    return _SLUG.fullmatch(slug) is not None
+
+
 def title_slug(title: str) -> str:
     """The slug Kaggle derives from a kernel title: lowercase words joined by hyphens."""
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
@@ -119,7 +126,7 @@ def check_kernel_metadata(meta: Mapping[str, Any]) -> list[str]:
         owner, slug = parts
         if not _OWNER.fullmatch(owner):
             problems.append(f"id has a bad owner {owner!r}")
-        if not _SLUG.fullmatch(slug):
+        if not valid_slug(slug):
             problems.append(f"id has a bad slug {slug!r}: lowercase letters, digits, hyphens")
         title = meta.get("title")
         if not isinstance(title, str) or len(title) < 5:
@@ -283,10 +290,11 @@ _PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?==[A-Za-
 # kaggle 2.2.5 prints "Dataset creation error: ..." or "Dataset version creation error: ..."
 # on stdout and exits 0 when the server refuses an upload.
 _UPLOAD_REFUSED = re.compile(r"creation error", re.IGNORECASE)
-# kernels push exits 0 after "Kernel push error: ...", and after "The following are not
-# valid dataset sources and could not be added to the kernel", which would start a job
-# without its code or data.
-_PUSH_REFUSED = re.compile(r"Kernel push error|could not be added", re.IGNORECASE)
+# kernels push exits 0 after "Kernel push error: ...". It prints "The following are not
+# valid dataset sources and could not be added to the kernel: [...]" (or kernel, tag or
+# competition sources) before "Kernel version N successfully pushed": that version runs.
+_PUSH_REFUSED = re.compile(r"Kernel push error", re.IGNORECASE)
+_DROPPED = re.compile(r"could not be added", re.IGNORECASE)
 _PUSHED = re.compile(r"Kernel version (\d+) successfully pushed")
 _KERNEL_URL = re.compile(r"kaggle\.com/code/([^/\s]+)/([^/\s?#]+)")
 # kernels status prints 'owner/slug has status "KernelWorkerStatus.COMPLETE"'.
@@ -381,7 +389,8 @@ class KaggleClient:
         return path
 
     def push_kernel(self, folder: Path, *, timeout_s: int, gpu: bool) -> PushedKernel:
-        """Push and start the kernel ``folder`` holds; returns its id and version."""
+        """Push and start the kernel ``folder`` holds; returns its id, its version and
+        the sources Kaggle dropped from it, if any."""
         accelerator = ["--accelerator", GPU_MACHINE_SHAPE] if gpu else []
         command = [self.executable, "kernels", "push", "-p", str(folder), *accelerator]
         output = _check(self.run, [*command, "-t", str(timeout_s)])
@@ -390,7 +399,8 @@ class KaggleClient:
             raise KaggleError(f"{_display(command)} was refused: {_tail(output)}")
         url = _KERNEL_URL.search(output)
         kernel = "/".join(url.groups()) if url else None
-        return PushedKernel(kernel, int(pushed.group(1)), output.strip())
+        dropped = tuple(line.strip() for line in output.splitlines() if _DROPPED.search(line))
+        return PushedKernel(kernel, int(pushed.group(1)), output.strip(), dropped)
 
     def kernel_status(self, kernel: str) -> KernelStatus:
         """The worker state of ``kernel`` (``owner/slug[/version]``), as kagglesdk names it."""
@@ -434,6 +444,7 @@ class PushedKernel:
     kernel: str | None  # owner/slug from the URL the CLI printed, when it printed one
     version: int
     output: str
+    dropped: tuple[str, ...] = ()  # the CLI's lines naming sources it could not add
 
 
 @dataclass(frozen=True)

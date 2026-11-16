@@ -6,6 +6,9 @@ wheel is installed it needs only the standard library, and the job modules
 (``forge.eval.runner``, later ``forge.train``) are imported only when their stage runs, so
 the script can be tested on a laptop with fakes. The stages, in order (``STAGES``):
 
+- restore: on a resume, the run's files so far, copied from the last attempt's kernel
+  output, mounted under the input folder. It comes first, so that whatever fails after,
+  this attempt's output holds the run too and the next resume carries on from it.
 - env: the interpreter, the platform and the GPUs, for the log.
 - code: the code dataset under the input folder, whose ``GIT_SHA`` must be the commit the
   job was pushed at. That commit goes to the job in ``FORGE_CODE_SHA``, which a manifest
@@ -13,16 +16,23 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
 - install: ``pip install --no-deps`` the wheel, then its ``requirements-gpu.txt``; every
   package the wheel needs must then be there, or the stage says which is not.
 - data: the Spider dataset, found by its ``spider.sha256``, with ``database.zip`` unpacked
-  if Kaggle left it packed, and every file checked against that list before any job runs.
+  if Kaggle left it packed, and every file checked before any job runs against the list
+  the installed wheel pins (``forge.data.spider.CHECKSUMS``), not the dataset's own copy.
 - secrets: ``HF_TOKEN`` and ``WANDB_API_KEY`` from Kaggle Secrets (or Colab's) when they
-  are attached. No value is ever printed or written, and the job goes on without them.
+  are attached, without the line breaks and outer spaces huggingface_hub drops. No value
+  is ever printed or written: every stage result in status.json, the error, the
+  traceback and a failed run's ``error.txt`` go through ``_redact``. The job goes on
+  without them.
 - preflight: the job on ``PREFLIGHT_EXAMPLES`` examples through the same path, in a run
   of its own under ``preflight/``, so a broken job fails in minutes. The job then runs on
   the model the preflight loaded: a vLLM engine holds most of the GPU's memory while it
   lives, so a second one might not fit beside it, and loading once saves GPU time. A dev
   job's preflight answers val questions, so dev loads once, in the job.
-- job: the job itself, its files in ``<work>/runs/<run_id>/``. On a resume, the earlier
-  attempt's files come from its kernel's output, mounted under the input folder.
+- job: the job itself, its files in ``<work>/runs/<run_id>/``, where a resume carries on
+  from the files the restore stage brought back. With
+  ``--timeout-s``, the push's timeout, an eval job stops between batches before Kaggle
+  would end the session (``forge.ops.timeguard.eval_deadline``, counted from the kernel's
+  start), as ``stopped_time_guard``, and its run is uploaded and resumed like any other.
 - upload: that folder to the Hub run store (``forge.ops.hub``, which tries again on
   network errors), only when there is an ``HF_TOKEN``.
 
@@ -38,8 +48,9 @@ an error might not keep its output; ``forge kaggle wait`` reads status.json inst
 The GPU is held from the kernel's start to its end, setup and upload included, so that is
 the session the ledger counts. status.json gives its ``started_at`` and ``ended_at``, and
 the same span goes into the run's ``sessions.json`` (``forge.ops.sessions``): the session
-the job began in this kernel is stretched to it, or, when none began, as when a resumed
-job fails before its run starts again, the kernel's session is added. ``session`` in
+the job began in this kernel, one past those the restore stage brought back, is stretched
+to it, or, when none began, as when a resumed job fails before its run starts again, the
+kernel's session is added. ``session`` in
 status.json is its number. The upload stage stretches it up to the upload first, so the
 run store's copy holds nearly all of it.
 """
@@ -69,7 +80,7 @@ KERNEL_ARGV: list[str] = []
 
 STATUS_SCHEMA = "forge-kaggle-job/1"
 STATUS_FILE = "status.json"
-STAGES = ("env", "code", "install", "data", "secrets", "preflight", "job", "upload")
+STAGES = ("restore", "env", "code", "install", "data", "secrets", "preflight", "job", "upload")
 PREFLIGHT_EXAMPLES = 5
 SECRET_LABELS = ("HF_TOKEN", "WANDB_API_KEY")
 # The names forge.ops.kaggle and forge.ops.manifest use; this script can't import them
@@ -80,6 +91,7 @@ CHECKSUM_FILE = "spider.sha256"
 CODE_SHA_ENV = "FORGE_CODE_SHA"
 MANIFEST_FILE = "manifest.json"
 SESSIONS_FILE = "sessions.json"
+ERROR_FILE = "error.txt"
 DEV_USAGE_ENV = "FORGE_DEV_USAGE"
 DEV_USAGE_FILE = "dev-usage.md"
 HOSTS = ("kaggle", "colab")
@@ -87,6 +99,7 @@ PIP = (sys.executable, "-m", "pip", "install", "--no-input", "--progress-bar", "
 
 # Runs one command, raising CalledProcessError when it fails; tests stand in for pip.
 Runner = Callable[[Sequence[str]], None]
+Clock = Callable[[], float]  # seconds that never go back, as forge.ops.timeguard counts them
 
 
 class JobError(RuntimeError):
@@ -109,6 +122,12 @@ class Kernel:
     requirements: Path | None = None
     # The eval job's model backend and token counter, loaded once for the preflight and the job.
     model: tuple[Any, Any] | None = None
+    clock: Clock = time.monotonic
+    started: float = field(init=False)  # on clock, when the kernel's time began
+    sessions_before: int = 0  # the run's sessions the restore stage brought back
+
+    def __post_init__(self) -> None:
+        self.started = self.clock()
 
     @property
     def work(self) -> Path:
@@ -132,6 +151,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--temp-dir", default="/kaggle/temp", help="discarded scratch")
     parser.add_argument("--preflight", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resume", action="store_true", help="continue the run's last attempt")
+    parser.add_argument(
+        "--timeout-s", type=int, help="the push's timeout, which the job's deadline counts to"
+    )
     return parser.parse_args(list(argv))
 
 
@@ -140,6 +162,23 @@ def _json_object(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise argparse.ArgumentTypeError(f"must be a JSON object, got {text!r}")
     return value
+
+
+def restore_stage(kernel: Kernel) -> dict[str, Any] | str:
+    """Copy the run's files from its last attempt's output, so the job carries on."""
+    if not kernel.args.resume:
+        return "skipped: a new run"
+    where = f"runs/{kernel.args.run_id}/{MANIFEST_FILE}"
+    manifest = _one(Path(kernel.args.input_dir), where, "the last attempt's output")
+    if kernel.run_dir.exists():
+        raise JobError(f"{kernel.run_dir} exists already, so the last attempt can't go there")
+    # status.json said how that attempt ended; this one writes its own.
+    shutil.copytree(manifest.parent, kernel.run_dir, ignore=shutil.ignore_patterns(STATUS_FILE))
+    files = sum(path.is_file() for path in kernel.run_dir.rglob("*"))
+    sessions = kernel.run_dir / SESSIONS_FILE
+    if sessions.is_file():
+        kernel.sessions_before = len(json.loads(sessions.read_text(encoding="utf-8")))
+    return {"from": str(manifest.parent), "files": files}
 
 
 def env_stage(kernel: Kernel) -> dict[str, Any]:
@@ -207,17 +246,21 @@ def unmet_requirements(
 
 
 def data_stage(kernel: Kernel) -> dict[str, Any]:
-    """Find Spider, unpack its databases if needed, and check every file it lists."""
+    """Find Spider, unpack its databases if needed, and check every file the wheel pins."""
     from forge.data.spider import check_files, load_checksums
 
     folder = _one(Path(kernel.args.input_dir), CHECKSUM_FILE, "the Spider dataset").parent
     if not (folder / "database").is_dir():
         folder = _unpacked(folder, Path(kernel.args.temp_dir) / "forge-spider")
-    expected = load_checksums(folder / CHECKSUM_FILE)
+    # The wheel's list, which publish-data checked the upload against: the dataset's own
+    # copy would only show that the dataset agrees with itself.
+    expected = load_checksums()
     problems = check_files(folder, expected)
     if problems:
         shown = ", ".join(f"{rel} ({why})" for rel, why in sorted(problems.items())[:5])
-        raise JobError(f"{len(problems)} Spider files don't match {CHECKSUM_FILE}: {shown}")
+        raise JobError(
+            f"{len(problems)} Spider files don't match the {CHECKSUM_FILE} forge pins: {shown}"
+        )
     os.environ["FORGE_DATA_DIR"] = str(folder)
     return {"folder": str(folder), "files": len(expected)}
 
@@ -246,6 +289,8 @@ def secrets_stage(kernel: Kernel) -> dict[str, str]:
         value, where = os.environ.get(label), "environment"
         if not value:
             value, where = _read_secret(label)
+        # The token huggingface_hub sends, and so the text an error might quote.
+        value = (value or "").replace("\r", "").replace("\n", "").strip()
         if value:
             # The Hub and W&B clients read these variables.
             os.environ[label] = value
@@ -287,20 +332,9 @@ def preflight_stage(kernel: Kernel) -> dict[str, Any] | str:
 
 
 def job_stage(kernel: Kernel) -> dict[str, Any]:
-    if kernel.args.resume:
-        _restore(kernel)
     status = JOBS[kernel.args.job](kernel, False)
     kernel.status["status"] = status
     return {"status": status}
-
-
-def _restore(kernel: Kernel) -> None:
-    """Copy the run's files from its last attempt's output, so the job carries on."""
-    where = f"runs/{kernel.args.run_id}/manifest.json"
-    manifest = _one(Path(kernel.args.input_dir), where, "the last attempt's output")
-    if kernel.run_dir.exists():
-        raise JobError(f"{kernel.run_dir} exists already, so the last attempt can't go there")
-    shutil.copytree(manifest.parent, kernel.run_dir)
 
 
 def eval_job(kernel: Kernel, preflight: bool) -> str:
@@ -326,14 +360,22 @@ def eval_job(kernel: Kernel, preflight: bool) -> str:
         check_config(config)  # before a model loads for options no run takes
         kernel.model = model_backend(config)
     backend, count_tokens = kernel.model or (None, None)
+    deadline = None
+    if not preflight and kernel.args.timeout_s is not None:
+        from forge.ops.timeguard import eval_deadline
+
+        timeout_min = kernel.args.timeout_s / 60
+        deadline = eval_deadline(timeout_min, clock=kernel.clock, start=kernel.started)
     run = run_eval(
         config,
         runs_root=runs_root,
         progress=_progress,
         backend=backend,
         count_tokens=count_tokens,
+        deadline=deadline,
     )
-    if not preflight:
+    # A run the deadline stopped gets its report from the attempt that finishes it.
+    if not preflight and run.manifest.status == "finished":
         write_run_report(kernel.args.run_id, runs_root=runs_root)
     return run.manifest.status
 
@@ -345,7 +387,7 @@ def upload_stage(kernel: Kernel) -> str:
     from forge.ops.hub import HubRunStore
 
     repo = kernel.args.run_store
-    _record_session(kernel.run_dir, kernel.status["started_at"], _now())
+    _record_session(kernel, _now())
     try:
         HubRunStore(repo, token=token).put_folder(kernel.args.run_id, kernel.run_dir)
     # The run is complete in the kernel output whatever the Hub says, so a failed upload
@@ -357,6 +399,7 @@ def upload_stage(kernel: Kernel) -> str:
 
 JOBS: Mapping[str, Callable[[Kernel, bool], str]] = {"eval": eval_job}
 STAGE_FUNCTIONS: Mapping[str, Callable[[Kernel], Any]] = {
+    "restore": restore_stage,
     "env": env_stage,
     "code": code_stage,
     "install": install_stage,
@@ -368,7 +411,9 @@ STAGE_FUNCTIONS: Mapping[str, Callable[[Kernel], Any]] = {
 }
 
 
-def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None, run: Runner | None = None, clock: Clock = time.monotonic
+) -> int:
     args = parse_args(KERNEL_ARGV if argv is None else argv)
     status: dict[str, Any] = {
         "schema": STATUS_SCHEMA,
@@ -387,7 +432,7 @@ def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
         "session": None,
         "stages": {},
     }
-    kernel = Kernel(args, run or _run, status)
+    kernel = Kernel(args, run or _run, status, clock=clock)
     os.environ["FORGE_RUNS_DIR"] = str(kernel.work / "runs")
     os.environ["FORGE_CACHE_DIR"] = str(Path(args.temp_dir) / "cache")
     os.environ[DEV_USAGE_ENV] = str(kernel.work / DEV_USAGE_FILE)
@@ -406,15 +451,17 @@ def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
         trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         print(_redact(trace, kernel.secrets), file=sys.stderr, flush=True)
         status["status"] = "failed"
-        status["error"] = _redact(f"{type(exc).__name__}: {exc}", kernel.secrets)
+        status["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         signal.signal(signal.SIGTERM, previous)
         _close_manifest(kernel.run_dir)
+        # A failed run keeps its traceback beside its manifest, the job's or the preflight's.
+        for error in kernel.work.glob(f"*/*/{ERROR_FILE}"):
+            _redact_file(error, kernel.secrets)
         status["ended_at"] = _now()
-        status["session"] = _record_session(
-            kernel.run_dir, status["started_at"], status["ended_at"]
-        )
-        _write_json(kernel.run_dir / STATUS_FILE, status)
+        status["session"] = _record_session(kernel, status["ended_at"])
+        # Any stage's result may quote an exception, whose text may hold a secret.
+        _write_json(kernel.run_dir / STATUS_FILE, _redacted(status, kernel.secrets))
         print(f"[forge] {args.job} {args.run_id}: {status['status']}", flush=True)
     return 0
 
@@ -429,27 +476,28 @@ def _close_manifest(run_dir: Path) -> None:
             _write_json(path, manifest)
 
 
-def _record_session(run_dir: Path, started_at: str, ended_at: str) -> int | None:
-    """Make the run's session in this kernel span ``started_at`` to ``ended_at``, the
-    kernel's, and return its number; None when the kernel holds no run.
+def _record_session(kernel: Kernel, ended_at: str) -> int | None:
+    """Make the run's session in this kernel span the kernel's start to ``ended_at``, and
+    return its number; None when the kernel holds no run.
 
-    The session the job began here is the run's last, begun after the kernel started. A
-    session still running then failed. When the job began none, the kernel's is added, with
-    the run's status if the run ended in this kernel, and failed if not.
+    The session the job began here is the run's last, past those the restore brought back;
+    counted rather than told by its start, since times here are whole seconds. A session
+    still running then failed. When the job began none, the kernel's is added, with the
+    run's status if the run ended in this kernel, and failed if not.
     """
+    run_dir, started_at = kernel.run_dir, kernel.status["started_at"]
     manifest_path = run_dir / MANIFEST_FILE
     if not manifest_path.is_file():
         return None
     path = run_dir / SESSIONS_FILE
     sessions = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
-    start = datetime.fromisoformat(started_at)
-    if sessions and datetime.fromisoformat(sessions[-1]["started_at"]) >= start:
+    if len(sessions) > kernel.sessions_before:
         session = sessions[-1]
         if session["status"] == "running":
             session["status"] = "failed"
     else:
         run = json.loads(manifest_path.read_text(encoding="utf-8"))
-        ended = run.get("ended_at")
+        ended, start = run.get("ended_at"), datetime.fromisoformat(started_at)
         here = ended is not None and datetime.fromisoformat(ended) >= start
         session = {"status": run["status"] if here else "failed"}
         sessions.append(session)
@@ -498,6 +546,23 @@ def _redact(text: str, secrets: Iterable[str]) -> str:
     for secret in secrets:
         text = text.replace(secret, "***")
     return text
+
+
+def _redact_file(path: Path, secrets: Sequence[str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    if (clean := _redact(text, secrets)) != text:
+        path.write_text(clean, encoding="utf-8")
+
+
+def _redacted(value: Any, secrets: Sequence[str]) -> Any:
+    """``value``, a JSON value, with ``_redact`` applied to every string in it."""
+    if isinstance(value, str):
+        return _redact(value, secrets)
+    if isinstance(value, dict):
+        return {key: _redacted(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redacted(item, secrets) for item in value]
+    return value
 
 
 def _now() -> str:

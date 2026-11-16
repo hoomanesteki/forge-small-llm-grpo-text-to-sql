@@ -418,6 +418,17 @@ def eval_run(
             "--allow-dirty", help="Run on uncommitted changes; the manifest's SHA says -dirty."
         ),
     ] = False,
+    # Left out of the manifest too: when an attempt stops changes no score.
+    deadline_minutes: Annotated[
+        float | None,
+        typer.Option(
+            "--deadline-minutes",
+            min=0.0,
+            help="Stop between batches so the run ends within this many minutes from now, a "
+            "tenth kept back for official EX and storing; it then says stopped_time_guard "
+            "and resumes with its --run-id.",
+        ),
+    ] = None,
 ) -> None:
     """Generate, execute and score a split; resume a run by passing its --run-id.
 
@@ -427,7 +438,8 @@ def eval_run(
     eval/<split>-first-tries.jsonl keeps the first reply of each retried sample, and the
     generations file holds the reply each score is for. With --store hub the folder also
     goes to the Hub run store when the run ends, finished or failed, and a --run-id that
-    runs/ lacks is fetched from it to resume. Exits 1 if the run fails.
+    runs/ lacks is fetched from it to resume. Exits 1 unless the run finishes: when it
+    fails, or when --deadline-minutes stops it.
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
@@ -435,6 +447,7 @@ def eval_run(
     from forge.ops.dev_usage import DevBudgetExceeded
     from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound
+    from forge.ops.timeguard import eval_deadline
     from forge.sql.sandbox import SandboxError
 
     config = EvalConfig(
@@ -458,11 +471,14 @@ def eval_run(
         typer.echo(f"scored {done} of {total}", err=True)
 
     try:
+        # From the start, so loading the model counts against it.
+        deadline = None if deadline_minutes is None else eval_deadline(deadline_minutes)
         run = run_eval(
             config,
             allow_dirty=allow_dirty,
             workers=WORKERS if workers is None else workers,
             progress=progress,
+            deadline=deadline,
         )
     # OSError covers missing data (DataNotFound), a model that can't be found and the
     # official evaluator's overall timeout; ValueError a wrong option, a failing gold
@@ -500,6 +516,14 @@ def eval_run(
         typer.echo(f"resumed: {run.resumed} scores were stored by an earlier attempt")
     if len(scores) > run.resumed:
         typer.echo(f"generated {len(scores) - run.resumed} samples in {run.generate_s:.1f} s")
+    if run.manifest.status == "stopped_time_guard":
+        typer.echo(
+            f"error: the deadline stopped run {run.manifest.run_id} with {len(scores)} of "
+            f"{run.questions * n} samples scored; official EX waits for the attempt that "
+            f"finishes it: run again with --run-id {run.manifest.run_id}",
+            err=True,
+        )
+        raise typer.Exit(1)
     for name, hits in (
         ("valid", sum(s.valid for s in scores)),
         ("fast EX", sum(s.ex_fast for s in scores)),
@@ -946,7 +970,9 @@ def kaggle_run(
     which is published if it doesn't; and the config's ops.est_gpu_hours must fit what the
     ledger and Kaggle's quota leave this week. It prints the estimate, asks unless --yes,
     pushes the kernel on a T4 and prints the run id, which status, logs, wait and output
-    take. A dev job's push spends one of the six dev looks, logged in docs/dev-usage.md.
+    take. A dev job's push spends one of the six dev looks, logged in docs/dev-usage.md as
+    soon as Kaggle accepts it; a --resume of the run is the same look. A source Kaggle
+    could not add is a warning: that version runs without it, recorded like any other.
     """
     import json
 
@@ -1009,17 +1035,37 @@ def kaggle_run(
             raise typer.Exit(1)
         folder = jobs.write_kernel(root, plan, code=code, data=data, run_store=run_store)
         pushed = client.push_kernel(folder, timeout_s=plan.timeout_s, gpu=True)
-        kernel = pushed.kernel or plan.kernel
-        jobs.record_push(
-            runs_dir(), plan, kernel=kernel, version=pushed.version, code=code, budget=budget
-        )
-        looks = jobs.log_dev_look(plan)
     except _kaggle_job_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
+    kernel = pushed.kernel or plan.kernel
+    try:
+        # Kaggle runs the kernel now, and it may read dev, so its look is logged before
+        # anything else that could fail.
+        looks = jobs.log_dev_look(plan)
+        jobs.record_push(
+            runs_dir(), plan, kernel=kernel, version=pushed.version, code=code, budget=budget
+        )
+    except _kaggle_job_errors() as exc:
+        typer.echo(
+            f"error: {exc}; Kaggle runs {kernel} version {pushed.version} all the same, so "
+            f"don't push it again: follow it at https://www.kaggle.com/code/{kernel}",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
     typer.echo(pushed.output)
+    for line in pushed.dropped:
+        typer.echo(f"warning: {line}", err=True)
+    if pushed.dropped:
+        typer.echo(
+            f"warning: Kaggle started version {pushed.version} without them; forge kaggle "
+            f"wait {plan.run_id} says how the job ends",
+            err=True,
+        )
     if looks is not None:
         typer.echo(f"dev look {looks} of {MAX_DEV_USES} logged in docs/dev-usage.md")
+    elif plan.reads_dev:
+        typer.echo(f"dev look: run {plan.run_id}'s own, logged when it was first pushed")
     typer.echo(f"run {plan.run_id}: kernel {kernel}, version {pushed.version}")
     typer.echo(f"next: forge kaggle wait {plan.run_id}")
 
@@ -1104,6 +1150,13 @@ def kaggle_wait(
         upload = stages.get("upload", {}).get("result", "not reached")
         typer.echo(f"job {outcome['status']} at stage {outcome['stage']}; upload: {upload}")
         _log_run(record, "has ended")
+    if outcome["status"] == "stopped_time_guard":
+        typer.echo(
+            "error: the job stopped at its time guard before Kaggle's timeout; carry it on "
+            f"with forge kaggle run --resume --run-id {run_id} and the same --job and --config",
+            err=True,
+        )
+        raise typer.Exit(1)
     if outcome["status"] != "finished":
         typer.echo(f"error: {outcome.get('error') or outcome['status']}", err=True)
         raise typer.Exit(1)

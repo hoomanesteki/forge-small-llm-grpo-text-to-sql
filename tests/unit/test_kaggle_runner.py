@@ -332,16 +332,30 @@ def test_run_needs_the_data_dataset_and_a_push_kaggle_accepts(
     assert result.exit_code == 1
     assert "forge-owner/forge-spider doesn't exist; run forge kaggle publish-data" in result.stderr
 
-    # kaggle 2.2.5 exits 0 when it drops a dataset source; the job would start without it.
+    # A push error is refused, and nothing is recorded.
     fake.data = True
-    fake.push_output = (
-        "The following are not valid dataset sources and could not be added to the kernel: "
-        "['forge-owner/forge-spider']\nKernel version 1 successfully pushed.\n"
-    )
+    fake.push_output = "Kernel push error: Notebook not found\n"
     result = _eval(repo, "--yes")
     assert result.exit_code == 1
-    assert "was refused: The following are not valid dataset sources" in result.stderr
+    assert "was refused: Kernel push error: Notebook not found" in result.stderr
     assert not (repo / "runs").exists()
+
+    # kaggle 2.2.5 exits 0 when it drops a dataset source, and Kaggle has saved and started
+    # that version without it: it is recorded, so status, logs and wait find it, with a
+    # warning rather than a refusal.
+    head_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    dropped = (
+        "The following are not valid dataset sources and could not be added to the kernel: "
+        "['forge-owner/forge-spider']"
+    )
+    fake.push_output = f"{dropped}\n{_pushed(f'{OWNER}/forge-{head_id}')}"
+    result = _eval(repo, "--yes")
+    assert result.exit_code == 0, result.output
+    assert f"warning: {dropped}" in result.stderr
+    assert f"Kaggle started version 1 without them; forge kaggle wait {head_id}" in result.stderr
+    assert _record(repo, head_id)["kernels"][0]["kernel"] == f"{OWNER}/forge-{head_id}"
+    status = CliRunner().invoke(cli.app, ["kaggle", "status", head_id])
+    assert status.exit_code == 0 and "COMPLETE" in status.stdout
 
 
 @pytest.mark.phase(3)
@@ -365,6 +379,8 @@ def test_entry_renders_job_args(repo: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert (args.job, args.run_id, args.code_sha) == ("eval", plan.run_id, head)
     assert args.options == {"model": "gold", "backend": "fake", "limit": 5}
     assert (args.preflight, args.resume, args.run_store) == (True, False, "forge-owner/forge-runs")
+    # The job's deadline counts to the push's timeout, the estimate and half again.
+    assert args.timeout_s == plan.timeout_s == 2700
     assert EvalConfig(**args.options, host="kaggle").platform == "kaggle"
     # Everything else in the script is as committed.
     baked = f"KERNEL_ARGV: list[str] = {json.dumps(rendered.KERNEL_ARGV)}"
@@ -473,6 +489,84 @@ def test_dev_job_needs_a_reason_and_its_push_logs_the_look(
     spent = _run("--job", "eval", "--config", str(dev), "--reason", "one more", "--run-id", "x")
     assert spent.exit_code == 1 and "had its 6 looks" in spent.stderr
     assert fake.commands == [] and len(read_uses(dev_log)) == 6
+
+
+@pytest.mark.phase(3)
+def test_a_dev_look_is_logged_once_kaggle_accepts_the_push(
+    repo: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    dev = repo.parent / "dev.yaml"
+    dev.write_text("model: gold\nbackend: fake\nsplit: dev\nops: {est_gpu_hours: 0.5}\n")
+
+    def push(*extra: str) -> Any:
+        return _run("--job", "eval", "--config", str(dev), "--reason", "baseline", "--yes", *extra)
+
+    # A push Kaggle refuses starts no kernel, so it spends nothing.
+    fake.push_output = "Kernel push error: Notebook not found\n"
+    refused = push()
+    assert refused.exit_code == 1 and "was refused" in refused.stderr
+    assert not dev_log.exists()
+
+    # Once Kaggle has the kernel, it may read dev: the look is logged before the record,
+    # whose failure no longer hides it, and the error says not to push again.
+    fake.push_output = None
+    blocked = repo.parent / "runs-is-a-file"
+    blocked.write_text("")
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(blocked))
+    unrecorded = push()
+    assert unrecorded.exit_code == 1, unrecorded.output
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    assert f"Kaggle runs {OWNER}/forge-{run_id} version 1 all the same" in unrecorded.stderr
+    assert read_uses(dev_log) == [(_today().isoformat(), run_id, "baseline")]
+    monkeypatch.delenv("FORGE_RUNS_DIR")
+
+    # A version Kaggle started without a source counts the same.
+    fake.push_output = (
+        "The following are not valid dataset sources and could not be added to the kernel: "
+        f"['{OWNER}/forge-spider']\n{_pushed(f'{OWNER}/forge-d1')}"
+    )
+    started = push("--run-id", "d1")
+    assert started.exit_code == 0, started.output
+    assert "dev look 2 of 6 logged in docs/dev-usage.md" in started.stdout
+    fake.push_output = None
+
+    # A resume carries on the same run, from the same commit with the same options: it is
+    # the same look, so it adds no row, and goes once the looks are spent.
+    resumed = push("--run-id", "d1", "--resume")
+    assert resumed.exit_code == 0, resumed.output
+    assert "dev look: run d1's own, logged when it was first pushed" in resumed.stdout
+    for i in range(3, 7):
+        log_dev_use(f"run-{i}", "earlier look", path=dev_log)
+    again = push("--run-id", "d1", "--resume")
+    assert again.exit_code == 0, again.output
+    assert [logged for _, logged, _ in read_uses(dev_log)].count("d1") == 1
+    assert len(read_uses(dev_log)) == 6
+    spent = push("--run-id", "d2")
+    assert spent.exit_code == 1 and "had its 6 looks" in spent.stderr
+
+
+@pytest.mark.phase(3)
+def test_bad_kernel_slugs_and_notebook_resumes_are_refused_before_any_upload(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The code dataset holds another commit, so anything that got past the checks would
+    # publish one.
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")[::-1]), monkeypatch)
+    # Good run ids, but no kernel slug: Kaggle's has single hyphens between letters and digits.
+    for run_id in ("a--b", "run-"):
+        result = _eval(repo, "--yes", "--run-id", run_id)
+        assert result.exit_code == 1, result.output
+        assert f"run id {run_id} makes the kernel slug forge-{run_id}, which Kaggle refuses" in (
+            result.stderr
+        )
+    # A notebook fetches the datasets but no kernel's output, so it has nothing to resume.
+    book = repo.parent / "resume.ipynb"
+    result = _eval(repo, "--resume", "--emit-notebook", str(book))
+    assert result.exit_code == 1
+    assert "a notebook can't fetch the last attempt's kernel output" in result.stderr
+    assert fake.commands == [] and not book.exists() and not (repo / "runs").exists()
 
 
 @pytest.mark.phase(3)
@@ -677,6 +771,7 @@ def test_wait_and_output_log_each_kernel_session_once(
     assert waited.stdout.endswith(
         "eval run, stopped_time_guard\nledger: added 11.25 h on kaggle for run run-1\n"
     )
+    assert "carry it on with forge kaggle run --resume --run-id run-1" in waited.stderr
     # Fetching the output after, or pulling it, logs the session no second time.
     for args in (["kaggle", "output", "run-1"], ["runs", "pull", "run-1", "--store", "kaggle"]):
         again = CliRunner().invoke(cli.app, args)
@@ -720,7 +815,12 @@ def test_client_reads_what_the_kaggle_cli_prints() -> None:
     with pytest.raises(KaggleError, match="was refused: Kernel push error: bad title"):
         answer("Kernel push error: bad title\n").push_kernel(Path("k"), timeout_s=60, gpu=True)
     pushed = answer(_pushed("o/forge-x")).push_kernel(Path("k"), timeout_s=60, gpu=False)
-    assert (pushed.kernel, pushed.version) == ("o/forge-x", 1)
+    assert (pushed.kernel, pushed.version, pushed.dropped) == ("o/forge-x", 1, ())
+    dropped = "The following are not valid kernel sources and could not be added to the kernel: []"
+    pushed = answer(f"{dropped}\n{_pushed('o/forge-x')}").push_kernel(
+        Path("k"), timeout_s=60, gpu=True
+    )
+    assert (pushed.version, pushed.dropped) == (1, (dropped,))
     with pytest.raises(KaggleError, match="printed"):
         answer("ready").dataset_version("o/forge-code")
 

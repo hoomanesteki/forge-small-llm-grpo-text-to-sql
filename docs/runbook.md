@@ -82,13 +82,19 @@ Once the job has ended, `forge kaggle wait` adds its kernel session's row to
 session, as `forge runs pull` does (see Run store). A kernel that ends ERROR or CANCEL_*
 has no job outcome to read, so `wait` says to fetch what it kept with `output`.
 
-`forge kaggle run` stops at the first check that fails, before anything is uploaded:
+`forge kaggle run` runs these checks in order and stops at the first that fails. Steps 1
+and 2 upload nothing. Step 3 may publish a new version of `<owner>/forge-code`, so a job
+the budget refuses at step 4, or one declined at step 5, leaves that version behind; it
+holds HEAD, so the next push from the same commit mounts it.
 
 1. `.smoke-ok-<HEAD sha>` must be at the repo root, and the tree clean.
 2. The job's config is checked as the kernel will check it. An eval config is a
    `configs/eval/*.yaml` file whose `backend` is `vllm` (FG-306; `hf` runs on the CPU, so it
    is refused on a T4), with an `ops` section giving `est_gpu_hours`. `--job sft` and
-   `--job grpo` come with FG-403 and FG-504.
+   `--job grpo` come with FG-403 and FG-504. The run id must make a kernel slug Kaggle
+   takes (`forge-<run_id>`, and `-<n>` on a resume: lowercase letters and digits with
+   single hyphens between them, so not `a--b` or `run-`), the run must not clash with an
+   earlier push, and a dev job needs a dev look left (see Dev).
 3. The current version of `<owner>/forge-code` must hold HEAD's wheel (its `GIT_SHA`), or
    HEAD is published as a new version, which is waited for until Kaggle says `ready`. The
    kernel mounts that version by number, with `<owner>/forge-spider`, which must exist
@@ -102,9 +108,10 @@ has no job outcome to read, so `wait` says to fetch what it kept with `output`.
    in `KERNEL_ARGV`, and private GPU metadata with internet. It pushes with
    `--accelerator NvidiaTeslaT4` and a timeout of the estimate and half again (at most 12
    hours: plan section 5.3 stops a job 50% over its estimate), and reads the CLI's output:
-   a push error, or a dataset source it could not add, fails the command although
-   kaggle exits 0. The kernel is added to `runs/<run_id>/kernels.json`, which `status`,
-   `logs`, `wait` and `output` read.
+   a push error fails the command although kaggle exits 0. A source the CLI says it could
+   not add is a warning instead, since Kaggle has saved and started that version without
+   it. Either way a version Kaggle started is added to `runs/<run_id>/kernels.json`, which
+   `status`, `logs`, `wait` and `output` read.
 
 The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the kernel
 `<owner>/forge-<run_id>`. A run id that was pushed before is refused. `--resume` pushes the
@@ -117,27 +124,32 @@ add` takes today's UTC date unless `--on` names another. West of UTC, a job push
 evening is dated the next day in all of them, and this week's window counts its hours at
 once. Rows already committed keep the dates they were written with.
 
-In the kernel, `entry.py` runs its stages in order: env (the interpreter, for the log),
-code (the code dataset's `GIT_SHA` must be the pushed commit), install (`pip install
---no-deps` the wheel, then `requirements-gpu.txt`; it names any package the wheel needs
-that the image lacks), data (`spider.sha256` found by glob, `database.zip` unpacked if
-Kaggle left it packed, every file checked), secrets, preflight (the same job on 5 examples,
-in `preflight/`), job, and upload (`runs/<run_id>/` to the Hub run store, only with an
-`HF_TOKEN`; see Run store). Whatever happens, it writes `runs/<run_id>/status.json` and
-marks a manifest left `running` as failed. It exits 0 even when the job fails, since a
-kernel that ends in an error might not keep its output, so a COMPLETE kernel is not yet a
-finished job: `forge kaggle wait` reads `status.json` and exits 0 only for `finished`.
+In the kernel, `entry.py` runs its stages in order: restore (on a resume, the run's files
+from the last attempt's output, first, so that an attempt failing at any later stage still
+carries the run to the next resume), env (the interpreter, for the log), code (the code
+dataset's `GIT_SHA` must be the pushed commit), install (`pip install --no-deps` the wheel,
+then `requirements-gpu.txt`; it names any package the wheel needs that the image lacks),
+data (the dataset found by its `spider.sha256`, `database.zip` unpacked if Kaggle left it
+packed, every file checked against the list the installed wheel pins, not the dataset's own
+copy), secrets, preflight (the same job on 5 examples, in `preflight/`), job, and upload
+(`runs/<run_id>/` to the Hub run store, only with an `HF_TOKEN`; see Run store). Whatever
+happens, it writes `runs/<run_id>/status.json` and marks a manifest left `running` as
+failed. It exits 0 even when the job fails, since a kernel that ends in an error might not
+keep its output, so a COMPLETE kernel is not yet a finished job: `forge kaggle wait` reads
+`status.json` and exits 0 only for `finished`.
 
 Sessions. The kernel holds its GPU from its start to its end, the setup, preflight, model
 load and upload included, so that is the session its ledger row counts. `status.json`
 gives the session's `started_at` and `ended_at` and its number in the run (`session`), and
 the run's `sessions.json` gets the same span: the session the job began is stretched to
 the kernel's, or, when a resumed job fails before its run starts again, the kernel's
-session is added as failed. A kernel that fails before its job holds no run and logs no
-row; add it with `forge ledger add`. The upload stage first stretches the session up to the
-upload, so the Hub's copy misses only the upload's own minutes; `forge kaggle wait` logs
-the whole session first. A resumed run's output holds every session so far, so a session
-that was never waited for still gets its row.
+session is added as failed. A resumed run's kernel holds the run from its restore stage,
+so one that fails before its job gets that failed session too. A new run's kernel that
+fails before its job holds no run and logs no row; add it with `forge ledger add`. The
+upload stage first stretches the session up to the upload, so the Hub's copy misses only
+the upload's own minutes; `forge kaggle wait` logs the whole session first. A resumed run's
+output holds every session so far, so a session that was never waited for still gets its
+row.
 
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the
@@ -153,17 +165,24 @@ the T4 in fp16; the manifest's config then records it.
 
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
-`forge kaggle run` writes its row, with the run id and the reason, right after the push. In
-the kernel the preflight answers 5 val questions instead, so dev loads once, in the job,
-whose own row goes to `dev-usage.md` in the kernel's output. A dev job has no
-`--emit-notebook`, since a notebook can run any number of times and log none of them. Name
-a dev run with `--run-id` when the same model's val run was pushed from the same commit on
-the same day, since both would get the same default id.
+`forge kaggle run` writes its row, with the run id and the reason, as soon as Kaggle
+accepts the push, before it records the kernel or does anything else that could fail. So a
+kernel that may read dev always has its row, and a push Kaggle refuses spends nothing. A
+`--resume` carries on the same run, from the same commit with the same options, so it is
+the same look: it adds no row, and it goes even once the six are spent. In the kernel the
+preflight answers 5 val questions instead, so dev loads once, in the job, whose own row
+goes to `dev-usage.md` in the kernel's output. A dev job has no `--emit-notebook`, since a
+notebook can run any number of times and log none of them. Name a dev run with `--run-id`
+when the same model's val run was pushed from the same commit on the same day, since both
+would get the same default id.
 
 Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
-kernel, which only the web editor can do. Without them the job still runs, nothing is
-uploaded, and `forge kaggle output <run_id>` is how its results come back: the run's files
-go to `runs/<run_id>/`, and the log and the preflight to `runs/<run_id>/kernel/`.
+kernel, which only the web editor can do. Each is read without the line breaks and outer
+spaces huggingface_hub drops, and its value becomes `***` in every stage result in
+`status.json`, the error, the traceback and a failed run's `error.txt`. Without them the
+job still runs, nothing is uploaded, and `forge kaggle output <run_id>` is how its results
+come back: the run's files go to `runs/<run_id>/`, and the log and the preflight to
+`runs/<run_id>/kernel/`.
 
 Provenance. A kernel has the wheel but no git checkout, so `entry.py` passes the code
 dataset's `GIT_SHA` in `FORGE_CODE_SHA`, and the manifest's `git_sha` takes it only where
@@ -178,7 +197,9 @@ through the same checks; it runs without Forge, so it mounts no dataset and has 
 preflight. `--emit-notebook out.ipynb` writes the job as a Colab notebook and pushes
 nothing: a cell fetches both datasets with the kaggle CLI (a `KAGGLE_API_TOKEN` Colab
 secret), the next holds `entry.py` with the same arguments and `--host colab`, and the
-last runs it. Add its hours with `forge ledger add --platform colab`.
+last runs it. Add its hours with `forge ledger add --platform colab`. A resume has no
+notebook: the fetch cell gets the two datasets, never a kernel's output, so `--resume
+--emit-notebook` is refused.
 
 ## Run store
 
@@ -245,11 +266,17 @@ before the next one.
   `checkpoints/step-NNNNNN/` in the run store, marks the stored manifest
   `stopped_time_guard` and prunes the older checkpoints as retention says. A new session
   resumes from `latest_checkpoint`.
-- Eval: `run_eval(..., deadline=Deadline(minutes))` asks before each batch. A stopped run
-  keeps the batches it stored, leaves official EX to the attempt that finishes it, says
-  `stopped_time_guard` in its manifest and goes to its run store like a run that ended.
-  It resumes like a failed one: the same `--run-id`, or `forge kaggle run --resume`.
-  `forge eval run` and the kernel's entry script don't pass a deadline yet.
+- Eval: `run_eval(..., deadline=...)` asks before each batch. A stopped run keeps the
+  batches it stored, leaves official EX and its report to the attempt that finishes it,
+  says `stopped_time_guard` in its manifest and goes to its run store like a run that
+  ended. It resumes like a failed one: the same `--run-id`, or `forge kaggle run
+  --resume`. Official EX, the report and the upload follow the last batch, where no
+  guard asks, so an eval deadline keeps a tenth of its time back for them
+  (`forge.ops.timeguard.eval_deadline`). A kernel's eval job gets the push's timeout in
+  its arguments (`--timeout-s`) and counts it from the kernel's start, setup included;
+  its upload stage still runs, and `forge kaggle wait` exits 1 and names the resume.
+  `forge eval run --deadline-minutes N` counts from the command's start and exits 1 when
+  it stops.
 - A resumed run keeps its first `started_at`, but each attempt is a session of its own in
   the run's `sessions.json`, with its own start, end and status. A manifest's `gpu_hours`
   adds up its sessions' wall-clock hours on a platform with a GPU (`local-mps` too), and is
