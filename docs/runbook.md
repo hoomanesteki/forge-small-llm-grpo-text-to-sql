@@ -102,9 +102,10 @@ has no job outcome to read, so `wait` says to fetch what it kept with `output`.
    in `KERNEL_ARGV`, and private GPU metadata with internet. It pushes with
    `--accelerator NvidiaTeslaT4` and a timeout of the estimate and half again (at most 12
    hours: plan section 5.3 stops a job 50% over its estimate), and reads the CLI's output:
-   a push error, or a dataset source it could not add, fails the command although
-   kaggle exits 0. The kernel is added to `runs/<run_id>/kernels.json`, which `status`,
-   `logs`, `wait` and `output` read.
+   a push error fails the command although kaggle exits 0. A source the CLI says it could
+   not add is a warning instead, since Kaggle has saved and started that version without
+   it. Either way a version Kaggle started is added to `runs/<run_id>/kernels.json`, which
+   `status`, `logs`, `wait` and `output` read.
 
 The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the kernel
 `<owner>/forge-<run_id>`. A run id that was pushed before is refused. `--resume` pushes the
@@ -158,12 +159,16 @@ the T4 in fp16; the manifest's config then records it.
 
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
-`forge kaggle run` writes its row, with the run id and the reason, right after the push. In
-the kernel the preflight answers 5 val questions instead, so dev loads once, in the job,
-whose own row goes to `dev-usage.md` in the kernel's output. A dev job has no
-`--emit-notebook`, since a notebook can run any number of times and log none of them. Name
-a dev run with `--run-id` when the same model's val run was pushed from the same commit on
-the same day, since both would get the same default id.
+`forge kaggle run` writes its row, with the run id and the reason, as soon as Kaggle
+accepts the push, before it records the kernel or does anything else that could fail. So a
+kernel that may read dev always has its row, and a push Kaggle refuses spends nothing. A
+`--resume` carries on the same run, from the same commit with the same options, so it is
+the same look: it adds no row, and it goes even once the six are spent. In the kernel the
+preflight answers 5 val questions instead, so dev loads once, in the job, whose own row
+goes to `dev-usage.md` in the kernel's output. A dev job has no `--emit-notebook`, since a
+notebook can run any number of times and log none of them. Name a dev run with `--run-id`
+when the same model's val run was pushed from the same commit on the same day, since both
+would get the same default id.
 
 Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
 kernel, which only the web editor can do. Each is read without the line breaks and outer
