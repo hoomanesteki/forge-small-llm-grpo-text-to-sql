@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import functools
 import json
+import subprocess
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -180,3 +182,59 @@ def test_entry_loads_dev_once_in_a_dev_job(
         ("run-1", "baseline")
     ]
     assert not dev_log.exists()
+
+
+@pytest.mark.phase(3)
+def test_a_resume_carries_on_after_attempts_that_failed_before_their_job(
+    tmp_path: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gold = gold_reply(load_val(spider_mini))
+    replies = [0]
+
+    def flaky(text: str, sample_idx: int) -> str:
+        replies[0] += 1
+        if replies[0] == 8:  # five for the preflight and two for the first batch, then down
+            raise RuntimeError("the GPU fell over")
+        return gold(text, sample_idx)
+
+    def pip_fails(command: Sequence[str]) -> None:
+        raise subprocess.CalledProcessError(1, list(command))
+
+    FakeVllm(flaky).install(monkeypatch)
+    monkeypatch.setattr(runner, "run_eval", functools.partial(runner.run_eval, batch_size=2))
+    options = {"model": "org/model@abc123", "backend": "vllm", "limit": 6}
+
+    def attempt(name: str, *, resume: bool = True, pip: script.Runner = lambda c: None) -> Path:
+        root = kernel_folder(tmp_path / name, monkeypatch)
+        build_inputs(root, spider_mini)
+        if resume:
+            mount_output(previous, root)
+        if name == "third":
+            (root / "input" / "forge-spider" / "tables.json").write_text("[]\n")
+        args = argv(root, *(["--resume"] if resume else []), options=options)
+        assert script.main(args, run=pip) == 0
+        return root
+
+    previous = attempt("first", resume=False)
+    status = json.loads((previous / "working" / "runs" / "run-1" / "status.json").read_text())
+    assert (status["status"], status["stage"]) == ("failed", "job")
+    assert len(_scores(previous / "working" / "runs" / "run-1")) == 2
+    # Two resumes that fail before their job, at the install and at the data: each output
+    # still holds the run, so the next resume carries on from it.
+    for name, stage, pip in (("second", "install", pip_fails), ("third", "data", lambda c: None)):
+        previous = attempt(name, pip=pip)
+        run_dir = previous / "working" / "runs" / "run-1"
+        status = json.loads((run_dir / "status.json").read_text())
+        assert (status["status"], status["stage"]) == ("failed", stage)
+        assert len(_scores(run_dir)) == 2
+
+    last = attempt("fourth")
+
+    run_dir = last / "working" / "runs" / "run-1"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert (status["status"], status["error"], status["session"]) == ("finished", None, 4)
+    scores = _scores(run_dir)
+    assert len(scores) == 6 and all(s.ex_fast and s.ex_official for s in scores)
+    # Every attempt is a session of the run, the early failures too.
+    sessions = read_sessions(run_dir) or []
+    assert [s.status for s in sessions] == ["failed", "failed", "failed", "finished"]
