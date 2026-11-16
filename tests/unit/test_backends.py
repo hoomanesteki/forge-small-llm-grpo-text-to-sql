@@ -296,7 +296,9 @@ def test_trl_accepts_every_setting(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     _devices(monkeypatch)
     backend = TrlBackend("cpu")
     dataset = Dataset.from_list([{"prompt": [{"role": "user", "content": "how many"}]}])
-    sft_cfg = SftConfig(max_steps=3, warmup_ratio=0.1, gradient_checkpointing=False)
+    sft_cfg = SftConfig(
+        max_steps=3, warmup_ratio=0.1, gradient_checkpointing=False, pad_to_multiple_of=64
+    )
     backend.sft_trainer("model", WordTokenizer(), dataset, sft_cfg, [], output_dir=tmp_path, seed=5)
     for cfg in (GrpoConfig(max_completion_length=128), GrpoConfig(beta=0.04)):
         backend.grpo_trainer(
@@ -310,9 +312,11 @@ def test_trl_accepts_every_setting(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert sft.save_strategy == "no" and sft.save_total_limit == 2
     # The config's setting, not TRL's default of on, under either of transformers' names.
     assert (sft.gradient_checkpointing, sft.activation_checkpointing) == (False, False)
-    on = SftConfig()
-    backend.sft_trainer("model", WordTokenizer(), dataset, on, [], output_dir=tmp_path, seed=5)
-    assert made[-1][1]["args"].activation_checkpointing is True
+    assert sft.pad_to_multiple_of == 64
+    plain = SftConfig()
+    backend.sft_trainer("model", WordTokenizer(), dataset, plain, [], output_dir=tmp_path, seed=5)
+    defaults = made[-1][1]["args"]
+    assert (defaults.activation_checkpointing, defaults.pad_to_multiple_of) == (True, None)
 
     assert (grpo.num_generations, grpo.max_completion_length, grpo.generation_batch_size) == (
         6,

@@ -24,6 +24,7 @@ SFT_MODELS = {
     "qwen3-1p7b-pilot.yaml": ("candidates", "qwen3-1-7b"),
     "qwen3-4b-main.yaml": ("candidates", "qwen3-4b"),
 }
+LOCAL_PILOT = "pilot-qwen25coder05b-mps.yaml"
 # The Kaggle runs' GPU hours, plan section 3.8: the SFT pilot and the main run.
 KAGGLE_HOURS = {"qwen3-1p7b-pilot.yaml": 1.0, "qwen3-4b-main.yaml": 2.5}
 
@@ -221,22 +222,30 @@ def test_sft_configs_start_from_adr_0010() -> None:
             "cosine",
             0.03,
         ), name
-        # 2,048 tokens, not TRL's 1,024, which would cut long rows' replies (FG-401).
-        assert config.max_seq_length == sft.max_length == 2048, name
+        # 2,048 tokens, not TRL's 1,024, which would cut long rows' replies (FG-401). The
+        # laptop pilot takes 1,536 for its memory, and its longer rows are left out (FG-491).
+        length = 1536 if name == LOCAL_PILOT else 2048
+        assert config.max_seq_length == sft.max_length == length, name
+        assert sft.gradient_checkpointing, name
         if name == "tiny-smoke.yaml":
             # Three steps on the CPU, what make smoke trains, with a checkpoint among them.
             assert (config.run.backend, config.run.device, sft.max_steps) == ("trl", "cpu", 3)
             assert config.ops.checkpoint_every < sft.max_steps
             continue
         # One epoch at an effective batch of 16 rows.
-        assert (sft.num_train_epochs, sft.max_steps) == (1.0, None), name
-        assert sft.per_device_train_batch_size * sft.gradient_accumulation_steps == 16, name
+        rows_a_step = sft.per_device_train_batch_size * sft.gradient_accumulation_steps
+        assert (sft.num_train_epochs, sft.max_steps, rows_a_step) == (1.0, None, 16), name
         if name in KAGGLE_HOURS:
-            # A kernel job's: CUDA, a 4-bit base, and the plan's estimate for the budget.
+            # A kernel job's: CUDA, a 4-bit base, the whole train split, and the plan's
+            # estimate for the budget.
             assert (config.run.backend, config.run.device) == ("auto", "auto"), name
-            assert config.run.load_in_4bit, name
+            assert config.run.load_in_4bit and sft.subset_rows is None, name
             assert config.ops.est_gpu_hours == KAGGLE_HOURS[name], name
         else:
-            # The local pilot on Apple silicon's GPU (ADR-0016).
+            # The local pilot on Apple silicon's GPU (ADR-0016), a row at a time for the
+            # laptop's memory, on a subset of whole steps: its timing probe put an epoch
+            # past the 2.5 h it may take (FG-491).
             assert (config.run.backend, config.run.device) == ("trl", "mps"), name
             assert not config.run.load_in_4bit
+            assert sft.per_device_train_batch_size == 1
+            assert sft.subset_rows is not None and sft.subset_rows % rows_a_step == 0
