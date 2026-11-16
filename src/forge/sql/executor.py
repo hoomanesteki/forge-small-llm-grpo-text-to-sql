@@ -232,6 +232,27 @@ def strip_leading(sql: str) -> str:
     return ""
 
 
+def split_statements(sql: str) -> list[str]:
+    """The text of each statement in ``sql``, cut at each ``;`` that SQLite's tokenizer
+    finds, from its first token to its last. Pieces with nothing but whitespace and
+    comments are left out, so there can be fewer than ``statement_count`` says."""
+    pieces: list[str] = []
+    start: int | None = None
+    end = 0
+    for match in _LEXEME.finditer(sql):
+        kind = match.lastgroup
+        if kind == "end":
+            if start is not None:
+                pieces.append(sql[start:end])
+            start = None
+        elif kind not in _GAPS:
+            start = match.start() if start is None else start
+            end = match.end()
+    if start is not None:
+        pieces.append(sql[start:end])
+    return pieces
+
+
 def comments(sql: str) -> list[str]:
     """The text of each comment in ``sql``, without its ``--`` or its ``/*`` and ``*/``.
 

@@ -15,8 +15,10 @@ shortcuts, so the model learns the skill rather than the checker (FG-501).
   already in reward units, so its weight is 1:
 
   - ``non_select``, -1.0: the executor denies the query, as it denies anything but one
-    ``SELECT`` or ``VALUES``; or, among several statements, sqlglot reads one as something
-    other than a query.
+    ``SELECT`` or ``VALUES``; or, among several statements, one starts with a statement
+    keyword the executor denies (``statement_keyword``), such as ``DELETE``. The pieces
+    are cut and read as the executor reads them, so a write is charged even where sqlglot
+    can't read the rest, as with a block comment left open.
   - ``multiple_statements``, -0.5: more than one statement, counted as the executor counts
     them (``statement_count``), so it fires exactly when the executor refuses the SQL as
     more than one statement.
@@ -79,7 +81,13 @@ from forge.core.types import ExecResult
 from forge.eval.config import PRED_TIMEOUT_MS
 from forge.eval.gold_cache import MAX_ROWS
 from forge.sql.compare import order_matters, results_match
-from forge.sql.executor import comments, statement_count
+from forge.sql.executor import (
+    QUERY_KEYWORDS,
+    comments,
+    split_statements,
+    statement_count,
+    statement_keyword,
+)
 from forge.sql.extract import drop_thinking, extract_sql
 from forge.sql.sandbox import SandboxPool
 from forge.train.backends import RewardFunc
@@ -251,7 +259,7 @@ def _verdict(reply: str, sql: str, pred: ExecResult, gold: ExecResult, gold_sql:
     fired: set[Guard] = set()
     if count > 1:
         fired.add("multiple_statements")
-        if statements is not None and not all(map(_is_query, statements)):
+        if any(map(_denied_keyword, split_statements(sql))):
             fired.add("non_select")
     elif pred.error_kind == "denied":
         fired.add("non_select")
@@ -312,7 +320,19 @@ def _read(sql: str) -> list[exp.Expr] | None:
     # sqlglot runs out of stack at about 47 nested parentheses and raises RecursionError.
     except (SqlglotError, RecursionError):
         return None
-    return [statement for statement in statements if statement is not None]
+    # sqlglot 30 reads a comment beside a ``;`` as an ``exp.Semicolon`` statement, which
+    # SQLite doesn't count; ``comments`` reads comments for the payload guard.
+    return [
+        statement
+        for statement in statements
+        if statement is not None and not isinstance(statement, exp.Semicolon)
+    ]
+
+
+def _denied_keyword(statement: str) -> bool:
+    """Whether the executor would deny ``statement`` by its keyword, as not a query."""
+    keyword = statement_keyword(statement)
+    return keyword is not None and keyword not in QUERY_KEYWORDS
 
 
 def _is_query(statement: exp.Expr) -> bool:

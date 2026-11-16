@@ -129,6 +129,15 @@ def test_gold_gets_full_reward(rewards: Rewards, examples: dict[str, Example]) -
     # Plain text completions, and Qwen3's empty think block, score the same.
     qwen3 = [(example_id, f"<think>\n\n</think>\n\n{reply}") for example_id, reply in replies]
     assert _score(rewards, examples, qwen3, chat=False) == [FULL] * len(replies)
+    # A comment beside a semicolon is still one statement, which eval EX counts as right;
+    # sqlglot 30 reads such a comment as a statement of its own.
+    commented = [
+        (example.id, _block(sql))
+        for example in examples.values()
+        for bare in [example.gold_sql.rstrip().removesuffix(";")]
+        for sql in (f"{bare}; -- done", f"-- c\n;{bare}", f"/* c */ ; {bare};")
+    ]
+    assert _score(rewards, examples, commented) == [FULL] * len(commented)
 
 
 @pytest.mark.phase(5)
@@ -155,6 +164,9 @@ def test_constant_query_guard(
         "SELECT (SELECT 3) FROM professor LIMIT 1",
         "SELECT 3 UNION SELECT dept_code FROM professor WHERE 0",
         "VALUES ((SELECT 3 FROM professor LIMIT 1))",
+        # A comment after the semicolon hides nothing.
+        "SELECT 3; -- x",
+        "-- c\n;SELECT 3",
     ]
     # Each one returns the right answer, so the comparator alone would pay for it.
     for sql in constants:
@@ -206,14 +218,24 @@ def test_multiple_statements_penalized(rewards: Rewards, examples: dict[str, Exa
         f"{gold_sql}; SELECT count(*) FROM department",
         # extract_sql drops one semicolon, and SQLite counts a stray one after a statement.
         f"{gold_sql};;;",
+        # A comment after the last one is no statement, let alone a write.
+        "SELECT count(*) FROM professor; SELECT count(*) FROM department; -- x",
+        "SELECT count(*) FROM professor; foo",
     ]
     scores = _score(rewards, examples, [(COUNT_OF_3, _block(sql)) for sql in two])
     assert scores == [(0.0, 0.0, 0.0, -0.5)] * len(two)
     assert {_total(rewards, s) for s in scores} == {-0.5}
 
-    # A write among them sets off both guards.
-    with_write = _block("SELECT count(*) FROM professor; DELETE FROM professor")
-    assert _score(rewards, examples, [(COUNT_OF_3, with_write)]) == [(0.0, 0.0, 0.0, -1.5)]
+    # A write among them sets off both guards, read by its keyword as the executor reads
+    # it, also where sqlglot can't read the rest: here a block comment left open.
+    with_write = [
+        "SELECT count(*) FROM professor; DELETE FROM professor",
+        "DELETE FROM professor; SELECT 1 /*",
+        "SELECT 1; WITH t AS (SELECT 1) DELETE FROM professor /* open",
+        "SELECT 1;﻿PRAGMA table_info(professor) -- x",
+    ]
+    scores = _score(rewards, examples, [(COUNT_OF_3, _block(sql)) for sql in with_write])
+    assert scores == [(0.0, 0.0, 0.0, -1.5)] * len(with_write)
 
 
 @pytest.mark.phase(5)

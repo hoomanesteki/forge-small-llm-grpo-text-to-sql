@@ -13,6 +13,7 @@ from forge.sql.executor import (
     SqliteExecutor,
     classify_error,
     comments,
+    split_statements,
     statement_count,
     statement_keyword,
     strip_leading,
@@ -254,6 +255,24 @@ def test_comments() -> None:
     # SQLite agrees that the open comment is one: the query runs.
     with closing(sqlite3.connect(":memory:")) as conn:
         assert conn.execute("SELECT 1 /* never closed").fetchall() == [(1,)]
+
+
+@pytest.mark.phase(5)
+def test_split_statements() -> None:
+    cases: dict[str, list[str]] = {
+        "SELECT 1": ["SELECT 1"],
+        "SELECT 1; -- done": ["SELECT 1"],
+        "-- c\n;SELECT 1": ["SELECT 1"],
+        "SELECT 1;;; DELETE FROM t ;": ["SELECT 1", "DELETE FROM t"],
+        "SELECT /* a; */ 1 -- b;\n, 2; SELECT ';'": ["SELECT /* a; */ 1 -- b;\n, 2", "SELECT ';'"],
+        # Left open, the comment swallows the rest, semicolons and all.
+        "DELETE FROM t; SELECT 1 /* x; y": ["DELETE FROM t", "SELECT 1"],
+        "SELECT 1;﻿PRAGMA x": ["SELECT 1", "PRAGMA x"],
+        " ; -- nothing\n": [],
+    }
+    for sql, pieces in cases.items():
+        assert split_statements(sql) == pieces, sql
+        assert len(pieces) <= statement_count(sql), sql
 
 
 @pytest.mark.phase(1)
