@@ -25,6 +25,7 @@ from huggingface_hub.errors import (
 )
 
 from forge.core.types import Example, RunManifest
+from forge.ops.adapters import checkpoint_digests
 from forge.sql.executor import SqliteExecutor
 
 
@@ -333,7 +334,14 @@ def sft_run_folder(
     runs: Path, run_id: str, model_ref: str, checkpoints: Sequence[str], **changes: Any
 ) -> RunManifest:
     """A finished SFT run in ``runs/<run_id>/`` as a GPU job leaves one, without training:
-    its manifest, and an adapter in each of ``checkpoints`` whose files name the folder."""
+    its manifest, and an adapter in each of ``checkpoints`` whose files name the folder,
+    with the digest of each in the manifest's outputs."""
+    folder = runs / run_id
+    folder.mkdir(parents=True)
+    for rel in checkpoints:
+        (folder / rel).mkdir(parents=True)
+        (folder / rel / "adapter_config.json").write_text(f'{{"from": "{rel}"}}\n')
+        (folder / rel / "adapter_model.safetensors").write_text(f"weights of {rel}")
     fields: dict[str, Any] = {
         "run_id": run_id,
         "kind": "sft",
@@ -349,15 +357,13 @@ def sft_run_folder(
         "ended_at": datetime(2026, 11, 20, 10, 30, tzinfo=UTC),
         "gpu_hours": 2.5,
         "status": "finished",
-        "outputs": {"config": "config.yaml", "adapter": "checkpoints/final"},
+        "outputs": {
+            "config": "config.yaml",
+            "adapter": "checkpoints/final",
+            **checkpoint_digests(folder),
+        },
         **changes,
     }
     manifest = RunManifest(**fields)
-    folder = runs / run_id
-    folder.mkdir(parents=True)
     (folder / "manifest.json").write_text(manifest.model_dump_json(indent=2) + "\n")
-    for rel in checkpoints:
-        (folder / rel).mkdir(parents=True)
-        (folder / rel / "adapter_config.json").write_text(f'{{"from": "{rel}"}}\n')
-        (folder / rel / "adapter_model.safetensors").write_text(f"weights of {rel}")
     return manifest

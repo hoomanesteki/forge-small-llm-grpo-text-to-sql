@@ -22,6 +22,8 @@ from forge import cli
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.splits import load_train
+from forge.eval.run_files import ADAPTER_DIGEST
+from forge.ops.adapters import adapter_sha256, digest_output
 from forge.ops.manifest import config_hash
 from forge.train.config import LORA_TARGETS, OpsConfig, load_train_config
 from forge.train.sft import run_sft
@@ -98,6 +100,9 @@ def test_sft_trains_saves_and_evaluates(
     stored = read_stored(runs / "sft-eval", spider_mini)
     assert stored.manifest.status == "finished"
     assert stored.manifest.adapter_ref == stored.manifest.config["adapter"] == str(adapter)
+    # Its scores are those of the weights the training run saved, by their digest.
+    saved = manifest.outputs[digest_output("checkpoints/final")]
+    assert stored.manifest.outputs[ADAPTER_DIGEST] == saved == adapter_sha256(adapter)
     assert len(stored.scores) == 10
     assert all(score.ex_official is not None for score in stored.scores)
     for reply in stored.generations.values():

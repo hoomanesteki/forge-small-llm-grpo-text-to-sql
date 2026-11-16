@@ -27,11 +27,14 @@ A run evaluates one model on one split:
    database's columns, which are read in process like gold.
 9. Each batch's first tries, generations and scores are stored before the next batch
    starts.
-10. With a run store (``--store hub``), the store's copy of the run comes first when it
+10. With an adapter, its digest (``forge.ops.adapters.adapter_sha256``) goes into the
+    manifest's outputs before the run starts, as ``adapter_sha256``: the files of the
+    folder it names, or of the Hub repo at its revision. A resume must find the same files.
+11. With a run store (``--store hub``), the store's copy of the run comes first when it
     is newer than this machine's or this machine has none, and the run's folder goes to
     it when the run ends, finished or failed, unless the store's copy has moved on since
     (``forge.ops.run_copies``). Copies that went separate ways are refused.
-11. With a deadline (``forge.ops.timeguard``), the run asks it before each batch and
+12. With a deadline (``forge.ops.timeguard``), the run asks it before each batch and
     stops once that batch might not end in time. The batches stored stay, official EX
     waits for the attempt that resumes the run, and the manifest says
     ``stopped_time_guard``; the run goes to the store as one that ended.
@@ -67,10 +70,20 @@ from forge.eval.config import (
 from forge.eval.gold_cache import MAX_ROWS, gold_results
 from forge.eval.mutations import Columns
 from forge.eval.retry import ask_again, retried
-from forge.eval.run_files import Key, RunFiles, RunPaths, finish, hold, key, start
+from forge.eval.run_files import (
+    ADAPTER_DIGEST,
+    Key,
+    RunFiles,
+    RunPaths,
+    finish,
+    hold,
+    key,
+    start,
+)
 from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
+from forge.ops.adapters import adapter_folder, adapter_sha256
 from forge.ops.hub import RunStore, hub_store
 from forge.ops.manifest import CODE_SHA_ENV, accelerator, build_manifest
 from forge.ops.paths import RepoRootNotFound, cache_dir, repo_root, runs_dir
@@ -162,7 +175,7 @@ def run_eval(
     test; ``count_tokens`` measures its prompts, and counts words by default.
     ``store`` likewise replaces the run store ``config.store`` names, ``hub_store()`` for
     ``hub``. ``progress`` is called after each batch with the scores stored and the total.
-    ``deadline`` stops the run between batches, as step 11 of the module docstring says.
+    ``deadline`` stops the run between batches, as step 12 of the module docstring says.
     Raises ``DirtyTreeError`` on uncommitted changes unless ``allow_dirty``, and
     ``OSError`` when a finished run can't be stored.
     """
@@ -183,6 +196,10 @@ def run_eval(
         repo=_code_root(),
         data_dir=root,
     )
+    if config.adapter is not None:
+        # Before the run starts, so an adapter that isn't there fails before any file.
+        digest = adapter_sha256(adapter_folder(config.adapter))
+        fresh = fresh.model_copy(update={"outputs": {ADAPTER_DIGEST: digest}})
     if store is None and config.store == "hub":
         store = hub_store()
     paths = RunPaths((runs_root or runs_dir()) / fresh.run_id, config.split)

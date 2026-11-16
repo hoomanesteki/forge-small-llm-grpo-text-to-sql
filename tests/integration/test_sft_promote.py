@@ -4,6 +4,7 @@ data, and the best one promoted (FG-404), with the model's replies stood in for.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -77,10 +78,10 @@ def _promote(*args: str) -> Any:
 def test_runs_promote_picks_the_checkpoint_its_val_runs_score_highest(
     runs: Path, tmp_path: Path
 ) -> None:
-    # The adapters as forge eval run --adapter names them on the laptop, and as a kernel's
-    # folder holds one.
-    _evaluate(runs, "half-on-val", f"runs/{RUN}/{HALF}", right=5)
-    _evaluate(runs, "final-on-val", f"/kaggle/working/runs/{RUN}/{FINAL}", right=3)
+    # Each adapter is a folder of the run, named by a path from anywhere, as a kernel's
+    # work folder or the laptop's repo root holds it, with a shell's trailing slash or not.
+    _evaluate(runs, "half-on-val", f"{runs}/{RUN}/{HALF}/", right=5)
+    _evaluate(runs, "final-on-val", f"{runs}/{RUN}/{FINAL}", right=3)
     half, final = _official_ex(runs, "half-on-val"), _official_ex(runs, "final-on-val")
     assert half > final
 
@@ -105,7 +106,7 @@ def test_runs_promote_picks_the_checkpoint_its_val_runs_score_highest(
 def test_runs_promote_goes_to_the_hub_store(
     runs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _evaluate(runs, "final-on-val", f"runs/{RUN}/{FINAL}", right=4)
+    _evaluate(runs, "final-on-val", f"{runs}/{RUN}/{FINAL}", right=4)
     # The store FORGE_RUN_STORE names, holding the run as it was pulled, and no .env read.
     fake = FakeHub()
     monkeypatch.setattr("huggingface_hub.HfApi", fake.client)
@@ -129,23 +130,25 @@ def test_runs_promote_goes_to_the_hub_store(
 
 @pytest.mark.phase(4)
 def test_runs_promote_takes_val_runs_of_the_runs_checkpoints_alone(
-    runs: Path, with_dev: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+    runs: Path, tmp_path: Path, with_dev: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("FORGE_DATA_DIR", str(with_dev))
-    _evaluate(runs, "final-on-val", f"runs/{RUN}/{FINAL}", right=4)
-    _evaluate(runs, "half-on-dev", f"runs/{RUN}/{HALF}", right=4, split="dev", reason="test")
-    _evaluate(runs, "half-on-train", f"runs/{RUN}/{HALF}", right=4, split="train")
-    _evaluate(runs, "half-with-retry", f"runs/{RUN}/{HALF}", right=4, retry=1)
-    _evaluate(runs, "another-run", f"runs/{OTHER}/{HALF}", right=4)
-    _evaluate(runs, "not-a-checkpoint", f"runs/{RUN}", right=4)
-    _evaluate(runs, "final-again", f"runs/{RUN}/{FINAL}", right=2)
+    _evaluate(runs, "final-on-val", f"{runs}/{RUN}/{FINAL}", right=4)
+    _evaluate(runs, "half-on-dev", f"{runs}/{RUN}/{HALF}", right=4, split="dev", reason="test")
+    _evaluate(runs, "half-on-train", f"{runs}/{RUN}/{HALF}", right=4, split="train")
+    _evaluate(runs, "half-with-retry", f"{runs}/{RUN}/{HALF}", right=4, retry=1)
+    sft_run_folder(runs, OTHER, MODEL, [HALF])
+    _evaluate(runs, "another-run", f"{runs}/{OTHER}/{HALF}", right=4)
+    adapter = Path(shutil.copytree(runs / RUN / FINAL, tmp_path / "adapter"))
+    _evaluate(runs, "not-a-checkpoint", str(adapter), right=4)
+    _evaluate(runs, "final-again", f"{runs}/{RUN}/{FINAL}", right=2)
 
     refused = [
         ("half-on-dev", "run half-on-dev evaluated dev; checkpoints are chosen on val"),
         ("half-on-train", "run half-on-train evaluated train"),
         ("half-with-retry", "runs final-on-val and half-with-retry differ in retry, not in the"),
-        ("another-run", f"run another-run's adapter is runs/{OTHER}/{HALF}, no checkpoint of"),
-        ("not-a-checkpoint", f"run not-a-checkpoint's adapter is runs/{RUN}, no checkpoint of"),
+        ("another-run", f"run another-run's adapter is {runs}/{OTHER}/{HALF}, no checkpoint"),
+        ("not-a-checkpoint", f"run not-a-checkpoint's adapter is {adapter}, no checkpoint of"),
         ("final-again", f"runs final-on-val and final-again both scored {FINAL}; name one"),
     ]
     for other, message in refused:

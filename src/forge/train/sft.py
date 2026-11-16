@@ -26,7 +26,9 @@ One run, in order (plan FG-403; the starting values are ADR-0010's):
    run starts, and the trainer's logs in ``metrics.jsonl``. The checkpoint at each share
    of the run ``ops.keep_checkpoints_at`` names is kept from retention, and the manifest's
    outputs name it ``kept_at_<share>``, such as ``kept_at_0.5``.
-6. The adapter in ``checkpoints/final``, and the manifest ``finished``. When the time
+6. The adapter in ``checkpoints/final``, and the manifest ``finished``, its outputs
+   holding the digest of each checkpoint the run keeps (``forge.ops.adapters``), which an
+   eval run of that checkpoint records too. When the time
    guard stopped training, its checkpoint is the run's last, there is no ``final``, and
    the manifest says ``stopped_time_guard``. A run that fails says ``failed``, with the
    traceback in ``error.txt``.
@@ -63,7 +65,13 @@ from forge.data.spider import resolve_data_dir
 from forge.eval.config import Host, check_run_id
 from forge.eval.metrics import summarize
 from forge.eval.run_files import read_run, write_atomic
-from forge.ops.adapters import checkpoint_ref
+from forge.ops.adapters import (
+    ADAPTER_FILES,
+    adapter_sha256,
+    checkpoint_digests,
+    checkpoint_ref,
+    digest_output,
+)
 from forge.ops.hub import (
     BEST,
     FINAL,
@@ -96,8 +104,6 @@ KEPT_OUTPUT = "kept_at_{share:g}"
 # What promote_best writes beside the manifest, and what its scores are.
 PROMOTION_FILE = "best.json"
 PROMOTION_METRIC = "official EX on val"
-# A LoRA adapter as PEFT saves one, which forge eval run --adapter loads.
-ADAPTER_FILES = ("adapter_config.json", "adapter_model.safetensors")
 # Settings an eval run's config may hold that change no score.
 _SCORELESS = ("adapter", "allow_over_budget")
 LOCAL_PLATFORMS: Mapping[str, Platform] = {"cpu": "local-cpu", "mps": "local-mps"}
@@ -358,12 +364,14 @@ def promote_best(
     ``sources`` maps each to the eval run its score comes from. A tie goes to the later
     checkpoint: an earlier one is promoted only when val scores it higher.
 
-    The run's folder in ``runs_root`` (``runs/``) gets ``checkpoints/best/``, ``best.json``
-    with the checkpoint, the scores and their sources, and a manifest whose outputs name
-    both. With ``store``, which must hold the same manifest as the folder, they go there
-    too, the manifest last, so neither copy names a best it lacks. Promoting again replaces
-    all three. Raises ``RunNotFound`` for no such run, and ``ValueError`` for a run that is
-    not a finished SFT run, or for a checkpoint, a score or a source it can't take.
+    Each checkpoint's folder must hold the files the run saved there, by the digest its
+    manifest records. The run's folder in ``runs_root`` (``runs/``) gets
+    ``checkpoints/best/``, ``best.json`` with the checkpoint, the scores and their sources,
+    and a manifest whose outputs name both, and best/'s digest. With ``store``, which must
+    hold the same manifest as the folder, they go there too, the manifest last, so neither
+    copy names a best it lacks. Promoting again replaces all three. Raises ``RunNotFound``
+    for no such run, and ``ValueError`` for a run that is not a finished SFT run, or for a
+    checkpoint, a score or a source it can't take.
     """
     if not scores_by_ckpt:
         raise ValueError(f"no checkpoint of run {run_id} has a score, so none can be promoted")
@@ -386,6 +394,7 @@ def promote_best(
                 f"{run_dir / rel} has no {' or '.join(missing)}, so it holds no adapter to "
                 "promote; forge runs pull the run first"
             )
+        _check_saved(manifest, rel, run_dir / rel)
     if sources is not None and set(sources) != set(scores_by_ckpt):
         raise ValueError(
             f"the sources name {sorted(sources)}, and the scores {sorted(scores_by_ckpt)}"
@@ -413,7 +422,12 @@ def promote_best(
     if sources is not None:
         record["eval_runs"] = {rel: sources[rel] for rel in ranked}
     write_atomic(run_dir / PROMOTION_FILE, (json.dumps(record, indent=2) + "\n").encode())
-    outputs = {**manifest.outputs, "best": BEST, "promotion": PROMOTION_FILE}
+    outputs = {
+        **manifest.outputs,
+        "best": BEST,
+        "promotion": PROMOTION_FILE,
+        digest_output(BEST): manifest.outputs[digest_output(chosen)],
+    }
     promoted = manifest.model_copy(update={"outputs": outputs})
     if store is not None:
         store.put_folder(run_id, best, BEST, replace=True)
@@ -492,6 +506,23 @@ def checkpoint_scores(
     return scores, sources
 
 
+def _check_saved(trained: RunManifest, rel: str, folder: Path) -> None:
+    """Raise ``ValueError`` unless ``folder`` holds the adapter files the training run
+    saved as its checkpoint ``rel``, by the digest its manifest records."""
+    saved = trained.outputs.get(digest_output(rel))
+    if saved is None:
+        raise ValueError(
+            f"run {trained.run_id}'s manifest records no digest of {rel}, so nothing shows "
+            "which weights it saved there"
+        )
+    found = adapter_sha256(folder)
+    if found != saved:
+        raise ValueError(
+            f"{folder} holds other files than run {trained.run_id} saved as {rel} (sha256 "
+            f"{found}, not {saved}); forge runs pull the run again"
+        )
+
+
 def _checkpoint_order(rel: str, run_id: str) -> tuple[int, int]:
     """Where checkpoint ``rel`` comes in its run: by step, and the final adapter last."""
     if rel == FINAL:
@@ -519,14 +550,14 @@ def _build_rows(
 
 
 def _outputs(run_dir: Path, kept: Mapping[float, int] | None = None) -> dict[str, str]:
-    """The run's ``OUTPUTS`` that exist, and the kept checkpoints of ``kept``, a share of
-    the run to its step."""
+    """The run's ``OUTPUTS`` that exist, the kept checkpoints of ``kept``, a share of the
+    run to its step, and the digest of each checkpoint in the folder."""
     found = {name: rel for name, rel in OUTPUTS.items() if (run_dir / rel).exists()}
     for share, step in (kept or {}).items():
         rel = checkpoint_dir(step)
         if (run_dir / rel).is_dir():
             found[KEPT_OUTPUT.format(share=share)] = rel
-    return found
+    return {**found, **checkpoint_digests(run_dir)}
 
 
 def _start(run_dir: Path, manifest: RunManifest, store: LocalRunStore) -> RunManifest:

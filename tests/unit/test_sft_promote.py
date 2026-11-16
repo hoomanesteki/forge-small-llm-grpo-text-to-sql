@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from forge.ops.adapters import adapter_sha256, digest_output
 from forge.ops.hub import BEST, FINAL, HubRunStore, LocalRunStore, RunNotFound
 from forge.train.sft import PROMOTION_FILE, promote_best
 from tests.fakes import FakeHub, hub_error, sft_run_folder
@@ -54,10 +55,14 @@ def test_promote_best_copies_the_checkpoint_val_scores_highest(tmp_path: Path) -
             "eval_runs": {HALF: "half-on-val", FINAL: "final-on-val"},
         }
     )
-    # The manifest's outputs name both; nothing else of it changes.
+    # The manifest's outputs name both, and best/'s digest, the promoted checkpoint's;
+    # nothing else of it changes.
     stored = LocalRunStore(runs).get_manifest(RUN)
     assert stored == promotion.manifest
-    assert stored.outputs == {**before.outputs, "best": BEST, "promotion": PROMOTION_FILE}
+    best = {"best": BEST, "promotion": PROMOTION_FILE, digest_output(BEST): ""}
+    best[digest_output(BEST)] = before.outputs[digest_output(HALF)]
+    assert stored.outputs == {**before.outputs, **best}
+    assert best[digest_output(BEST)] == adapter_sha256(run_dir / BEST)
     assert stored.model_copy(update={"outputs": before.outputs}) == before
 
     # A tie goes to the later checkpoint, and best/ holds its files and no others.
@@ -100,6 +105,14 @@ def test_promote_best_refuses_what_it_cant_take(tmp_path: Path) -> None:
             promote_best(RUN, scores, runs_root=runs)
     with pytest.raises(ValueError, match="the sources name"):
         promote_best(RUN, {HALF: 0.5, FINAL: 0.4}, sources={HALF: "one"}, runs_root=runs)
+    # A checkpoint's folder must hold the files the run saved there, by their digest.
+    (runs / RUN / HALF / "adapter_model.safetensors").write_text("other weights")
+    with pytest.raises(ValueError, match=rf"{HALF} holds other files than run {RUN} saved"):
+        promote_best(RUN, {HALF: 0.5, FINAL: 0.4}, runs_root=runs)
+    undigested = "2026-11-20-qwen3-4b-sft-fed4321"
+    sft_run_folder(runs, undigested, MODEL, [FINAL], outputs={"adapter": FINAL})
+    with pytest.raises(ValueError, match="records no digest of checkpoints/final, so nothing"):
+        promote_best(undigested, {FINAL: 0.5}, runs_root=runs)
 
     # Only a finished SFT run has checkpoints to choose from.
     stopped = "2026-11-20-qwen3-4b-sft-def5678"
