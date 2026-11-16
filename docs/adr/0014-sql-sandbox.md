@@ -170,8 +170,14 @@ lists them too. Timings are from the laptop (Apple M4, 16 GB, Python 3.12.13, SQ
   (39 MiB idle) peaked at 386 MiB with a 100 ms timeout and 603 MiB with 300 ms, so the
   default 2 s plus the grace allows more than was measured here. An official EX item
   killed at 0.5 s peaked at 707 MiB; at the default 60 s only the host's memory bounds it,
-  since the vet doesn't refuse a timeout. FG-503 should cap each worker's memory before
-  parallel reward workers run long batches.
+  since the vet doesn't refuse a timeout. Since FG-503 each worker on Linux, where CI and
+  Kaggle run, caps its address space with `RLIMIT_AS` at what it maps once ready plus
+  `WORKER_MEMORY_LIMIT` (1 GiB, about four times the largest result's peak); a query past
+  it gets `MemoryError`, comes back as an `other` error (`SandboxOutOfMemory` from
+  `call`, which official EX counts as no match), and its worker is replaced. SQLite stops
+  growing such an aggregate at the cap but runs on to the deadline, so it still costs its
+  timeout. macOS accepts `RLIMIT_AS` without enforcing it, so on the laptop no cap is set
+  and the deadline's kill is the only bound.
 - **Result memory.** `row_size` counts `sys.getsizeof`, which misses the allocator's
   rounding, and `ExecResult` and pickling for the pipe copy the rows. A result counted at
   62 MiB (10,000 rows of 150 two-byte blobs) raised the in-process peak by 95 MiB (1.5

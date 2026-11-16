@@ -7,8 +7,10 @@ it; the jobs live here, where every test that needs one can share it.
 from __future__ import annotations
 
 import os
+import resource
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from forge.core.types import ExecResult
@@ -45,6 +47,39 @@ def run_with_fg191_limits(
     for limit, value in FG191_LIMITS.items():
         conn.setlimit(limit, value)
     return executor.run(db_id, sql, timeout_ms=timeout_ms, max_rows=max_rows)
+
+
+# A cap on SQLite's heap far below what HOARD asks for, and far above what Spider needs.
+HEAP_LIMIT = 32 * 2**20
+
+
+def run_under_heap_limit(
+    executor: SqliteExecutor, db_id: str, sql: str, timeout_ms: int, max_rows: int
+) -> ExecResult:
+    """``forge.sql.sandbox._run_job`` once SQLite's heap is capped at ``HEAP_LIMIT``.
+
+    The cap is SQLite's own, for the whole process, so a query past it gets SQLITE_NOMEM
+    on any platform, as one past ``RLIMIT_AS`` does on Linux. A pragma can lower it but
+    never lift it, so the worker keeps it for the rest of its life.
+    """
+    with closing(sqlite3.connect(":memory:")) as scratch:
+        scratch.execute(f"PRAGMA hard_heap_limit = {HEAP_LIMIT}")
+    return executor.run(db_id, sql, timeout_ms=timeout_ms, max_rows=max_rows)
+
+
+def raise_memory_error(executor: SqliteExecutor) -> None:
+    raise MemoryError
+
+
+def address_space_limit(executor: SqliteExecutor) -> tuple[int, int]:
+    """The worker's soft and hard ``RLIMIT_AS``."""
+    return resource.getrlimit(resource.RLIMIT_AS)
+
+
+def address_space(executor: SqliteExecutor) -> int:
+    """The bytes of address space the worker maps now, on Linux."""
+    pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[0])
+    return pages * resource.getpagesize()
 
 
 def exit_with_three(executor: SqliteExecutor, *args: object) -> ExecResult:

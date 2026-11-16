@@ -18,6 +18,16 @@ Which path for which SQL (ADR-0014):
 - Trusted SQL, Spider's gold queries, schema reads and tests, may call
   ``SqliteExecutor.run`` in process, whose deadline is soft.
 
+No SQLite limit bounds what one query allocates: aggregating long strings over an
+endless recursive CTE grew a worker by hundreds of MiB in a 100 ms run (ADR-0014). So on
+Linux, where CI and Kaggle run, each worker caps its address space with ``RLIMIT_AS`` at
+what it holds once it is ready plus ``memory_limit`` bytes. A query past the cap gets a
+``MemoryError`` from SQLite or Python; the worker reports it and leaves, the job comes
+back as an ``other`` error, or ``SandboxOutOfMemory`` from ``call``, and a fresh worker
+takes the next job, since a heap that hit its limit could fail anywhere. macOS accepts
+``RLIMIT_AS`` but doesn't enforce it, so no cap is set there and the deadline's kill is
+the only bound; a ``MemoryError`` there is handled the same way.
+
 Workers start with the spawn method on every platform, because forking a process that
 holds SQLite connections (or CUDA, in a trainer) is unsafe; spawn imports the calling
 script again in each worker, so a script that makes a pool needs
@@ -30,6 +40,7 @@ import importlib
 import logging
 import pickle
 import signal
+import sys
 import time
 import traceback
 from collections import deque
@@ -59,7 +70,14 @@ KILL_GRACE_MS = 250
 # Spawning Python and importing Forge takes well under a second; this is for a cold,
 # overloaded CI machine.
 START_TIMEOUT_S = 60.0
+# The address space a worker may add past what it holds once ready. The largest result
+# the executor keeps (MAX_RESULT_BYTES) peaked at 262 MiB in a worker (ADR-0014), so this
+# leaves room for any legitimate query; four reward workers stay within 4 GiB.
+WORKER_MEMORY_LIMIT = 2**30
+OUT_OF_MEMORY = "out of memory: the query ran past the sandbox worker's memory"
 _READY = "ready"
+# A worker's reply when its job ran out of memory, just before it exits.
+_NOMEM = "nomem"
 
 T = TypeVar("T")
 Ts = TypeVarTuple("Ts")
@@ -78,6 +96,10 @@ class SandboxWorkerDied(SandboxError):
     """A worker died while it ran a job; the pool starts a fresh one for the next."""
 
 
+class SandboxOutOfMemory(SandboxWorkerDied):
+    """A job ran out of memory, so its worker left; the pool starts a fresh one."""
+
+
 @dataclass(frozen=True)
 class _Done:
     value: object
@@ -94,7 +116,12 @@ class _Died:
     ms: float
 
 
-_Outcome = _Done | _Killed | _Died
+@dataclass(frozen=True)
+class _OutOfMemory:
+    ms: float
+
+
+_Outcome = _Done | _Killed | _Died | _OutOfMemory
 
 
 @dataclass
@@ -117,17 +144,27 @@ class SandboxPool:
     Workers start when there is work for them and stay up until ``close`` (or the end of
     a ``with`` block). ``imports`` are modules each worker imports before it takes a
     job, so a job function's module doesn't load inside the job's deadline.
-    ``restarts`` counts the workers replaced after a kill or a crash.
+    ``memory_limit`` is the address space in bytes each worker may add once ready, on
+    Linux only, or ``None`` for no cap. ``restarts`` counts the workers replaced after a
+    kill, a crash or a job out of memory.
     """
 
     def __init__(
-        self, workers: int = 1, *, data_dir: Path | None = None, imports: Sequence[str] = ()
+        self,
+        workers: int = 1,
+        *,
+        data_dir: Path | None = None,
+        imports: Sequence[str] = (),
+        memory_limit: int | None = WORKER_MEMORY_LIMIT,
     ) -> None:
         if workers < 1:
             raise ValueError(f"workers must be at least 1, got {workers}")
+        if memory_limit is not None and memory_limit < 1:
+            raise ValueError(f"memory_limit must be positive or None, got {memory_limit}")
         # Absolute, so workers find the same files whatever their working directory.
         self.data_dir = resolve_data_dir(data_dir).resolve()
         self.restarts = 0
+        self.memory_limit = memory_limit
         self._imports = tuple(imports)
         self._slots: list[_Worker | None] = [None] * workers
         self._context = get_context("spawn")
@@ -155,9 +192,10 @@ class SandboxPool:
         """Run ``(db_id, sql)`` pairs across the workers; results keep their order.
 
         A query still running ``KILL_GRACE_MS`` after its ``timeout_ms`` comes back as a
-        ``timeout`` that says it was killed. A worker that dies under a query gives an
-        ``other`` error. An exception a query raises, such as ``DataNotFound`` for a
-        missing database, is raised here once the queries already running are done.
+        ``timeout`` that says it was killed. A worker that dies under a query, or a query
+        that runs out of memory, gives an ``other`` error. An exception a query raises,
+        such as ``DataNotFound`` for a missing database, is raised here once the queries
+        already running are done.
         """
         check_run_args(timeout_ms, max_rows)
         jobs = [(db_id, sql, timeout_ms, max_rows) for db_id, sql in items]
@@ -174,7 +212,8 @@ class SandboxPool:
 
         ``fn`` must be a module-level function, which is how a job crosses to a worker,
         and ``executor`` is the worker's own. Raises ``SandboxTimeout`` when the worker
-        had to be killed and ``SandboxWorkerDied`` when it died under ``fn``. Any other
+        had to be killed and ``SandboxWorkerDied`` when it died under ``fn``, which is
+        ``SandboxOutOfMemory`` when ``fn`` ran out of memory. Any other
         ``SandboxError`` means no worker could start, or ``fn``'s result or exception
         couldn't cross the pipe. An exception ``fn`` raises is raised here, with the
         worker's traceback as a note.
@@ -184,6 +223,8 @@ class SandboxPool:
         (outcome,) = self._map(fn, [args], timeout_s)
         if isinstance(outcome, _Killed):
             raise SandboxTimeout(f"killed after {outcome.ms:.0f} ms (timeout {timeout_s:g} s)")
+        if isinstance(outcome, _OutOfMemory):
+            raise SandboxOutOfMemory(OUT_OF_MEMORY)
         if isinstance(outcome, _Died):
             raise SandboxWorkerDied(f"sandbox worker died with exit code {outcome.exitcode}")
         return cast(T, outcome.value)
@@ -251,6 +292,9 @@ class SandboxPool:
                     job = busy.pop(slot)
                     if isinstance(message, _Died):
                         outcomes[job.index] = message
+                    elif message[0] == _NOMEM:
+                        outcomes[job.index] = _OutOfMemory((time.monotonic() - job.sent) * 1000)
+                        self._replace(slot, "ran out of memory")
                     elif message[0] == "error":
                         error = error or cast(BaseException, message[1])
                     else:
@@ -347,7 +391,7 @@ class SandboxPool:
         conn, child_conn = self._context.Pipe()
         process = self._context.Process(
             target=_serve,
-            args=(child_conn, self.data_dir, self._imports),
+            args=(child_conn, self.data_dir, self._imports, self.memory_limit),
             name=f"forge-sandbox-{slot}",
             # Stopped with the interpreter, should the pool never be closed.
             daemon=True,
@@ -392,6 +436,8 @@ def _exec_result(outcome: _Outcome, timeout_ms: int) -> ExecResult:
             error_kind="other",
             ms=outcome.ms,
         )
+    if isinstance(outcome, _OutOfMemory):
+        return ExecResult(ok=False, error=OUT_OF_MEMORY, error_kind="other", ms=outcome.ms)
     return cast(ExecResult, outcome.value)
 
 
@@ -417,12 +463,17 @@ def _run_job(
     return executor.run(db_id, sql, timeout_ms=timeout_ms, max_rows=max_rows)
 
 
-def _serve(conn: Connection, data_dir: Path, imports: tuple[str, ...]) -> None:
-    """A worker's life: import, open an executor, then run jobs until the pipe closes."""
+def _serve(
+    conn: Connection, data_dir: Path, imports: tuple[str, ...], memory_limit: int | None
+) -> None:
+    """A worker's life: import, cap its memory, open an executor, then run jobs until the
+    pipe closes or one runs out of memory."""
     # Ctrl-C reaches the whole process group; the parent decides what happens to workers.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     for module in imports:
         importlib.import_module(module)
+    if memory_limit is not None:
+        _cap_address_space(memory_limit)
     with SqliteExecutor(data_dir) as executor:
         try:
             conn.send(_READY)
@@ -434,6 +485,8 @@ def _serve(conn: Connection, data_dir: Path, imports: tuple[str, ...]) -> None:
                 try:
                     fn, args = pickle.loads(payload)
                     reply: tuple[str, object] = ("done", fn(executor, *args))
+                except MemoryError:
+                    reply = (_NOMEM, None)
                 except Exception as exc:
                     reply = ("error", _portable(exc))
                 try:
@@ -441,6 +494,10 @@ def _serve(conn: Connection, data_dir: Path, imports: tuple[str, ...]) -> None:
                 except (BrokenPipeError, ConnectionResetError):
                     # The pool was closed; there is no one to report to.
                     return
+                except MemoryError:
+                    # The result fit in memory, but not its pickle as well.
+                    reply = (_NOMEM, None)
+                    conn.send(reply)
                 except Exception as exc:
                     # Only exceptions are made portable before sending, so a return value
                     # that can't be pickled would crash the worker here. Report it as an
@@ -455,9 +512,29 @@ def _serve(conn: Connection, data_dir: Path, imports: tuple[str, ...]) -> None:
                             ),
                         )
                     )
+                if reply[0] == _NOMEM:
+                    # A heap that hit its cap could fail anywhere next; the pool replaces it.
+                    return
         except BrokenPipeError:
             # The pool was closed before this worker was ready or done.
             return
+
+
+def _cap_address_space(extra: int) -> None:
+    """Limit this process's address space to what it maps now plus ``extra`` bytes, on
+    Linux; elsewhere do nothing, as macOS doesn't enforce ``RLIMIT_AS``."""
+    if sys.platform != "linux":
+        return
+    import resource
+
+    # The first field of statm is the address space in pages, VmSize in /proc/self/status.
+    pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[0])
+    limit = pages * resource.getpagesize() + extra
+    _, hard = resource.getrlimit(resource.RLIMIT_AS)
+    if hard != resource.RLIM_INFINITY:
+        limit = min(limit, hard)
+    # The hard limit too, so nothing the worker runs can raise it again.
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
 
 def _portable(exc: Exception) -> Exception:

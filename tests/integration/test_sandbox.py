@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import os
+import resource
+import sys
 import time
 from pathlib import Path
 
@@ -14,7 +16,9 @@ from forge.core.types import ExecResult
 from forge.sql import sandbox
 from forge.sql.sandbox import (
     KILL_GRACE_MS,
+    OUT_OF_MEMORY,
     SandboxError,
+    SandboxOutOfMemory,
     SandboxPool,
     SandboxTimeout,
     SandboxWorkerDied,
@@ -27,6 +31,12 @@ RUNAWAY = "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) SELEC
 # A billion rows from the 10-row head table: endless, but it loops, so SQLite checks for
 # an interrupt between rows.
 CARTESIAN = "SELECT count(*) FROM " + ", ".join(f"head AS t{i}" for i in range(9))
+# 4,000-character strings aggregated over an endless CTE: SQLite's memory grows until the
+# deadline, as no SQLite limit bounds it (ADR-0014).
+HOARD = (
+    "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) "
+    "SELECT json_group_array(hex(zeroblob(2000))) FROM r"
+)
 
 
 def _timed(
@@ -200,3 +210,65 @@ def test_pool_starts_workers_for_work_and_stops_them_on_close(spider_mini: Path)
     assert multiprocessing.active_children() == []
     with pytest.raises(RuntimeError, match="the sandbox pool is closed"):
         pool.run(DB, "SELECT 1")
+
+
+@pytest.mark.phase(5)
+def test_pool_replaces_a_worker_that_runs_out_of_memory(
+    spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="memory_limit must be positive or None"):
+        SandboxPool(1, memory_limit=0)
+    with SandboxPool(1) as pool:
+        # SQLite's own heap cap gives a real SQLITE_NOMEM on macOS as well as Linux. The
+        # query after it runs on the fresh worker, so a batch loses only the hoarder.
+        with monkeypatch.context() as patched:
+            patched.setattr(sandbox, "_run_job", jobs.run_under_heap_limit)
+            hoarded, after = pool.run_many(
+                [(DB, HOARD), (DB, "SELECT count(*) FROM head")], timeout_ms=300
+            )
+        assert (hoarded.ok, hoarded.error_kind, hoarded.error) == (False, "other", OUT_OF_MEMORY)
+        assert after.rows == [(10,)]
+        assert pool.restarts == 1
+
+        with pytest.raises(SandboxOutOfMemory, match="out of memory") as raised:
+            pool.call(jobs.raise_memory_error, timeout_s=5)
+        # Official EX counts a worker's death as no match, and so this.
+        assert isinstance(raised.value, SandboxWorkerDied)
+        assert pool.restarts == 2
+        assert pool.run(DB, "SELECT count(*) FROM head").rows == [(10,)]
+
+
+@pytest.mark.phase(5)
+@pytest.mark.skipif(sys.platform != "linux", reason="only Linux enforces RLIMIT_AS")
+def test_worker_memory_cap_on_linux(spider_mini: Path) -> None:
+    cap = 64 * 2**20
+    with SandboxPool(1, memory_limit=cap) as pool:
+        soft, hard = pool.call(jobs.address_space_limit, timeout_s=5)
+        mapped = pool.call(jobs.address_space, timeout_s=5)
+        assert soft == hard
+        assert 0 < soft - mapped <= cap
+        # Without the cap this query grows the worker by hundreds of MiB in 100 ms.
+        start = time.perf_counter()
+        (hoarded,) = pool.run_many([(DB, HOARD)], timeout_ms=500)
+        assert (hoarded.ok, hoarded.error_kind, hoarded.error) == (False, "other", OUT_OF_MEMORY)
+        assert time.perf_counter() - start < 5
+        assert pool.restarts == 1
+        assert pool.run(DB, "SELECT count(*) FROM head").rows == [(10,)]
+        # The fresh worker has a cap of its own.
+        soft, _ = pool.call(jobs.address_space_limit, timeout_s=5)
+        assert 0 < soft - pool.call(jobs.address_space, timeout_s=5) <= cap
+    with SandboxPool(1, memory_limit=None) as pool:
+        assert pool.call(jobs.address_space_limit, timeout_s=5) == resource.getrlimit(
+            resource.RLIMIT_AS
+        )
+
+
+@pytest.mark.phase(5)
+@pytest.mark.skipif(sys.platform == "linux", reason="Linux caps the worker instead")
+def test_worker_memory_is_not_capped_where_rlimit_as_is_not_enforced(spider_mini: Path) -> None:
+    # macOS accepts RLIMIT_AS but ignores it, so the worker keeps its parent's limit and
+    # the deadline's kill is the bound.
+    with SandboxPool(1) as pool:
+        assert pool.call(jobs.address_space_limit, timeout_s=5) == resource.getrlimit(
+            resource.RLIMIT_AS
+        )
