@@ -1283,9 +1283,10 @@ def runs_pull(
 ) -> None:
     """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR), and add its ledger rows.
 
-    Each file or folder at the top of the run that the store holds replaces the local one,
-    and what only runs/<run_id>/ holds, such as kernels.json, stays. A run that held a GPU
-    gets a row in docs/compute-ledger.md for each of its sessions that has ended, once.
+    The folder then holds the store's copy and no file it lacks, such as an earlier
+    attempt's error.txt, but for kernels.json and kernel/, which only this machine keeps.
+    A run that held a GPU gets a row in docs/compute-ledger.md for each of its sessions
+    that has ended, once.
     --store kaggle is forge kaggle output.
     """
     from forge.ops.hub import LocalRunStore, hub_store

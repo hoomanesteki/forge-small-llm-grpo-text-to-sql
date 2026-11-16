@@ -579,3 +579,37 @@ def test_replace_leaves_only_the_folders_files(store: RunStore, tmp_path: Path) 
     # Another run is another folder, which replace never reaches.
     store.pull(OTHER, tmp_path / "other")
     assert "error.txt" in _files(tmp_path / "other")
+
+
+@pytest.mark.phase(3)
+def test_a_pull_leaves_no_file_the_store_lacks(store: RunStore, tmp_path: Path) -> None:
+    run = tmp_path / "finished"
+    (run / "eval").mkdir(parents=True)
+    (run / "manifest.json").write_bytes(manifest_bytes(_manifest()))
+    (run / "eval" / "val-scores.jsonl").write_text("{}\n{}\n")
+    store.put_folder(RUN, run)
+    # This machine's copy is the first attempt's, which failed.
+    local = tmp_path / "runs" / RUN
+    (local / "eval").mkdir(parents=True)
+    (local / "error.txt").write_text("Traceback: the first attempt failed\n")
+    (local / "eval" / "val-scores.jsonl").write_text("{}\n")
+    (local / "eval" / "val-report.md").write_text("a report of the first attempt\n")
+    # What only this machine keeps: the kernels it pushed, their output, and its lock.
+    (local / "kernels.json").write_text('{"kernels": []}\n')
+    (local / "kernel").mkdir()
+    (local / "kernel" / "forge-run.log").write_text("log\n")
+    (local / ".lock").write_text("")
+    beside = tmp_path / "runs" / OTHER
+    beside.mkdir()
+    (beside / "error.txt").write_text("another run's\n")
+
+    store.pull(RUN, local)
+
+    assert _files(local) == {
+        ".lock": b"",
+        "eval/val-scores.jsonl": b"{}\n{}\n",
+        "kernel/forge-run.log": b"log\n",
+        "kernels.json": b'{"kernels": []}\n',
+        "manifest.json": manifest_bytes(_manifest()),
+    }
+    assert _files(beside) == {"error.txt": b"another run's\n"}
