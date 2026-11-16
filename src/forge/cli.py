@@ -68,7 +68,7 @@ AgreementSplitName = Literal["train", "val"]
 BackendName = Literal["hf", "vllm", "llamacpp", "fake"]
 DeviceName = Literal["cpu", "mps"]
 StoreName = Literal["local", "hub"]
-QuantizationName = Literal["bitsandbytes"]
+QuantizationName = Literal["awq"]
 
 # Printed by the commands that read dev without a model, so nobody logs them as dev uses
 # or holds back from running them.
@@ -395,7 +395,7 @@ def eval_run(
     ] = 0,
     quantization: Annotated[
         QuantizationName | None,
-        typer.Option(help="Load vllm's model in 4-bit with bitsandbytes, for a model past 4B."),
+        typer.Option(help="Load vllm's model from its 4-bit AWQ checkpoint, for one past 4B."),
     ] = None,
     gpu_memory_utilization: Annotated[
         float | None,

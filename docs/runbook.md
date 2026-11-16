@@ -197,10 +197,12 @@ checkpoint's `generation_config.json` defaults, and each question has a seed of 
 A temperature between 0 and 0.01 is refused, on every backend, since vLLM would decode it
 at 0.01. The preflight and the job share one engine, loaded once, since a second might not
 fit beside the first. `forge eval run --backend vllm` on the laptop is refused: its manifest
-would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: bitsandbytes`
-asks for 4-bit weights, for a reference model too big for the T4 in fp16, but vLLM 0.33.0
-has no bitsandbytes and refuses it ("Unknown quantization method: bitsandbytes", FG-301);
-FG-398 moves the reference to an AWQ checkpoint.
+would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: awq` loads an
+AWQ checkpoint's 4-bit weights, for a reference model too big for the T4 in fp16, as
+FG-307's `Qwen/Qwen3-8B-AWQ` (ADR-0012); vLLM's AWQ kernels need compute capability 7.5,
+which the T4 has, and no run has loaded that checkpoint on a T4 yet. `quantization:
+bitsandbytes` is refused before any push, in one line: vLLM 0.33.0 has no bitsandbytes and
+refused it as "Unknown quantization method: bitsandbytes" (FG-301).
 
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
@@ -389,8 +391,10 @@ Push them in this order, from one clean commit that passed `make smoke`:
 2. The model ADR-0012's rule chooses from step 1's runs, with p2: its `<name>-val-p2`
    (ADR-0007). The rule also needs FG-301's GRPO memory check, which every candidate
    passed (ADR-0012).
-3. The reference on val, in 4-bit: `qwen3-8b-val`. Its `quantization: bitsandbytes` fails
-   on vLLM 0.33.0 (FG-301), so it waits for FG-398's AWQ checkpoint.
+3. The reference on val, in 4-bit: `qwen3-8b-val`, the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`
+   (FG-398), since vLLM 0.33.0 has no bitsandbytes (FG-301). This run is the first to load
+   it on a T4, so push the reference's dev run (step 5) only once this one has loaded it:
+   that push spends a dev look.
 4. I6's repeat: `qwen2-5-coder-1-5b-val-100`, the first 100 val questions again.
 5. The model ADR-0012's rule chooses, and the reference, on dev, once each:
    `<name>-dev` and `qwen3-8b-dev`, with `--reason baseline`. These are dev looks 1 and 2.

@@ -3,11 +3,14 @@
 #
 #   uv run forge kaggle run --job eval --config configs/eval/qwen3-8b-val.yaml
 #
-# The model is configs/models.yaml's reference.qwen3-8b, pinned to the same commit, loaded
-# in 4-bit.
-model: Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218
+# The model is configs/models.yaml's reference.qwen3-8b, Qwen's 4-bit AWQ checkpoint of
+# Qwen3-8B, pinned to the same commit. vLLM 0.33.0 has no bitsandbytes (FG-301), and this
+# run is the first to load the AWQ checkpoint on a T4. The estimate is not worked out by
+# plan section 3.8's eval formula: no run has measured this checkpoint's download, load
+# or tokens a second on a T4.
+model: Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79
 backend: vllm
-quantization: bitsandbytes
+quantization: awq
 split: val
 limit: null
 prompt_version: p1

@@ -47,12 +47,16 @@ candidates:
     params: 1543714304
 
 reference:
-  # About 16 GB of weights in 16 bits, past a T4's memory, so vLLM loads it in 4-bit with
-  # bitsandbytes: its eval configs set quantization, which the manifest records.
+  # Qwen3-8B is about 16 GB of weights in 16 bits, past a T4's memory, so the reference is
+  # Qwen's own 4-bit AWQ checkpoint of it, which vLLM loads with quantization awq: its eval
+  # configs set it, and the manifest records it. vLLM 0.33.0 has no bitsandbytes, the 4-bit
+  # loading first planned (FG-301, docs/spikes/kaggle-gpu.md question 4). Its AWQ kernels
+  # need compute capability 7.5, which the T4 has, but no run has loaded this checkpoint on
+  # a T4 yet: the reference's own val run is the first.
   qwen3-8b:
-    repo: Qwen/Qwen3-8B
-    revision: b968826d9c46dd6066d109eabc6255188de91218
+    repo: Qwen/Qwen3-8B-AWQ
+    revision: 4da05a8edb55c6046cce958586c33b61da07bb79
     license: apache-2.0
     gated: false
     params: 8190735360
-    quantization: bitsandbytes
+    quantization: awq

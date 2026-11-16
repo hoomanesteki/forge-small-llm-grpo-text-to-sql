@@ -55,9 +55,9 @@ pending:
     status: blocked
     since: 2026-11-15
     blocked_on:
-      - FG-398's move of the reference to the AWQ checkpoint Qwen/Qwen3-8B-AWQ, since
-        vLLM 0.33.0 has no bitsandbytes (FG-301, docs/spikes/kaggle-gpu.md, question 4);
-        the reference run is the first to try AWQ on a T4
+      - the run itself, now that the reference is the AWQ checkpoint Qwen/Qwen3-8B-AWQ
+        (FG-398), since vLLM 0.33.0 has no bitsandbytes (FG-301); this run is the first
+        to try AWQ on a T4, so it may still fail at the load
     how: docs/runbook.md, "Baselines", step 3
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
@@ -111,9 +111,8 @@ pending:
     status: blocked
     since: 2026-11-15
     blocked_on:
-      - FG-398's move of the reference to the AWQ checkpoint Qwen/Qwen3-8B-AWQ, since
-        vLLM 0.33.0 has no bitsandbytes (FG-301, docs/spikes/kaggle-gpu.md, question 4);
-        the reference run is the first to try AWQ on a T4
+      - the reference's val run above, the first to try the AWQ checkpoint on a T4
+        (FG-398); this push spends a dev look, so it waits until that run has loaded it
     how: docs/runbook.md, "Baselines", step 5
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
