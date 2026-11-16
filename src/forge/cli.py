@@ -1442,6 +1442,14 @@ def runs_push(run_id: RunArgument) -> None:
 @runs_app.command("promote")
 def runs_promote(
     run_id: RunArgument,
+    config: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            dir_okay=False,
+            help="The base model's full val config, which each --eval ran with its adapter.",
+        ),
+    ],
     evals: Annotated[
         list[str],
         typer.Option(
@@ -1453,13 +1461,16 @@ def runs_promote(
 ) -> None:
     """Copy the SFT run's checkpoint that val scores highest to checkpoints/best.
 
-    Each --eval is a finished val run in runs/ (FORGE_RUNS_DIR) whose adapter is one of the
-    run's checkpoints, runs/<run_id>/checkpoints/step-NNNNNN or .../final, with the others'
-    settings. The one with the highest official EX, the later one on a tie, is copied to
-    runs/<run_id>/checkpoints/best/, and best.json beside the manifest records the scores and
-    the eval runs they come from. With --store hub, the default, the run store gets them
-    too, so pull the run first: its checkpoints must be here. Dev is never used.
+    Each --eval is a finished run in runs/ (FORGE_RUNS_DIR) of the --config, the base
+    model's on the whole val split such as configs/eval/qwen3-4b-val.yaml, with one of the
+    run's checkpoints as its adapter, runs/<run_id>/checkpoints/step-NNNNNN or .../final,
+    on the files the run saved there. The one with the highest official EX, the later one
+    on a tie, is copied to runs/<run_id>/checkpoints/best/, and best.json beside the
+    manifest records the scores and the eval runs they come from. With --store hub, the
+    default, the run store gets them too, so pull the run first: its checkpoints must be
+    here. Dev is never used.
     """
+    from forge.eval.config import EvalConfig, read_config_file
     from forge.eval.run_files import RunUnfinished
     from forge.ops.hub import hub_store
     from forge.ops.paths import runs_dir
@@ -1468,7 +1479,8 @@ def runs_promote(
     # An eval run that hasn't finished is a RuntimeError, which a store's errors are not.
     errors: tuple[type[Exception], ...] = (*_runs_errors(), RunUnfinished)
     try:
-        scores, sources = checkpoint_scores(run_id, evals, runs_root=runs_dir())
+        base = EvalConfig(**read_config_file(config))
+        scores, sources = checkpoint_scores(run_id, evals, base=base, runs_root=runs_dir())
         where = hub_store() if store == "hub" else None
         promoted = promote_best(run_id, scores, sources=sources, runs_root=runs_dir(), store=where)
     except errors as exc:
