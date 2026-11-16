@@ -1,5 +1,6 @@
-# GPU packages for Forge jobs on Kaggle's T4 image, installed over the image's own
-# (ADR-0002, ADR-0006). Candidate pins: none has run on a T4 yet.
+# GPU packages for Forge's evaluation jobs on Kaggle's T4 image, installed over the image's
+# own (ADR-0002, ADR-0006). Until FG-398 gives training jobs the spike's "trl" stack, every
+# kernel job installs this list.
 #
 # vLLM sets the stack (FG-306). vllm 0.33.0 pins torch 2.14.0, whose wheel is built for
 # CUDA 13.0 like the image's (v173 has torch 2.11.0+cu130), and needs transformers
@@ -11,14 +12,18 @@
 # in 5.20.2 for the arguments Forge passes.
 #
 # kaggle/spike/throughput.py installs and times this list as its "trl-vllm" stack, and a
-# unit test keeps the two the same. The image moved to CUDA 13 in late October 2026, so
-# bitsandbytes' CUDA build is the pin most likely to need a change.
-vllm==0.33.0  # unverified until FG-301 runs
-torch==2.14.0  # unverified until FG-301 runs
-transformers==5.20.2  # unverified until FG-301 runs
-trl==1.18.0  # unverified until FG-301 runs
-peft==0.21.3  # unverified until FG-301 runs
-accelerate==1.15.0  # unverified until FG-301 runs
-datasets==5.2.0  # unverified until FG-301 runs
-huggingface-hub==2.4.0  # unverified until FG-301 runs
-bitsandbytes==0.50.2  # unverified until FG-301 runs
+# unit test keeps the two the same. FG-301 measured it on a T4 on 2026-11-16
+# (docs/spikes/kaggle-gpu.md, questions 3 to 5): uv installed it in 96 s (install:trl-vllm),
+# and vLLM 0.33.0 generated in fp16 for Qwen3 1.7B and 4B on the same vllm, torch,
+# transformers and bitsandbytes versions (vllm:<model>). Only GRPO through it failed, at
+# vLLM's load of the 4-bit policy (grpo:trl-vllm:<model>), since vLLM 0.33.0 has no
+# bitsandbytes quantization.
+vllm==0.33.0
+torch==2.14.0
+transformers==5.20.2
+trl==1.18.0
+peft==0.21.3
+accelerate==1.15.0
+datasets==5.2.0
+huggingface-hub==2.4.0
+bitsandbytes==0.50.2

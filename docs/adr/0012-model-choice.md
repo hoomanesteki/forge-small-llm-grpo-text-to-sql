@@ -30,8 +30,9 @@ them again whenever it is run:
 - The reference is about 16 GB of weights in 16 bits, more than a T4 holds, so vLLM loads
   it in 4-bit with bitsandbytes (`quantization` in its configs, recorded in its manifest).
   It shows what a larger model scores with the same prompt and harness, and is never a
-  candidate. Whether vLLM loads bitsandbytes weights on the T4 is FG-301's to confirm,
-  in the spike's `vllm:Qwen/Qwen3-8B:bnb` stage.
+  candidate. FG-301 found that vLLM 0.33.0 doesn't load bitsandbytes weights: it has no
+  such quantization (the spike's `vllm:Qwen/Qwen3-8B:bnb` stage), so FG-398 moves the
+  reference to an AWQ checkpoint.
 - Every run is greedy on the whole val split with prompt p1, through vLLM in fp16 on a
   Kaggle T4 (FG-306), one kernel job per config in `configs/eval/`. Qwen3 runs in
   non-thinking mode (ADR-0007).
@@ -58,9 +59,16 @@ The runs, their configs and their estimates are listed in `docs/runs/pending.yam
 
 ## Measured
 
-Pending FG-307's runs. This section will hold, for each candidate and the reference, the
-val official EX with its interval, fast EX, valid SQL and EX by hardness, and the dev EX of
-the chosen model and the reference, all from the reports committed under `docs/runs/`.
+FG-301, 2026-11-16: the GRPO memory check of rule 2 passes for every candidate. The
+spike's `grpo:trl:Qwen/Qwen3-1.7B` and `grpo:trl:Qwen/Qwen3-4B` stages, on the stack
+ADR-0006 chose, ran 10 steps each without running out of memory, at a peak of 3.02 GB and
+4.94 GB allocated of the T4's 15.6 GB (`docs/spikes/kaggle-gpu/spike-report.json`).
+Qwen2.5-Coder-1.5B-Instruct, smaller than 1.7B, counts as passing, as rule 2 says.
+
+The rest is pending FG-307's runs. This section will hold, for each candidate and the
+reference, the val official EX with its interval, fast EX, valid SQL and EX by hardness,
+and the dev EX of the chosen model and the reference, all from the reports committed under
+`docs/runs/`.
 Nothing here is typed by hand. `tests/integration/test_artifacts.py` fails once FG-307
 leaves `pending.yaml` without those runs, and checks I5 on their replies and I6 on a
 repeat of the first 100 val questions.

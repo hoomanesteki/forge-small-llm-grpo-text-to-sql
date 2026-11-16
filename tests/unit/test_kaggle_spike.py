@@ -886,7 +886,6 @@ def _requirement_lines(path: Path) -> list[str]:
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
         if line:
-            assert "unverified until FG-301 runs" in raw, raw
             lines.append(line)
     return lines
 
@@ -900,7 +899,13 @@ def test_requirements_file_is_the_trl_vllm_stack() -> None:
     # FG-302 ships kaggle/requirements-gpu.txt and FG-306 adds vLLM to it; the spike
     # installs and times the same pins.
     gpu = spike.STACKS["trl-vllm"].requirements
-    assert tuple(_requirement_lines(ROOT / "kaggle" / "requirements-gpu.txt")) == gpu
+    path = ROOT / "kaggle" / "requirements-gpu.txt"
+    assert tuple(_requirement_lines(path)) == gpu
+    # FG-301 ran these pins on a T4, and the file says which stages measured them.
+    text = path.read_text(encoding="utf-8")
+    assert "unverified" not in text
+    for stage in ("install:trl-vllm", "vllm:<model>", "grpo:trl-vllm:<model>"):
+        assert stage in text, stage
     lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
 
     def locked(name: str, version: str) -> bool:
@@ -999,11 +1004,13 @@ def test_spike_doc_keeps_research_apart_from_measurements() -> None:
     assert report["finished_at"] is not None
     run = json.loads((reports / "kernels.json").read_text(encoding="utf-8"))
     assert run["job"] == "spike" and run["kernels"][0]["kernel"].endswith("/forge-throughput-spike")
-    for name, status in (("0005-kaggle-compute", "accepted"), ("0006-train-backend", "proposed")):
+    # Both records the spike informs are decided, each with what it measured.
+    for name in ("0005-kaggle-compute", "0006-train-backend"):
         assert f"(../adr/{name}.md)" in doc
         adr = (ROOT / "docs" / "adr" / f"{name}.md").read_text(encoding="utf-8")
         assert adr.startswith(f"# ADR-{name[:4]}:")
-        assert re.search(rf"\n- Status: ({status}|accepted|superseded)", adr), name
+        assert "\n- Status: accepted\n" in adr, name
+        assert "\n## Measured\n" in adr, name
 
 
 @pytest.mark.phase(3)
