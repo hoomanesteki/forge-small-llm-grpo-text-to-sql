@@ -147,6 +147,14 @@ def test_constant_query_guard(
         "WITH professor AS (SELECT 3) SELECT * FROM professor",
         "SELECT * FROM (SELECT 3)",
         "SELECT count(*) FROM json_each('[1, 2, 3]')",
+        # Reading a table doesn't make a written answer any less of a constant.
+        "SELECT 3 FROM professor LIMIT 1",
+        "SELECT DISTINCT 3 AS count FROM professor",
+        "SELECT 3 FROM department WHERE dept_name = 'Accounting'",
+        "SELECT max(3) FROM professor",
+        "SELECT (SELECT 3) FROM professor LIMIT 1",
+        "SELECT 3 UNION SELECT dept_code FROM professor WHERE 0",
+        "VALUES ((SELECT 3 FROM professor LIMIT 1))",
     ]
     # Each one returns the right answer, so the comparator alone would pay for it.
     for sql in constants:
@@ -160,6 +168,9 @@ def test_constant_query_guard(
     # A query that reads a table is no constant, wrong as it is (22 professors in all).
     wrong = _block("SELECT count(*) FROM professor")
     assert _score(rewards, examples, [(example.id, wrong)]) == [(0.0, 1.0, 1.0, 0.0)]
+    # Counting rows reads them, whatever the count is given.
+    count_1 = _block(example.gold_sql.replace("count(*)", "count(1)"))
+    assert _score(rewards, examples, [(example.id, count_1)]) == [FULL]
     # And a constant is a fair answer to a gold query that reads no table either.
     constant_gold = Rewards({"own": pool.run(example.db_id, "SELECT 3")}, pool)
     columns = {"example_id": ["own"], "db_id": [example.db_id], "gold_sql": ["SELECT 3"]}

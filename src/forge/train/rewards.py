@@ -20,10 +20,17 @@ shortcuts, so the model learns the skill rather than the checker (FG-501).
   - ``multiple_statements``, -0.5: more than one statement, counted as the executor counts
     them (``statement_count``), so it fires exactly when the executor refuses the SQL as
     more than one statement.
-  - ``constant_query``, -0.5: sqlglot finds no table in the SQL but finds one in the gold
-    query. A common table expression, a subquery and a table-valued function such as
-    ``json_each`` are not tables. It is judged on the SQL alone, before the executor's
-    result: ``SELECT 3`` costs the same whether or not 3 is the answer.
+  - ``constant_query``, -0.5: the query answers with constants where the gold query reads
+    the database. It does when sqlglot finds no table in it, or when some of the rows it
+    returns are constants: those of a ``SELECT`` it returns the rows of (either side of a
+    ``UNION`` or ``INTERSECT``, the left of an ``EXCEPT``), or a row of a bare ``VALUES``,
+    whose every column, subqueries included, names no column or ``*`` and calls no window
+    function and no aggregate but ``min``, ``max`` or ``avg``, which return the constant
+    they are given. So ``SELECT 3 FROM professor LIMIT 1`` costs what ``SELECT 3`` does. A
+    common table expression, a subquery and a table-valued function such as ``json_each``
+    are not tables, and a column of one counts as read from the database, whatever it
+    holds. It is judged on the SQL alone, before the executor's result: ``SELECT 3`` costs
+    the same whether or not 3 is the answer.
   - ``comment_payload``, -0.2: a comment over 40 characters, counted between its ``--``
     or ``/* */`` and without the whitespace at its ends. Comments are read as SQLite reads
     them (``forge.sql.executor.comments``), because sqlglot drops a comment that no token
@@ -89,6 +96,9 @@ GUARDS: tuple[Guard, ...] = (
     "comment_payload",
 )
 COMMENT_PAYLOAD_CHARS = 40
+# Aggregates that return the constant they are given; any other one counts rows, as
+# count(1) and sum(1) do.
+_CONSTANT_AGGREGATES = (exp.Min, exp.Max, exp.Avg)
 # The dataset columns the rewards read from TRL's keyword arguments.
 COLUMNS = ("example_id", "db_id", "gold_sql")
 
@@ -245,15 +255,15 @@ def _verdict(reply: str, sql: str, pred: ExecResult, gold: ExecResult, gold_sql:
             fired.add("non_select")
     elif pred.error_kind == "denied":
         fired.add("non_select")
-    tables = _reads_a_table(statements)
-    if "non_select" not in fired and tables is False and _gold_reads_a_table(gold_sql):
+    reads = _reads_data(statements)
+    if "non_select" not in fired and reads is False and _gold_reads_data(gold_sql):
         fired.add("constant_query")
     if any(len(text.strip()) > COMMENT_PAYLOAD_CHARS for text in comments(sql)):
         fired.add("comment_payload")
     guards = tuple(guard for guard in GUARDS if guard in fired)
     # A query that ran but whose tables sqlglot couldn't check can't be cleared of being a
     # constant, so it earns nothing, though nothing is charged.
-    credit = not guards and not (pred.ok and tables is None)
+    credit = not guards and not (pred.ok and reads is None)
     return Verdict(
         sql=sql,
         guards=guards,
@@ -338,15 +348,58 @@ def _reads_a_table(statements: Sequence[exp.Expr] | None) -> bool | None:
         return None
 
 
+def _reads_data(statements: Sequence[exp.Expr] | None) -> bool | None:
+    """Whether the queries answer with what they read from the database, rather than with
+    constants (the module docstring's ``constant_query``): ``None`` when
+    ``_reads_a_table`` is."""
+    tables = _reads_a_table(statements)
+    if statements is None or not tables:
+        return tables
+    return not any(map(_has_constant_rows, statements))
+
+
+def _has_constant_rows(query: exp.Expr) -> bool:
+    """Whether some of the rows ``query`` returns are constants it writes: those of a
+    ``SELECT`` whose rows it returns or a row of a ``VALUES``, all of whose columns are."""
+    # A stack rather than recursion, as a long chain of UNIONs nests as deep as it is long.
+    stack = [query]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, exp.Subquery):
+            stack.append(node.this)
+        elif isinstance(node, exp.Except):
+            # The right side's rows are taken away, never returned.
+            stack.append(node.left)
+        elif isinstance(node, exp.SetOperation):
+            stack.extend((node.left, node.right))
+        # A VALUES holds its rows as tuples of its columns.
+        elif (
+            isinstance(node, exp.Select) and node.selects and all(map(_is_constant, node.selects))
+        ) or (isinstance(node, exp.Values) and any(map(_is_constant, node.expressions))):
+            return True
+    return False
+
+
+def _is_constant(column: exp.Expr) -> bool:
+    """Whether a column of a query's result holds what it writes rather than what it reads:
+    nothing in it, subqueries included, names a column or ``*`` or calls a window function,
+    or an aggregate that doesn't return the constant it is given."""
+    return not any(
+        isinstance(node, exp.Column | exp.Star | exp.Window)
+        or (isinstance(node, exp.AggFunc) and not isinstance(node, _CONSTANT_AGGREGATES))
+        for node in column.walk()
+    )
+
+
 @lru_cache(maxsize=16_384)
-def _gold_reads_a_table(gold_sql: str) -> bool:
-    """Whether the gold query reads a table; one sqlglot can't read is taken to, as all
-    7,787 train gold queries do."""
-    tables = _reads_a_table(_read(gold_sql))
-    if tables is None:
+def _gold_reads_data(gold_sql: str) -> bool:
+    """Whether the gold query answers with what it reads from the database; one sqlglot
+    can't read is taken to, as all 7,787 train gold queries do."""
+    reads = _reads_data(_read(gold_sql))
+    if reads is None:
         log.warning("sqlglot can't read the gold query %r; taking it to read a table", gold_sql)
         return True
-    return tables
+    return reads
 
 
 @lru_cache(maxsize=16_384)
