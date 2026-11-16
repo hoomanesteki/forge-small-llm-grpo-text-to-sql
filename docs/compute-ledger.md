@@ -1,6 +1,7 @@
 # Compute ledger
 
-Append-only. Rows are written by `forge ledger add` and `forge runs pull`.
+Append-only. Rows are written by `forge ledger add`, and by `forge kaggle wait`, `forge kaggle
+output` and `forge runs pull`, one a GPU session. Dates are UTC.
 
 | date | platform | gpu | hours | run_id | purpose | cost_usd |
 |---|---|---|---|---|---|---|

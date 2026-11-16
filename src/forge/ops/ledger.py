@@ -38,7 +38,7 @@ from forge.core.types import RunManifest
 from forge.ops.clock import utc_today
 from forge.ops.logfile import locked_append
 from forge.ops.paths import ledger_path
-from forge.ops.sessions import Session
+from forge.ops.sessions import Session, manifest_session
 
 COLUMNS = ("date", "platform", "gpu", "hours", "run_id", "purpose", "cost_usd")
 PLATFORMS = frozenset({"local-cpu", "local-mps", "kaggle", "colab", "modal"})
@@ -232,7 +232,7 @@ def record_run(
     run = manifest.run_id
     if manifest.platform not in GPU_RUN_PLATFORMS:
         return [], [f"ledger: no row, a {manifest.platform} run holds no GPU"]
-    sessions = list(sessions or [Session(manifest.started_at, manifest.ended_at, manifest.status)])
+    sessions = list(sessions or [manifest_session(manifest)])
     if len(sessions) == 1 and sessions[0].status == "running":
         return [], [f"ledger: no row yet, run {run} is running; pull it once it ends"]
     spent = sum(row.cost_usd for row in read_rows(path) if row.run_id == run)

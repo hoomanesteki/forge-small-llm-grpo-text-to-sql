@@ -54,6 +54,7 @@ from forge.eval.config import (
     read_config_sections,
     read_ops,
 )
+from forge.eval.run_files import MANIFEST_FILE
 from forge.ops.clock import utc_today
 from forge.ops.dev_usage import MAX_DEV_USES, count_dev_uses, log_dev_use
 from forge.ops.kaggle import (
@@ -70,6 +71,7 @@ from forge.ops.kaggle import (
 )
 from forge.ops.ledger import Summary
 from forge.ops.manifest import DirtyTreeError, git_sha
+from forge.ops.sessions import SESSIONS_FILE
 
 JOBS = ("eval", "sft", "grpo", "spike")
 # Jobs whose trainers later stories build, with the story that brings each.
@@ -578,15 +580,21 @@ def wait_for(
         waited += poll_s
 
 
-def job_status(client: KaggleClient, kernel: str, run_id: str) -> dict[str, Any]:
-    """The ``status.json`` the entry script wrote for ``run_id``, from the kernel output."""
-    with tempfile.TemporaryDirectory(prefix="forge-status-") as tmp:
-        folder = Path(tmp)
-        client.kernel_output(kernel, folder, pattern=f"runs/{re.escape(run_id)}/{STATUS_FILE}$")
-        found = sorted(folder.glob(f"**/runs/{run_id}/{STATUS_FILE}"))
-        if not found:
-            raise KaggleError(f"{kernel}'s output has no runs/{run_id}/{STATUS_FILE}")
-        data: dict[str, Any] = json.loads(found[0].read_text(encoding="utf-8"))
+def job_record(client: KaggleClient, kernel: str, run_id: str, folder: Path) -> Path:
+    """Download what ``forge kaggle wait`` reads from the kernel output into ``folder``: the
+    ``status.json`` the entry script wrote for ``run_id``, and the run's manifest and
+    sessions, which its ledger rows come from. Returns the run's folder there."""
+    names = "|".join(re.escape(name) for name in (STATUS_FILE, MANIFEST_FILE, SESSIONS_FILE))
+    client.kernel_output(kernel, folder, pattern=f"runs/{re.escape(run_id)}/({names})$")
+    found = sorted(folder.glob(f"**/runs/{run_id}/{STATUS_FILE}"))
+    if not found:
+        raise KaggleError(f"{kernel}'s output has no runs/{run_id}/{STATUS_FILE}")
+    return found[0].parent
+
+
+def read_status(run_dir: Path) -> dict[str, Any]:
+    """The job's ``status.json`` in ``run_dir``."""
+    data: dict[str, Any] = json.loads((run_dir / STATUS_FILE).read_text(encoding="utf-8"))
     return data
 
 
