@@ -34,15 +34,16 @@ Once `uv run forge doctor` shows Kaggle auth ok, on a clean commit that passed `
    `uv run forge kaggle run --job spike --config configs/spike/throughput.yaml`.
    It pushes a new version of the same `<owner>/forge-throughput-spike` kernel, on a T4,
    and prints the run id. Its timeout is the 1.5-hour estimate and half again, but the
-   script starts no stage after 80 minutes and bounds each stage by the time left, so the
-   session ends long before the cut.
+   script starts no stage after 80 minutes and bounds each stage by its own cap and the
+   time left, so the session ends long before the cut.
 5. `uv run forge kaggle wait <run_id>` until it is `COMPLETE` or `ERROR`, then
    `uv run forge kaggle output <run_id>`. That brings back `spike-report.json` and the
    log, `forge-throughput-spike.log`, into `runs/<run_id>/kernel/`.
 6. Push the session-limit probe as a CPU kernel, which spends no GPU quota:
    `kaggle kernels push -p build/kaggle-spike/limit -t 900`. After 15 minutes, check its
    status, fetch its output the same way, and compare `last_beat_at` in
-   `limit-probe.json` with the 900-second timeout.
+   `limit-probe.json` with the 900-second timeout. Its `spike-report.json` holds only
+   `launch`: how Kaggle started the CPU kernel.
 7. `kaggle quota -v` again. The difference in GPU hours used goes in the ledger:
    `uv run forge ledger add --platform kaggle --gpu T4 --hours <h> --run-id <run_id> --purpose "FG-301 throughput spike"`,
    with the run id step 4 printed (`<YYYY-MM-DD>-throughput-spike-<sha7>`).
@@ -58,16 +59,23 @@ before pushing again (plan section 5.3). The report says which stage failed and 
 `throughput.py run` runs each stage in a child process and rewrites the report after
 every stage, so a crash, an out-of-memory kill or the timeout leaves the stages before it
 in the report. Each GPU stack gets a venv of its own, deleted after its benches, because
-their pins conflict (question 3). The stages, in order:
+their pins conflict (question 3). The GRPO stacks come before vLLM's, since ADR-0006
+rests on their numbers, and each kind of stage is killed at its own cap
+(`STAGE_CAPS_MINUTES` in the script, in the report as `stage_caps_minutes`: 5 minutes for
+`env`, 2 for `secrets`, 15 for a download, 20 for an install, 25 for a GRPO bench and 15
+for a vLLM one, guessed before any session), so a stage that hangs costs its cap and not
+the rest of the 80 minutes. Each stage's `timeout_seconds` in the report is the smaller of
+its cap and the time left. The stages, in order:
 
 | Stage | Answers | Records |
 |---|---|---|
 | `env` | 1, 3 | Python, torch and CUDA versions, the GPUs and their compute capability, the image build (`/etc/git_commit`, `/etc/build_date`), internet, disk, preinstalled packages |
 | `secrets` | 2 | Whether `HF_TOKEN` could be read in this pushed run; never its value |
-| `download:<model>` | 4, 5 | Seconds and bytes to fetch Qwen3 1.7B and 4B, and the commit fetched |
-| `install:<stack>` | 3 | Seconds to install each stack with uv, venv size, `uv pip freeze` |
+| `download:<model>` | 4, 5 | Seconds and bytes to fetch Qwen3 1.7B and 4B, and the commit fetched; Qwen3-8B's just before vLLM's stack |
+| `install:<stack>` | 3 | Seconds to install each stack, venv size, `uv pip freeze` of the venv's own packages, the installer used |
+| `grpo:<stack>:<model>` | 5 | Seconds per step over 10 steps, peak memory, TRL's log, for 4-bit LoRA with 6 generations of up to 256 tokens; the GPUs the trainer saw (`n_gpu`), the completions TRL scored a step, the mean completion length |
 | `vllm:<model>` | 4 | Load seconds, tokens per second on 100 prompts, greedy, fp16, up to 256 tokens a reply, device memory |
-| `grpo:<stack>:<model>` | 5 | Seconds per step over 10 steps, peak memory, TRL's log, for 4-bit LoRA with 6 generations of up to 256 tokens |
+| `vllm:Qwen/Qwen3-8B:bnb` | 4 | Whether vLLM loads FG-307's reference in 4-bit with bitsandbytes (`quantization="bitsandbytes"` over fp16 weights, as FG-306's backend asks), then the same records on 10 prompts |
 | `limit-probe` (own kernel) | 6 | A heartbeat rewritten every 30 s until the session is killed |
 
 The prompts are 100 made-up text-to-SQL questions in Forge's p1 format over a six-table
@@ -76,14 +84,41 @@ reward is a cheap check for a closed sql block, so the timing is the trainer's a
 the SQL executor's. The GRPO batch is plan section 3.10's: 6 completions a device and 4
 accumulation steps, so a step trains on 24 completions from 4 prompts.
 
+A T4 session has two GPUs, and a Trainer that sees both in one process doubles its batch,
+so every bench runs with `CUDA_VISIBLE_DEVICES=0`, as the jobs use the first GPU
+(ADR-0005); the env stage still sees both. A GRPO bench records the GPUs its trainer
+counted (`n_gpu`) and the completions TRL scored a step, counted by the reward, beside
+the planned 24 (`planned_completions_per_step`). Each GRPO bench prompts with the same
+text: the chats are rendered before training with Qwen3's thinking off, since Unsloth's
+TRL 0.22 has no `chat_template_kwargs`, and a template that ignores the switch fails the
+stage. The result says thinking was off and gives the mean completion length.
+
+The script may run inside an IPython kernel rather than as `python throughput.py`:
+then it has no `__file__`, its `argv` is the kernel's own (`ipykernel_launcher.py -f
+<connection file>`), and its code may be a cell's with no file on disk. So the arguments
+written into `KERNEL_ARGV` win over the interpreter's in the kernel's own process, while a
+stage's child, which `run_child` marks with `FORGE_SPIKE_CHILD=1`, takes its command line.
+Before it parses its arguments, every launch writes `spike-report.json` with `launch`
+only (`argv0`, `argv`, `kernel_argv`, `file`, `cwd`), so a launch the arguments don't suit
+still says how it happened. The children run this script's file, a file is taken for it
+only if it holds the script's `REPORT_SCHEMA` line, and when there is none the cell's
+source is written to the work folder and run from there (`launch.script`).
+
 The stacks are candidates, each pinned in the script and none verified on a T4:
 
 | Stack | Pins | Why |
 |---|---|---|
-| `vllm` | vllm 0.33.0 (brings torch 2.14.0) | Generation throughput for evaluation (FG-306) |
-| `trl` | Forge's lock: trl 1.18.0, transformers 5.23.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0, huggingface-hub 2.4.0, plus bitsandbytes 0.50.2; on the image's torch | ADR-0006's training stack without vLLM, the fallback |
+| `vllm` | vllm 0.33.0 (brings torch 2.14.0), bitsandbytes 0.50.2 | Generation throughput for evaluation (FG-306), and the 4-bit reference (FG-307) |
+| `trl` | Forge's lock: trl 1.18.0, transformers 5.23.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0, huggingface-hub 2.4.0, plus bitsandbytes 0.50.2; on the image's torch (see below) | ADR-0006's training stack without vLLM, the fallback |
 | `trl-vllm` | vllm 0.33.0, torch 2.14.0, transformers 5.20.2, then the lock's trl 1.18.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0 and huggingface-hub 2.4.0, plus bitsandbytes 0.50.2 | The same list as `kaggle/requirements-gpu.txt` since FG-306: evaluation through vLLM, and TRL generating through colocated vLLM |
 | `unsloth` | unsloth 2026.11.4, vllm 0.11.2, transformers 4.57.6, trl 0.22.2, datasets 4.3.0, bitsandbytes 0.50.2, torchao below 0.18 | Unsloth's own Kaggle T4 recipe, for comparison |
+
+Each stack installs with uv into a venv of its own, except `trl`. Its venv is made with
+system site packages so that it runs on the image's torch, but uv leaves those out when
+it installs ("uv will _not_ take system site packages into account", `uv help venv`), so
+it would download a PyPI torch for trl, peft and accelerate. That venv is seeded with pip
+instead, which counts the image's packages as installed, and the stage fails if a torch
+lands in the venv all the same.
 
 ## 1. Kernel metadata, the accelerator and private datasets
 
@@ -127,8 +162,9 @@ slug, a P100, a public kernel.
 - Does `--accelerator NvidiaTeslaT4` on a kernel whose metadata says the same give a T4
   session? (`env.nvidia_smi`, `env.torch.devices`.) Not measured yet.
 - How many GPUs does the session show, and how much memory each? Not measured yet.
-- How does Kaggle start a script kernel: what are `launch.argv0`, `launch.file` and
-  `launch.cwd` in the report? FG-303's entry script depends on it. Not measured yet.
+- How does Kaggle start a script kernel: what are `launch.argv0`, `launch.argv`,
+  `launch.file` and `launch.cwd` in the report, and which file did the children run
+  (`launch.script`)? FG-303's entry script depends on it. Not measured yet.
 
 ## 2. Kaggle Secrets in pushed runs
 
@@ -211,6 +247,9 @@ in a private dataset is the last resort, with its risk written down.
 - Tokens per second for Qwen3 4B on 100 prompts. Not measured yet.
 - Load seconds, device memory in use, and how many replies hit the 256-token cap. Not
   measured yet.
+- Does vLLM 0.33.0 load Qwen3-8B in 4-bit with bitsandbytes and answer on the T4
+  (`vllm:Qwen/Qwen3-8B:bnb` status, `load_seconds`, `memory`, `samples`)? FG-306 allows
+  4-bit loading and FG-307 runs its reference only if it does. Not measured yet.
 
 ## 5. GRPO on the T4 with 4-bit models
 
@@ -247,6 +286,9 @@ For Qwen3 1.7B and 4B, 4-bit, 6 generations, up to 256 completion tokens, 10 ste
 - Unsloth with fast inference (`grpo:unsloth:<model>`): whether it runs, then the same
   numbers. Not measured yet.
 - Does fp16 training stay finite over the 10 steps (`log_history`)? Not measured yet.
+- Did each bench train on one GPU and 24 completions a step (`grpo:<stack>:<model>`,
+  `n_gpu` and `completions_per_step`), and how long were the replies with thinking off
+  (`mean_completion_length`)? Not measured yet.
 
 ## 6. The 12-hour limit
 

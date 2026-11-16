@@ -20,7 +20,11 @@ versions that conflict with each other, so each gets its own venv, deleted after
 
 The script needs only the standard library to start: heavy imports happen inside the
 stages, and nothing runs on import. Kaggle runs a script kernel without arguments, so
-scripts/kaggle_spike.py writes them into KERNEL_ARGV when it bundles the kernel.
+scripts/kaggle_spike.py writes them into KERNEL_ARGV when it bundles the kernel; they win
+over any the interpreter was given, such as an IPython kernel's own, except in a child,
+which run_child marks with FORGE_SPIKE_CHILD. Every launch writes the report's ``launch``
+record before it parses its arguments, so even a launch they don't suit says how Kaggle
+started the script.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import functools
 import importlib.metadata
 import itertools
 import json
+import linecache
 import os
 import platform
 import re
@@ -53,9 +58,17 @@ from typing import Any
 KERNEL_ARGV: list[str] = []
 
 REPORT_SCHEMA = "forge-kaggle-spike/1"
+# Only this script, or a copy of it, holds this line.
+SCRIPT_MARK = f"REPORT_SCHEMA = {json.dumps(REPORT_SCHEMA)}"
 REPORT_NAME = "spike-report.json"
+OUT_DIR = "/kaggle/working"  # the folder Kaggle keeps as a kernel's output
+CHILD_ENV = "FORGE_SPIKE_CHILD"
 PROBE_NAME = "limit-probe.json"
 DEFAULT_MODELS = ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B")
+# configs/models.yaml's reference, which FG-307 has vLLM load in 4-bit with bitsandbytes;
+# the kernel can't read that file, so a unit test keeps the two the same.
+REFERENCE_MODEL = "Qwen/Qwen3-8B"
+BNB_PROMPTS = 10  # enough to show it loads and answers
 MODEL_FILES = ["*.json", "*.safetensors", "*.txt", "*.jinja"]
 PACKAGES = (
     "torch",
@@ -72,6 +85,16 @@ PACKAGES = (
 )
 INTERNET_PROBE_URL = "https://huggingface.co"
 UV_PIN = "uv==0.12.3"
+# Minutes a stage of each kind may run before it is killed, guessed before any session: a
+# stage that hangs then costs its cap, not the rest of the budget.
+STAGE_CAPS_MINUTES = {
+    "env": 5,
+    "secrets": 2,
+    "download": 15,
+    "install": 20,
+    "grpo": 25,
+    "vllm": 15,
+}
 # Plan section 3.10: prompts are fitted to 1,536 tokens, LoRA covers every linear layer.
 MAX_PROMPT_TOKENS = 1536
 LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
@@ -149,7 +172,8 @@ class Stack:
     """A candidate set of GPU packages, installed together into one venv."""
 
     requirements: tuple[str, ...]
-    # Reuse the image's torch and its CUDA build instead of downloading another.
+    # Reuse the image's torch and its CUDA build instead of downloading another: the
+    # install stage fails if a torch lands in the venv all the same.
     system_site_packages: bool
 
 
@@ -157,7 +181,8 @@ class Stack:
 # vLLM 0.33.0 pins torch 2.14.0 and transformers < 5.21, and Unsloth's T4 recipe pins
 # vLLM 0.11.2 (torch 2.9.0), transformers 4.57.6 and TRL 0.22.2.
 STACKS = {
-    "vllm": Stack(("vllm==0.33.0",), system_site_packages=False),
+    # bitsandbytes for the 4-bit reference, at kaggle/requirements-gpu.txt's pin.
+    "vllm": Stack(("vllm==0.33.0", "bitsandbytes==0.50.2"), system_site_packages=False),
     # Forge's training stack as uv.lock has it, on the image's torch: ADR-0006's training
     # stack if vLLM can't run beside it.
     "trl": Stack(
@@ -204,6 +229,9 @@ STACKS = {
     ),
 }
 GRPO_STACKS = ("trl", "unsloth", "trl-vllm")  # in the order run measures them
+# A T4 x2 session has two GPUs, and a Trainer that sees both multiplies its batch by two in
+# one process; the jobs use the first (ADR-0005), so each bench sees only that one.
+ONE_GPU = (("CUDA_VISIBLE_DEVICES", "0"),)
 
 
 @dataclass(frozen=True)
@@ -213,6 +241,12 @@ class Stage:
     argv: tuple[str, ...]  # the child's subcommand and arguments
     needs: tuple[str, ...] = ()  # stages that must have passed first
     removes: str | None = None  # a venv to delete once this stage is over
+    env: tuple[tuple[str, str], ...] = ()  # set for the child over the session's own
+
+    @property
+    def kind(self) -> str:
+        """What the stage does, which sets its time cap: its name up to the first colon."""
+        return self.name.partition(":")[0]
 
 
 @dataclass(frozen=True)
@@ -242,12 +276,18 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     grpo.add_argument("--quant", choices=["4bit", "none"], default="4bit")
 
     run = commands.add_parser("run", parents=[shared, grpo], help="every stage, one child each")
-    run.add_argument("--out-dir", default="/kaggle/working", help="kept as the kernel's output")
+    run.add_argument("--out-dir", default=OUT_DIR, help="kept as the kernel's output")
     run.add_argument("--work-dir", default="/kaggle/temp/forge-spike", help="discarded scratch")
     run.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS))
     run.add_argument("--vllm", action=argparse.BooleanOptionalAction, default=True)
     run.add_argument("--stacks", nargs="*", choices=GRPO_STACKS, default=list(GRPO_STACKS))
     run.add_argument("--max-tokens", type=_positive, default=256, help="vLLM tokens per reply")
+    run.add_argument(
+        "--bnb-models",
+        nargs="*",
+        default=[REFERENCE_MODEL],
+        help="loaded by vLLM in 4-bit with bitsandbytes, on a few prompts",
+    )
     run.add_argument("--secret-labels", nargs="*", default=["HF_TOKEN"])
     run.add_argument(
         "--budget-minutes",
@@ -273,6 +313,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     vllm.add_argument("--max-tokens", type=_positive, default=256)
     vllm.add_argument("--max-model-len", type=_positive, default=2048)
     vllm.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    vllm.add_argument("--quantization", choices=["bitsandbytes"], default=None)
     bench = commands.add_parser("grpo-bench", parents=[child, shared, grpo])
     bench.add_argument("--model", required=True)
     bench.add_argument("--revision", default=None)
@@ -281,7 +322,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     bench.add_argument("--work-dir", required=True)
 
     probe = commands.add_parser("limit-probe", help="rewrite a heartbeat until killed")
-    probe.add_argument("--out-dir", default="/kaggle/working")
+    probe.add_argument("--out-dir", default=OUT_DIR)
     probe.add_argument("--interval-seconds", type=float, default=30.0)
     probe.add_argument("--max-beats", type=_positive, default=None, help="stop after this many")
 
@@ -310,47 +351,64 @@ def _positive(text: str) -> int:
 
 
 def plan_stages(args: argparse.Namespace, python: str = sys.executable) -> list[Stage]:
-    """What ``run`` does, in order: probes, downloads, then each stack's install and benches."""
+    """What ``run`` does, in order: probes, downloads, each GRPO stack, then vLLM's.
+
+    The GRPO benches come first, since ADR-0006 rests on them, so a vLLM stage that hangs
+    can't take their time.
+    """
     work = Path(args.work_dir)
     stages = [
         Stage("env", python, ("env",)),
         Stage("secrets", python, ("secrets", "--labels", *args.secret_labels)),
     ]
-    stages += [Stage(f"download:{m}", python, ("download", "--model", m)) for m in args.models]
-    if args.vllm:
-        stages += _stack_stages("vllm", "vllm", work, python, args, _vllm_argv)
+    stages += [_download(model, python) for model in args.models]
     for stack in args.stacks:
-        bench = functools.partial(_grpo_argv, stack, work)
-        stages += _stack_stages(stack, f"grpo:{stack}", work, python, args, bench)
+        grpo = [(f"grpo:{stack}:{m}", m, _grpo_argv(stack, work, m, args)) for m in args.models]
+        stages += _stack_stages(stack, work, python, grpo)
+    if args.vllm:
+        vllm = [(f"vllm:{m}", m, _vllm_argv(m, args, args.prompts)) for m in args.models]
+        vllm += [
+            (f"vllm:{m}:bnb", m, _vllm_argv(m, args, BNB_PROMPTS, "bitsandbytes"))
+            for m in args.bnb_models
+        ]
+        # Fetched only now, so the reference's 16 GB don't hold up the GRPO benches.
+        extra = [m for m in dict.fromkeys(args.bnb_models) if m not in args.models]
+        stages += [_download(model, python) for model in extra]
+        stages += _stack_stages("vllm", work, python, vllm)
     return stages
 
 
+def _download(model: str, python: str) -> Stage:
+    return Stage(f"download:{model}", python, ("download", "--model", model))
+
+
 def _stack_stages(
-    stack: str,
-    label: str,
-    work: Path,
-    python: str,
-    args: argparse.Namespace,
-    bench_argv: Callable[[str, argparse.Namespace], tuple[str, ...]],
+    stack: str, work: Path, python: str, benches: list[tuple[str, str, tuple[str, ...]]]
 ) -> list[Stage]:
-    """Install ``stack`` into its own venv, bench each model in it, then delete it."""
+    """Install ``stack`` into its own venv, run each ``(name, model, argv)`` bench in it,
+    then delete it."""
     venv = work / "venvs" / stack
     install = Stage(f"install:{stack}", python, ("install", "--stack", stack, "--venv", str(venv)))
-    benches = [
+    stages = [
         Stage(
-            f"{label}:{model}",
+            name,
             str(venv / "bin" / "python"),
-            bench_argv(model, args),
+            argv,
             needs=(install.name, f"download:{model}"),
+            env=ONE_GPU,
         )
-        for model in args.models
+        for name, model, argv in benches
     ]
-    benches[-1] = replace(benches[-1], removes=str(venv))
-    return [install, *benches]
+    stages[-1] = replace(stages[-1], removes=str(venv))
+    return [install, *stages]
 
 
-def _vllm_argv(model: str, args: argparse.Namespace) -> tuple[str, ...]:
-    options = _options(prompts=args.prompts, max_tokens=args.max_tokens, seed=args.seed)
+def _vllm_argv(
+    model: str, args: argparse.Namespace, prompts: int, quantization: str | None = None
+) -> tuple[str, ...]:
+    options = _options(prompts=prompts, max_tokens=args.max_tokens, seed=args.seed)
+    if quantization is not None:
+        options += ("--quantization", quantization)
     return ("vllm-bench", "--model", model, *options)
 
 
@@ -379,7 +437,8 @@ def _options(**values: object) -> tuple[str, ...]:
     )
 
 
-def new_report(args: argparse.Namespace) -> dict[str, Any]:
+def new_report(args: argparse.Namespace | None) -> dict[str, Any]:
+    """A report with no stage yet; ``args`` is None before the arguments are parsed."""
     now = _now()
     return {
         "schema": REPORT_SCHEMA,
@@ -388,10 +447,39 @@ def new_report(args: argparse.Namespace) -> dict[str, Any]:
         "updated_at": now,
         "finished_at": None,
         # How Kaggle started the script, which FG-303's entry script needs to know.
-        "launch": {"argv0": sys.argv[0], "file": _script_file(), "cwd": os.getcwd()},
-        "args": {k: v for k, v in vars(args).items() if k != "command"},
+        "launch": {
+            "argv0": sys.argv[0] if sys.argv else None,
+            "argv": list(sys.argv),
+            "kernel_argv": list(KERNEL_ARGV),
+            "file": _script_file(),
+            "cwd": os.getcwd(),
+        },
+        "args": None if args is None else {k: v for k, v in vars(args).items() if k != "command"},
+        "stage_caps_minutes": dict(STAGE_CAPS_MINUTES),
         "stages": [],
     }
+
+
+def record_launch(argv: Sequence[str]) -> None:
+    """Write a report that holds only how the script was started, before ``argv`` is
+    parsed, so a launch whose arguments fail still leaves one."""
+    path = _out_dir(argv) / REPORT_NAME
+    try:
+        write_json(path, new_report(None))
+    except OSError as exc:
+        print(f"[spike] can't write the launch report {path}: {exc}", file=sys.stderr, flush=True)
+
+
+def _out_dir(argv: Sequence[str]) -> Path:
+    """``--out-dir`` as arguments not yet parsed give it, the last one winning as in
+    argparse, else the kernel's output folder."""
+    found = OUT_DIR
+    for i, arg in enumerate(argv):
+        if arg == "--out-dir" and i + 1 < len(argv):
+            found = argv[i + 1]
+        elif arg.startswith("--out-dir="):
+            found = arg.partition("=")[2]
+    return Path(found)
 
 
 def run(
@@ -401,16 +489,25 @@ def run(
 ) -> dict[str, Any]:
     """Run every planned stage and keep the report at ``out_dir`` current after each."""
     out_dir, work = Path(args.out_dir), Path(args.work_dir)
-    # Children share one model cache, kept out of the output folder.
-    runner = runner or functools.partial(run_child, hf_home=work / "hf")
     report = new_report(args)
     report_path = out_dir / REPORT_NAME
     write_json(report_path, report)
+    try:
+        script = _script_path(work)
+    except RuntimeError as exc:
+        # No stage can start without a file to run.
+        report.update(error=str(exc), finished_at=_now())
+        write_json(report_path, report)
+        return report
+    report["launch"]["script"] = script
+    # Children share one model cache, kept out of the output folder.
+    runner = runner or functools.partial(run_child, script=script, hf_home=work / "hf")
     deadline = clock() + args.budget_minutes * 60
     passed: set[str] = set()
     for stage in plan_stages(args):
         entry: dict[str, Any] = {"name": stage.name, "status": "skipped", "started_at": _now()}
-        entry.update(seconds=None, result=None, error=None)
+        entry.update(seconds=None, timeout_seconds=None, env=dict(stage.env))
+        entry.update(result=None, error=None)
         missing = [name for name in stage.needs if name not in passed]
         left = deadline - clock()
         if missing:
@@ -418,8 +515,10 @@ def run(
         elif left <= 0:
             entry["error"] = f"out of budget ({args.budget_minutes:g} min)"
         else:
+            timeout = min(left, STAGE_CAPS_MINUTES[stage.kind] * 60)
+            entry["timeout_seconds"] = timeout
             start = clock()
-            outcome = runner(stage, work / "results" / f"{_slug(stage.name)}.json", left)
+            outcome = runner(stage, work / "results" / f"{_slug(stage.name)}.json", timeout)
             entry.update(status=outcome.status, result=outcome.result, error=outcome.error)
             entry["seconds"] = round(clock() - start, 3)
             if outcome.status == "ok":
@@ -439,13 +538,15 @@ def run(
 
 
 def run_child(
-    stage: Stage, result_file: Path, timeout: float, hf_home: Path | None = None
+    stage: Stage, result_file: Path, timeout: float, *, script: str, hf_home: Path | None = None
 ) -> Outcome:
-    """Run one stage as ``python throughput.py <argv> --out <file>``, its output in the log."""
+    """Run one stage as ``python <script> <argv> --out <file>``, its output in the log."""
     result_file.unlink(missing_ok=True)
     result_file.parent.mkdir(parents=True, exist_ok=True)
-    command = [stage.python, _script_path(), *stage.argv, "--out", str(result_file)]
+    command = [stage.python, script, *stage.argv, "--out", str(result_file)]
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
+    env.update(stage.env)
+    env[CHILD_ENV] = "1"  # so the child takes its own arguments over the baked ones
     if hf_home is not None:
         env["HF_HOME"] = str(hf_home)
     # A session of its own, so a kill also reaches every process the stage started.
@@ -476,7 +577,7 @@ def run_child(
     finally:
         timer.cancel()
     if killed.is_set():
-        return Outcome("timeout", error=f"killed after {timeout:.0f} s, the budget left")
+        return Outcome("timeout", error=f"killed after {timeout:.0f} s")
     if result_file.is_file():
         data = json.loads(result_file.read_text(encoding="utf-8"))
         if data["ok"]:
@@ -562,7 +663,7 @@ def download_stage(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def install_stage(args: argparse.Namespace) -> dict[str, Any]:
-    """Create the stack's venv and time how long its packages take to install with uv."""
+    """Create the stack's venv and time how long its packages take to install."""
     stack = STACKS[args.stack]
     venv = Path(args.venv)
     uv = [found] if (found := shutil.which("uv")) else None
@@ -573,15 +674,30 @@ def install_stage(args: argparse.Namespace) -> dict[str, Any]:
         bootstrap = round(time.perf_counter() - start, 3)
         uv = [sys.executable, "-m", "uv"]
     start = time.perf_counter()
-    flags = ["--system-site-packages"] if stack.system_site_packages else []
-    _check([*uv, "venv", "--python", sys.executable, *flags, str(venv)])
     python = str(venv / "bin" / "python")
-    _check([*uv, "pip", "install", "--python", python, *stack.requirements])
+    if stack.system_site_packages:
+        # uv ignores system site packages when it installs, so it would put a PyPI torch
+        # in the venv for trl and peft; the venv's own pip counts the image's as there.
+        flags = ["--seed", "--system-site-packages"]
+        _check([*uv, "venv", "--python", sys.executable, *flags, str(venv)])
+        pip = [python, "-m", "pip", "install", "--no-input", "--progress-bar", "off"]
+        _check([*pip, *stack.requirements])
+        installer = "pip"
+    else:
+        _check([*uv, "venv", "--python", sys.executable, str(venv)])
+        _check([*uv, "pip", "install", "--python", python, *stack.requirements])
+        installer = "uv"
     seconds = round(time.perf_counter() - start, 3)
+    if stack.system_site_packages and (own := _venv_packages(venv).get("torch")):
+        raise RuntimeError(
+            f"the install put torch {own} into {venv}, which would shadow the "
+            "image's torch the stack is meant to run on"
+        )
     return {
         "stack": args.stack,
         "requirements": list(stack.requirements),
         "system_site_packages": stack.system_site_packages,
+        "installer": installer,
         "uv": _check([*uv, "--version"]).strip(),
         "uv_bootstrap_seconds": bootstrap,
         "install_seconds": seconds,
@@ -591,7 +707,8 @@ def install_stage(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
-    """Greedy fp16 generation on the spike prompts: a T4 has no bf16."""
+    """Greedy generation on the spike prompts in fp16, since a T4 has no bf16, from 4-bit
+    bitsandbytes weights with ``--quantization``, as FG-306's backend asks for them."""
     from vllm import LLM, SamplingParams
 
     start = time.perf_counter()
@@ -599,6 +716,7 @@ def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
         model=args.model,
         revision=args.revision,
         dtype="half",
+        quantization=args.quantization,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         seed=args.seed,
@@ -618,6 +736,7 @@ def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "settings": {
             "dtype": "half",
+            "quantization": args.quantization,
             "max_model_len": args.max_model_len,
             "gpu_memory_utilization": args.gpu_memory_utilization,
             "temperature": 0.0,
@@ -635,6 +754,28 @@ def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
         # A few replies, to check they are SQL and that thinking stayed off.
         "samples": [out.outputs[0].text[:400] for out in outputs[:3]],
     }
+
+
+def render_prompts(tokenizer: Any, chats: Sequence[list[dict[str, str]]]) -> list[str]:
+    """Each chat as the text the model is prompted with, Qwen3's thinking turned off.
+
+    Every stack gets this same text: TRL 0.22, Unsloth's, has no ``chat_template_kwargs``
+    and would prompt with thinking on. A template that ignores the switch fails the stage,
+    rather than bench a model that thinks before it answers.
+    """
+
+    def render(chat: list[dict[str, str]], thinking: bool) -> str:
+        text = tokenizer.apply_chat_template(
+            chat, add_generation_prompt=True, tokenize=False, enable_thinking=thinking
+        )
+        if not isinstance(text, str):
+            raise TypeError(f"apply_chat_template returned {type(text).__name__}, not text")
+        return text
+
+    prompts = [render(chat, False) for chat in chats]
+    if chats and prompts[0] == render(chats[0], True):
+        raise RuntimeError("the chat template ignores enable_thinking: thinking can't be off")
+    return prompts
 
 
 def sql_block_reward(
@@ -660,6 +801,12 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
     from trl import GRPOConfig, GRPOTrainer
 
     marks: list[float] = []
+    scored: list[int] = []  # completions in each batch TRL scored
+
+    @functools.wraps(sql_block_reward)  # TRL names the reward's metrics after it
+    def reward(prompts: list[Any], completions: list[Any], **kwargs: Any) -> list[float | None]:
+        scored.append(len(completions))
+        return sql_block_reward(prompts, completions, **kwargs)
 
     class StepTimer(TrainerCallback):
         def on_train_begin(self, *args: Any, **kwargs: Any) -> None:
@@ -673,6 +820,7 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
     start = time.perf_counter()
     model, tokenizer, peft_config = (_unsloth_model if args.stack == "unsloth" else _hf_model)(args)
     load_seconds = time.perf_counter() - start
+    prompts = render_prompts(tokenizer, spike_prompts(args.prompts))
 
     fields = GRPOConfig.__dataclass_fields__
     config: dict[str, Any] = {
@@ -693,8 +841,6 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
         "use_cpu": not on_gpu,
         "optim": "adamw_8bit" if on_gpu else "adamw_torch",
     }
-    if "chat_template_kwargs" in fields:
-        config["chat_template_kwargs"] = {"enable_thinking": False}
     if "max_prompt_length" in fields:
         # TRL before 0.28 cuts prompts to 512 tokens unless told otherwise.
         config["max_prompt_length"] = MAX_PROMPT_TOKENS
@@ -702,9 +848,9 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
         config.update(use_vllm=True, vllm_mode="colocate")
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=[sql_block_reward],
+        reward_funcs=[reward],
         args=GRPOConfig(**config),
-        train_dataset=Dataset.from_list([{"prompt": p} for p in spike_prompts(args.prompts)]),
+        train_dataset=Dataset.from_list([{"prompt": prompt} for prompt in prompts]),
         processing_class=tokenizer,
         peft_config=peft_config,
         callbacks=[StepTimer()],
@@ -722,6 +868,10 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
     trainer.train()
     train_seconds = time.perf_counter() - start
     steps = [round(b - a, 3) for a, b in itertools.pairwise(marks)]
+    done = trainer.state.global_step
+    history = trainer.state.log_history
+    length = "completions/mean_length"  # TRL logs it for every step
+    lengths = [entry[length] for entry in history if length in entry]
     settings = {key: value for key, value in config.items() if key not in ("output_dir", "seed")}
     settings["lora_rank"] = args.lora_rank
     # Unsloth's fast_inference generates with its own colocated vLLM.
@@ -732,7 +882,12 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
         "device": args.device,
         "quant": args.quant,
         "settings": settings,
-        "completions_per_step": args.batch_size * args.grad_accum,
+        "planned_completions_per_step": args.batch_size * args.grad_accum,
+        # What TRL generated and scored: a Trainer that sees two GPUs doubles it.
+        "completions_per_step": sum(scored) / done if done else None,
+        "n_gpu": trainer.args.n_gpu,
+        "thinking_off": True,  # render_prompts saw to it
+        "mean_completion_length": statistics.mean(lengths) if lengths else None,
         "versions": versions(),
         "load_seconds": round(load_seconds, 3),
         "train_seconds": round(train_seconds, 3),
@@ -740,7 +895,7 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
         "step_seconds": steps,
         "median_step_seconds": statistics.median(steps[1:]) if len(steps) > 1 else None,
         "memory": cuda_memory() if on_gpu else None,
-        "log_history": trainer.state.log_history,
+        "log_history": history,
     }
 
 
@@ -918,6 +1073,20 @@ def _check(command: list[str]) -> str:
     return done.stdout
 
 
+def _venv_packages(venv: Path) -> dict[str, str]:
+    """The distributions installed in ``venv`` itself, by lowercase name: not those it sees
+    through system site packages, which ``importlib.metadata`` would list too."""
+    folders = [str(path) for path in sorted(venv.glob("lib/python*/site-packages"))]
+    if not folders:
+        raise RuntimeError(f"no lib/python*/site-packages under {venv} to check")
+    found: dict[str, str] = {}
+    for dist in importlib.metadata.distributions(path=folders):
+        name = dist.metadata["Name"]
+        if name:
+            found[re.sub(r"[-_.]+", "-", name).lower()] = dist.version
+    return found
+
+
 def _tree_bytes(path: Path) -> int:
     return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
 
@@ -935,12 +1104,30 @@ def _script_file() -> str | None:
     return str(Path(file).resolve()) if file else None
 
 
-def _script_path() -> str:
-    """This script's file, which every child runs: Kaggle may not set ``__file__``."""
-    for candidate in (_script_file(), sys.argv[0]):
-        if candidate and candidate.endswith(".py") and Path(candidate).is_file():
+def _script_path(work: Path) -> str:
+    """The file every child runs: this script's own, or else its source written to ``work``.
+
+    An IPython kernel runs the source with no ``__file__``, the kernel's launcher as
+    ``argv[0]``, and a cell's name as the code's file, which need not exist on disk; the
+    cell's source is in ``linecache`` all the same.
+    """
+    code_file = _script_path.__code__.co_filename
+    for candidate in (_script_file(), code_file, sys.argv[0] if sys.argv else None):
+        if candidate and _is_this_script(Path(candidate)):
             return str(Path(candidate).resolve())
-    raise RuntimeError("can't find this script's file to start a stage; run it as a .py file")
+    source = "".join(linecache.getlines(code_file))
+    if SCRIPT_MARK not in source:
+        raise RuntimeError("can't find this script's file or its source to start a stage")
+    copy = work / "throughput.py"
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_text(source, encoding="utf-8")
+    return str(copy)
+
+
+def _is_this_script(path: Path) -> bool:
+    if path.suffix != ".py" or not path.is_file():
+        return False
+    return SCRIPT_MARK in path.read_text(encoding="utf-8", errors="replace")
 
 
 CHILDREN: dict[str, Callable[[argparse.Namespace], Any]] = {
@@ -955,7 +1142,13 @@ CHILDREN: dict[str, Callable[[argparse.Namespace], Any]] = {
 
 def main(argv: Sequence[str] | None = None) -> int:
     if argv is None:
-        argv = sys.argv[1:] or KERNEL_ARGV or ["run"]
+        if os.environ.get(CHILD_ENV) == "1":
+            argv = sys.argv[1:]  # the command line run_child gave this stage
+        else:
+            # Kaggle gives a script no arguments, and an IPython kernel gives its own
+            # (-f <connection file>), so the baked ones come first.
+            argv = KERNEL_ARGV or sys.argv[1:] or ["run"]
+            record_launch(argv)
     args = parse_args(argv)
     if args.command == "run":
         # Exit 0 even when stages fail: the report says which, and a kernel that ends in
@@ -968,4 +1161,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Only a failure raises: an IPython kernel shows even SystemExit(0) as an exception.
+    if code := main():
+        raise SystemExit(code)

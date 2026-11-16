@@ -117,6 +117,7 @@ pending:
       - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
       - both datasets published once (FG-302's pending publish)
       - FG-301's answer to whether vLLM loads bitsandbytes 4-bit weights on the T4
+        (its vllm:Qwen/Qwen3-8B:bnb stage)
     how: docs/runbook.md, "Baselines", step 3
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
@@ -173,6 +174,7 @@ pending:
       - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
       - both datasets published once (FG-302's pending publish)
       - FG-301's answer to whether vLLM loads bitsandbytes 4-bit weights on the T4
+        (its vllm:Qwen/Qwen3-8B:bnb stage)
     how: docs/runbook.md, "Baselines", step 5
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop

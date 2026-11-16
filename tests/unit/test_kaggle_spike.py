@@ -24,8 +24,9 @@ import pytest
 import yaml
 
 from forge.data import prompts as forge_prompts
-from forge.ops.kaggle import METADATA_FILE, check_kernel_metadata
+from forge.ops.kaggle import METADATA_FILE, bake_argv, check_kernel_metadata
 from tests.spike import THROUGHPUT, throughput
+from tests.tiny_hf import CHATML, QWEN3, byte_tokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCH = ["grpo-bench", "--out", "o", "--work-dir", "w", "--model", "m"]
@@ -73,6 +74,7 @@ def test_defaults_measure_the_planned_spike() -> None:
     assert (args.batch_size, args.grad_accum) == (6, 4)
     assert args.stacks == ["trl", "unsloth", "trl-vllm"]
     assert args.vllm is True
+    assert args.bnb_models == ["Qwen/Qwen3-8B"]
     assert args.secret_labels == ["HF_TOKEN"]
     # Inside the story's 1.5 GPU hours, with room for the report to get out.
     assert args.budget_minutes < 90
@@ -108,11 +110,109 @@ def test_kernel_argv_is_used_when_kaggle_passes_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Kaggle starts a script kernel with no arguments; bundling writes them into the script.
+    monkeypatch.delenv(spike.CHILD_ENV, raising=False)
     monkeypatch.setattr(sys, "argv", ["throughput.py"])
     argv = ["limit-probe", "--out-dir", str(tmp_path), "--interval-seconds", "0"]
     monkeypatch.setattr(spike, "KERNEL_ARGV", [*argv, "--max-beats", "1"])
     assert spike.main() == 0
     assert json.loads((tmp_path / spike.PROBE_NAME).read_text())["beats"] == 1
+
+
+@pytest.mark.phase(3)
+def test_launch_report_is_written_before_the_arguments_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An IPython kernel's argv, and baked arguments this script can't take: the report
+    # still says how the kernel was started.
+    launcher = str(tmp_path / "ipykernel_launcher.py")
+    monkeypatch.delenv(spike.CHILD_ENV, raising=False)
+    monkeypatch.setattr(sys, "argv", [launcher, "-f", "/tmp/kernel-4242.json"])
+    baked = ["run", "--out-dir", str(tmp_path / "out"), "--no-such-option"]
+    monkeypatch.setattr(spike, "KERNEL_ARGV", baked)
+    with pytest.raises(SystemExit) as exit_info:
+        spike.main()
+    assert exit_info.value.code == 2
+    assert "--no-such-option" in capsys.readouterr().err
+    report = json.loads((tmp_path / "out" / spike.REPORT_NAME).read_text())
+    assert report["launch"] == {
+        "argv0": launcher,
+        "argv": [launcher, "-f", "/tmp/kernel-4242.json"],
+        "kernel_argv": baked,
+        "file": str(THROUGHPUT),
+        "cwd": os.getcwd(),
+    }
+    assert (report["args"], report["stages"], report["finished_at"]) == (None, [], None)
+
+
+@pytest.mark.phase(3)
+def test_a_child_takes_its_command_line_over_the_baked_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # run_child marks each child, which runs the same baked script with its own arguments.
+    monkeypatch.setenv(spike.CHILD_ENV, "1")
+    argv = ["limit-probe", "--out-dir", str(tmp_path), "--interval-seconds", "0"]
+    monkeypatch.setattr(sys, "argv", ["throughput.py", *argv, "--max-beats", "2"])
+    monkeypatch.setattr(spike, "KERNEL_ARGV", ["run", "--out-dir", str(tmp_path / "run")])
+    assert spike.main() == 0
+    assert json.loads((tmp_path / spike.PROBE_NAME).read_text())["beats"] == 2
+    # A child writes no launch report: the kernel's is the one that counts.
+    assert [p.name for p in tmp_path.iterdir()] == [spike.PROBE_NAME]
+
+
+# Runs the baked script as ipykernel runs a cell: argv is the kernel's own, the code is
+# compiled under a cell's file name that is no file on disk, its source is in linecache,
+# and the namespace is a __main__ module with no __file__.
+IPYKERNEL_DRIVER = """\
+import json, linecache, sys, types
+from pathlib import Path
+
+script, launcher, cell, work = sys.argv[1:]
+source = Path(script).read_text(encoding="utf-8")
+sys.argv = [launcher, "-f", "/tmp/kernel-4242.json"]
+linecache.cache[cell] = (len(source), None, source.splitlines(keepends=True), cell)
+main = types.ModuleType("__main__")
+sys.modules["__main__"] = main
+exec(compile(source, cell, "exec"), main.__dict__)
+ns = main.__dict__
+path = ns["_script_path"](Path(work))
+stage = ns["Stage"]("secrets", sys.executable, ("secrets", "--labels", "HF_TOKEN"))
+outcome = ns["run_child"](stage, Path(work) / "secrets.json", 60.0, script=path)
+print(json.dumps({"script": path, "status": outcome.status, "result": outcome.result}))
+"""
+
+
+@pytest.mark.phase(3)
+def test_ipykernel_launch_runs_the_baked_argv(fakes: Path, tmp_path: Path) -> None:
+    (fakes / "kaggle_secrets.py").write_text(
+        "class UserSecretsClient:\n    def get_secret(self, label):\n        return 'x'\n"
+    )
+    out, work = tmp_path / "out", tmp_path / "work"
+    argv = ["limit-probe", "--out-dir", str(out), "--interval-seconds", "0", "--max-beats", "1"]
+    baked = tmp_path / "kernel" / "throughput.py"
+    baked.parent.mkdir()
+    baked.write_text(bake_argv(THROUGHPUT.read_text(encoding="utf-8"), argv), encoding="utf-8")
+    # A real file named like a script, which must not be taken for this one.
+    launcher = tmp_path / "ipykernel_launcher.py"
+    launcher.write_text("from ipykernel import kernelapp as app\napp.launch_new_instance()\n")
+    cell = tmp_path / "ipykernel_4242" / "2381940622.py"  # never written, as in a kernel
+    driver = [sys.executable, "-c", IPYKERNEL_DRIVER, str(baked), str(launcher), str(cell)]
+    done = subprocess.run(
+        [*driver, str(work)], cwd=tmp_path, capture_output=True, text=True, timeout=120
+    )
+    # The cell ends without raising SystemExit, which a kernel would show as an error.
+    assert done.returncode == 0, done.stderr
+
+    # The baked arguments ran, not the kernel's -f <connection file>.
+    assert json.loads((out / spike.PROBE_NAME).read_text())["beats"] == 1
+    launch = json.loads((out / spike.REPORT_NAME).read_text())["launch"]
+    assert (launch["argv0"], launch["file"], launch["kernel_argv"]) == (str(launcher), None, argv)
+    # With no file to run, the children run the cell's source, written out once.
+    found = json.loads(done.stdout.splitlines()[-1])
+    assert found["script"] == str(work / "throughput.py")
+    assert Path(found["script"]).read_text(encoding="utf-8") == baked.read_text(encoding="utf-8")
+    # The child, marked as one, ran the stage it was given and not the baked probe.
+    assert found["status"] == "ok"
+    assert found["result"]["labels"] == {"HF_TOKEN": {"readable": True}}
 
 
 @pytest.mark.phase(3)
@@ -132,15 +232,14 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     args = _run_args(tmp_path)
     stages = spike.plan_stages(args, python="/usr/bin/python3")
     names = [stage.name for stage in stages]
-    small, large = "Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B"
+    small, large, reference = "Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B", "Qwen/Qwen3-8B"
+    # The GRPO benches come first, so a vLLM stage that hangs can't take their time, and
+    # the reference is fetched only when vLLM's stack is next.
     assert names == [
         "env",
         "secrets",
         f"download:{small}",
         f"download:{large}",
-        "install:vllm",
-        f"vllm:{small}",
-        f"vllm:{large}",
         "install:trl",
         f"grpo:trl:{small}",
         f"grpo:trl:{large}",
@@ -150,6 +249,11 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
         "install:trl-vllm",
         f"grpo:trl-vllm:{small}",
         f"grpo:trl-vllm:{large}",
+        f"download:{reference}",
+        "install:vllm",
+        f"vllm:{small}",
+        f"vllm:{large}",
+        f"vllm:{reference}:bnb",
     ]
     by_name = {stage.name: stage for stage in stages}
     venv = tmp_path / "work" / "venvs" / "trl"
@@ -160,6 +264,10 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     assert bench.needs == ("install:trl", f"download:{large}")
     assert bench.removes == str(venv)
     assert by_name[f"grpo:trl:{small}"].removes is None
+    # Each bench sees one GPU of a T4 x2 session, and the env stage both.
+    for name in (f"grpo:trl:{large}", f"grpo:unsloth:{small}", f"vllm:{small}"):
+        assert by_name[name].env == (("CUDA_VISIBLE_DEVICES", "0"),), name
+    assert by_name["env"].env == by_name["install:trl"].env == ()
     assert by_name["install:trl"].python == "/usr/bin/python3"
     # Each bench's arguments parse as its child command, with the run's settings.
     child = spike.parse_args([*bench.argv, "--out", "x.json"])
@@ -172,10 +280,38 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     assert (child.steps, child.num_generations, child.max_completion_length) == (10, 6, 256)
     vllm = spike.parse_args([*by_name[f"vllm:{small}"].argv, "--out", "x.json"])
     assert (vllm.command, vllm.prompts, vllm.max_tokens) == ("vllm-bench", 100, 256)
+    assert vllm.quantization is None
+    # The reference loads in 4-bit with bitsandbytes, last in vLLM's venv, on a few prompts.
+    bnb = by_name[f"vllm:{reference}:bnb"]
+    assert bnb.needs == ("install:vllm", f"download:{reference}")
+    assert bnb.removes == str(tmp_path / "work" / "venvs" / "vllm")
+    assert by_name[f"vllm:{large}"].removes is None
+    assert bnb.env == spike.ONE_GPU
+    child = spike.parse_args([*bnb.argv, "--out", "x.json"])
+    assert (child.model, child.quantization) == (reference, "bitsandbytes")
+    assert child.prompts == spike.BNB_PROMPTS < args.prompts
 
     only = spike.plan_stages(_run_args(tmp_path, "--no-vllm", "--stacks", "trl"), python="py")
     assert [s.name for s in only][-3:] == ["install:trl", f"grpo:trl:{small}", f"grpo:trl:{large}"]
-    assert not any(s.name.startswith("vllm:") for s in only)
+    assert not any(s.name.startswith("vllm:") or reference in s.name for s in only)
+    no_bnb = spike.plan_stages(_run_args(tmp_path, "--bnb-models"), python="py")
+    assert [s.name for s in no_bnb][-1] == f"vllm:{large}"
+    assert f"download:{reference}" not in [s.name for s in no_bnb]
+
+
+@pytest.mark.phase(3)
+def test_bnb_stage_loads_the_reference_model() -> None:
+    # The kernel can't read configs/models.yaml, so the script names FG-307's 4-bit
+    # reference itself, and vLLM's stack carries the bitsandbytes it needs.
+    models = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    four_bit = [
+        entry["repo"]
+        for entry in models["reference"].values()
+        if entry.get("quantization") == "bitsandbytes"
+    ]
+    assert spike.parse_args(["run"]).bnb_models == four_bit == [spike.REFERENCE_MODEL]
+    bnb_pin = [r for r in spike.STACKS["trl-vllm"].requirements if r.startswith("bitsandbytes==")]
+    assert bnb_pin and set(bnb_pin) <= set(spike.STACKS["vllm"].requirements)
 
 
 def _fake_runner(outcomes: dict[str, Any], calls: list[str]) -> Any:
@@ -196,7 +332,7 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
     calls: list[str] = []
     outcomes = {
         "install:trl": spike.Outcome("error", error="RuntimeError: uv pip install exited 1"),
-        "vllm:m/small": spike.Outcome("timeout", error="killed after 60 s, the budget left"),
+        "vllm:m/small": spike.Outcome("timeout", error="killed after 60 s"),
     }
     report = spike.run(args, runner=_fake_runner(outcomes, calls))
 
@@ -211,29 +347,53 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
         "launch",
         "args",
         "stages",
+        "stage_caps_minutes",
     }
     assert (report["schema"], report["story"]) == (spike.REPORT_SCHEMA, "FG-301")
     assert report["finished_at"] is not None
+    assert report["launch"]["script"] == str(THROUGHPUT)  # what each child runs
     assert report["args"]["models"] == ["m/small"]
     statuses = {s["name"]: (s["status"], s["error"]) for s in report["stages"]}
     assert statuses == {
         "env": ("ok", None),
         "secrets": ("ok", None),
         "download:m/small": ("ok", None),
-        "install:vllm": ("ok", None),
-        "vllm:m/small": ("timeout", "killed after 60 s, the budget left"),
         "install:trl": ("error", "RuntimeError: uv pip install exited 1"),
         # Never started: its install failed.
         "grpo:trl:m/small": ("skipped", "needs install:trl"),
         "install:unsloth": ("ok", None),
         "grpo:unsloth:m/small": ("ok", None),
+        "download:Qwen/Qwen3-8B": ("ok", None),
+        "install:vllm": ("ok", None),
+        "vllm:m/small": ("timeout", "killed after 60 s"),
+        "vllm:Qwen/Qwen3-8B:bnb": ("ok", None),
     }
     assert "grpo:trl:m/small" not in calls
+    fields = {"name", "status", "started_at", "seconds", "timeout_seconds", "env", "result"}
     for stage in report["stages"]:
-        assert set(stage) >= {"name", "status", "started_at", "seconds", "result", "error"}
+        assert set(stage) >= {*fields, "error"}
     assert report["stages"][0]["result"] == {"stage": "env"}
+    envs = {s["name"]: s["env"] for s in report["stages"]}
+    assert envs["env"] == {}
+    assert envs["grpo:unsloth:m/small"] == {"CUDA_VISIBLE_DEVICES": "0"}
     # Each stack's venv is gone once its last bench is over.
     assert not (venvs / "unsloth").exists()
+
+
+@pytest.mark.phase(3)
+def test_run_without_a_script_to_start_stops_with_the_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def nowhere(work: Path) -> str:
+        raise RuntimeError("can't find this script's file or its source")
+
+    monkeypatch.setattr(spike, "_script_path", nowhere)
+    calls: list[str] = []
+    report = spike.run(_run_args(tmp_path), runner=_fake_runner({}, calls))
+    assert calls == []
+    assert report["error"] == "can't find this script's file or its source"
+    assert report["stages"] == [] and report["finished_at"] is not None
+    assert json.loads((tmp_path / "out" / spike.REPORT_NAME).read_text()) == report
 
 
 @pytest.mark.phase(3)
@@ -249,6 +409,35 @@ def test_run_skips_stages_once_out_of_budget(tmp_path: Path) -> None:
     errors = {s["name"]: s["error"] for s in report["stages"]}
     assert errors["secrets"] == errors["install:trl"] == "out of budget (1 min)"
     assert errors["grpo:trl:m/small"] == "needs install:trl, download:m/small"
+
+
+@pytest.mark.phase(3)
+def test_a_hung_stage_costs_only_its_cap(tmp_path: Path) -> None:
+    args = _run_args(tmp_path, "--models", "m/small")
+    now = [0.0]
+    timeouts: dict[str, float] = {}
+
+    def runner(stage: Any, result_file: Path, timeout: float) -> Any:
+        timeouts[stage.name] = timeout
+        if stage.name == "grpo:trl:m/small":
+            now[0] += timeout  # hangs until it is killed
+            return spike.Outcome("timeout", error=f"killed after {timeout:.0f} s")
+        now[0] += 1.0
+        return spike.Outcome("ok", result={})
+
+    report = spike.run(args, runner=runner, clock=lambda: now[0])
+    caps = spike.STAGE_CAPS_MINUTES
+    assert report["stage_caps_minutes"] == caps
+    assert set(caps) == {stage.kind for stage in spike.plan_stages(args)}
+    # Each stage may run for its kind's cap, all well inside the budget.
+    assert max(caps.values()) < args.budget_minutes
+    for stage in report["stages"]:
+        cap = caps[stage["name"].split(":")[0]] * 60
+        assert timeouts[stage["name"]] == stage["timeout_seconds"] == cap, stage["name"]
+    # The hang cost its cap, not the time left, and every stage after it still ran.
+    statuses = {s["name"]: s["status"] for s in report["stages"]}
+    assert statuses.pop("grpo:trl:m/small") == "timeout"
+    assert set(statuses.values()) == {"ok"}
 
 
 @pytest.fixture
@@ -276,7 +465,9 @@ def test_run_child_reports_a_failed_stage(
     (fakes / "kaggle_secrets.py").write_text(source + "\n")
     stage = spike.Stage("secrets", sys.executable, ("secrets",))
     started = time.monotonic()
-    outcome = spike.run_child(stage, tmp_path / "results" / "secrets.json", timeout)
+    outcome = spike.run_child(
+        stage, tmp_path / "results" / "secrets.json", timeout, script=str(THROUGHPUT)
+    )
     assert (outcome.status, outcome.result) == (status, None)
     assert error in outcome.error
     if "exit code" in error:
@@ -290,9 +481,39 @@ def test_run_child_returns_the_stage_result(fakes: Path, tmp_path: Path) -> None
         "class UserSecretsClient:\n    def get_secret(self, label):\n        return 'x'\n"
     )
     stage = spike.Stage("secrets", sys.executable, ("secrets", "--labels", "HF_TOKEN"))
-    outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0)
+    outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0, script=str(THROUGHPUT))
     assert outcome.status == "ok", outcome.error
     assert outcome.result["labels"] == {"HF_TOKEN": {"readable": True}}
+
+
+@pytest.mark.phase(3)
+def test_run_child_gives_the_stage_its_environment(
+    fakes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The stand-in for kaggle_secrets records the environment the child sees.
+    seen = tmp_path / "seen.json"
+    names = ("CUDA_VISIBLE_DEVICES", "TOKENIZERS_PARALLELISM", spike.CHILD_ENV)
+    (fakes / "kaggle_secrets.py").write_text(
+        textwrap.dedent(
+            f"""\
+            import json, os
+            with open({str(seen)!r}, "w") as out:
+                json.dump({{name: os.environ.get(name) for name in {names!r}}}, out)
+            class UserSecretsClient:
+                def get_secret(self, label):
+                    return "x"
+            """
+        )
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")  # a T4 x2 session's two GPUs
+    stage = spike.Stage("secrets", sys.executable, ("secrets",), env=spike.ONE_GPU)
+    outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0, script=str(THROUGHPUT))
+    assert outcome.status == "ok", outcome.error
+    assert json.loads(seen.read_text()) == {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "TOKENIZERS_PARALLELISM": "false",
+        spike.CHILD_ENV: "1",
+    }
 
 
 FAKE_VLLM = textwrap.dedent(
@@ -335,6 +556,7 @@ def test_vllm_stage_generates_greedy_fp16(monkeypatch: pytest.MonkeyPatch) -> No
     # A T4 has no bf16, so the weights load in fp16.
     assert llm_kwargs["dtype"] == "half"
     assert llm_kwargs["model"] == "Qwen/Qwen3-1.7B"
+    assert llm_kwargs["quantization"] is None
     assert prompts == 100
     assert sampling["temperature"] == 0.0 and sampling["max_tokens"] == 256
     assert chat_kwargs["chat_template_kwargs"] == {"enable_thinking": False}
@@ -348,6 +570,23 @@ def test_vllm_stage_generates_greedy_fp16(monkeypatch: pytest.MonkeyPatch) -> No
     assert result["completion_tokens_per_second"] == pytest.approx(per_second, rel=0.05)
     assert result["memory"] is None  # no CUDA here
     assert result["samples"][0].startswith("```sql")
+
+
+@pytest.mark.phase(3)
+def test_vllm_stage_loads_bitsandbytes_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    # FG-306 loads a 4-bit reference only if the spike shows vLLM can, as the backend
+    # asks for it: bitsandbytes over fp16 weights.
+    fake = types.ModuleType("vllm")
+    exec(FAKE_VLLM, fake.__dict__)
+    monkeypatch.setitem(sys.modules, "vllm", fake)
+    argv = ["vllm-bench", "--out", "x.json", "--model", "Qwen/Qwen3-8B", "--prompts", "10"]
+    result = spike.vllm_stage(spike.parse_args([*argv, "--quantization", "bitsandbytes"]))
+
+    (_, llm_kwargs), (_, prompts, _, _) = fake.CALLS
+    assert (llm_kwargs["quantization"], llm_kwargs["dtype"]) == ("bitsandbytes", "half")
+    assert prompts == result["prompts"] == 10
+    assert result["settings"]["quantization"] == "bitsandbytes"
+    assert len(result["samples"]) == 3
 
 
 @pytest.mark.phase(3)
@@ -400,11 +639,31 @@ def test_env_stage_reports_off_kaggle_too(monkeypatch: pytest.MonkeyPatch) -> No
     json.dumps(info)
 
 
-@pytest.mark.phase(3)
-def test_install_stage_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A stand-in uv that logs its arguments, so the commands are checked without installing.
+# The venv's python, which the stand-in uv writes: it logs its arguments too, and its pip
+# puts a torch into the venv's own site-packages when FAKE_PIP_TORCH is set, as uv's
+# installer does whatever system site packages hold.
+FAKE_VENV_PYTHON = """\
+#!{python}
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open({log!r}, "a") as log:
+    log.write("python " + " ".join(args) + "\\n")
+if args[:3] == ["-m", "pip", "install"] and os.environ.get("FAKE_PIP_TORCH"):
+    site = next(Path(sys.argv[0]).parents[1].glob("lib/python*/site-packages"))
+    info = site / "torch-2.14.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.1\\nName: torch\\nVersion: 2.14.0\\n")
+"""
+
+
+@pytest.fixture
+def fake_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A stand-in uv on PATH that logs its arguments, so commands are checked without
+    installing; returns the log, which the venv's python writes to as well."""
     bin_dir, log = tmp_path / "bin", tmp_path / "uv.log"
     bin_dir.mkdir()
+    python = FAKE_VENV_PYTHON.format(python=sys.executable, log=str(log))
     uv = bin_dir / "uv"
     uv.write_text(
         textwrap.dedent(
@@ -416,7 +675,11 @@ def test_install_stage_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
             with open({str(log)!r}, "a") as log:
                 log.write(" ".join(args) + "\\n")
             if args[0] == "venv":
-                Path(args[-1], "bin").mkdir(parents=True)
+                venv = Path(args[-1])
+                (venv / "lib" / "python3.13" / "site-packages").mkdir(parents=True)
+                (venv / "bin").mkdir()
+                (venv / "bin" / "python").write_text({python!r})
+                (venv / "bin" / "python").chmod(0o755)
             elif args == ["--version"]:
                 print("uv 0.12.3")
             elif args[:2] == ["pip", "freeze"]:
@@ -426,22 +689,63 @@ def test_install_stage_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     )
     uv.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    venv = tmp_path / "venvs" / "trl"
-    args = spike.parse_args(["install", "--out", "x.json", "--stack", "trl", "--venv", str(venv)])
-    result = spike.install_stage(args)
+    monkeypatch.delenv("FAKE_PIP_TORCH", raising=False)
+    return log
+
+
+def _install(tmp_path: Path, stack: str) -> tuple[Path, dict[str, Any]]:
+    venv = tmp_path / "venvs" / stack
+    args = spike.parse_args(["install", "--out", "x.json", "--stack", stack, "--venv", str(venv)])
+    return venv, spike.install_stage(args)
+
+
+@pytest.mark.phase(3)
+def test_install_stage_commands(tmp_path: Path, fake_uv: Path) -> None:
+    venv, result = _install(tmp_path, "trl")
 
     python = str(venv / "bin" / "python")
     requirements = " ".join(spike.STACKS["trl"].requirements)
-    assert log.read_text().splitlines() == [
-        f"venv --python {sys.executable} --system-site-packages {venv}",
-        f"pip install --python {python} {requirements}",
+    # uv ignores system site packages when it installs, so the stack that runs on the
+    # image's torch installs with the venv's own pip, which counts them.
+    assert fake_uv.read_text().splitlines() == [
+        f"venv --python {sys.executable} --seed --system-site-packages {venv}",
+        f"python -m pip install --no-input --progress-bar off {requirements}",
         "--version",
         f"pip freeze --python {python}",
     ]
+    assert result["installer"] == "pip"
+    assert result["system_site_packages"] is True
     assert result["uv"] == "uv 0.12.3"
     assert result["uv_bootstrap_seconds"] is None  # uv was already there
     assert result["freeze"] == ["trl==1.18.0"]
     assert result["install_seconds"] >= 0
+
+
+@pytest.mark.phase(3)
+def test_install_stage_uses_uv_for_a_stack_with_its_own_torch(
+    tmp_path: Path, fake_uv: Path
+) -> None:
+    venv, result = _install(tmp_path, "trl-vllm")
+
+    python = str(venv / "bin" / "python")
+    requirements = " ".join(spike.STACKS["trl-vllm"].requirements)
+    assert fake_uv.read_text().splitlines()[:2] == [
+        f"venv --python {sys.executable} {venv}",
+        f"pip install --python {python} {requirements}",
+    ]
+    assert (result["installer"], result["system_site_packages"]) == ("uv", False)
+
+
+@pytest.mark.phase(3)
+def test_install_stage_refuses_a_torch_inside_a_venv_meant_to_reuse_the_images(
+    tmp_path: Path, fake_uv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_PIP_TORCH", "1")
+    with pytest.raises(RuntimeError, match=r"torch 2\.14\.0 .*image's torch"):
+        _install(tmp_path, "trl")
+    # A stack that brings its own torch may install one.
+    _, result = _install(tmp_path, "unsloth")
+    assert result["installer"] == "uv"
 
 
 @pytest.mark.phase(3)
@@ -454,6 +758,23 @@ def test_prompts_follow_forges_format() -> None:
     assert len({p[1]["content"] for p in prompts}) == 100  # no question repeats
     assert spike.spike_prompts(100) == prompts
     assert [m["role"] for m in prompts[0]] == ["system", "user"]
+
+
+@pytest.mark.phase(3)
+def test_grpo_prompts_are_rendered_with_thinking_off() -> None:
+    # Every stack trains on the same text: TRL 0.22, Unsloth's, has no
+    # chat_template_kwargs, so it can't be left to the trainer.
+    chats = spike.spike_prompts(3)
+    prompts = spike.render_prompts(byte_tokenizer(QWEN3), chats)
+    assert len(prompts) == 3
+    for prompt, chat in zip(prompts, chats, strict=True):
+        assert prompt.startswith("<|im_start|>system\n" + spike.SYSTEM_PROMPT)
+        assert chat[1]["content"] in prompt
+        assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    # A template that ignores the switch fails the stage instead of benching with
+    # thinking on.
+    with pytest.raises(RuntimeError, match="ignores enable_thinking"):
+        spike.render_prompts(byte_tokenizer(CHATML), chats)
 
 
 def _requirement_lines(path: Path) -> list[str]:
