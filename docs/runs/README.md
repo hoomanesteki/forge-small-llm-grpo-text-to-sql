@@ -81,7 +81,8 @@ scores can differ a little from these.
 [pending.yaml](pending.yaml) lists the runs a story needs that can't happen yet, what blocks
 each one, since when, and what it will fill in. FG-301's Kaggle spike, FG-307's baselines and
 FG-404's SFT runs are there until the Kaggle account exists, and FG-491's push of the SFT
-pilot, adapter and all, until the Hugging Face run store does. `tests/integration/test_artifacts.py`
+pilot, adapter and all, until the Hugging Face run store does. FG-405's comparison of the
+main model with and without SFT waits there on FG-307's and FG-404's runs. `tests/integration/test_artifacts.py`
 finds a GPU story's runs here by the configs they were made from, and skips its checks on
 them only while the story has an entry in pending.yaml; once it has none, a missing run fails.
 A Kaggle SFT run is committed as FG-491's is, without its checkpoints, which the run store

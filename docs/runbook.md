@@ -416,6 +416,21 @@ No step reads dev. If val EX was still rising at the end of the epoch and the bu
 allows, a second epoch is the product owner's call (ADR-0010), recorded in
 `docs/progress.md`.
 
+Last, FG-405 compares the main model with and without SFT, on the laptop, once FG-307's
+val run of the chosen model is in `docs/runs/` too. Run b is the val run of the main run's
+`checkpoints/best`, the one its `best.json` names under `eval_runs`; run a is that FG-307
+run, made with the same config, so the two differ in the adapter alone:
+
+```bash
+FORGE_RUNS_DIR=docs/runs FORGE_DATA_DIR=data/spider uv run forge report compare <base val run id> <best val run id>
+```
+
+It writes `eval/compare-<base val run id>.md` in run b's folder, which
+`tests/integration/test_artifacts.py::test_phase4_compare_report_rebuildable` rebuilds.
+Add 3 to 5 bullets on it to `docs/notes/sft.md`, a list of their own beside the pilot's,
+from that report alone and linking it, and take FG-405's entry out of
+`docs/runs/pending.yaml`.
+
 ## Troubleshooting
 
 - **`ModuleNotFoundError: forge` on macOS.** The venv can come out with the hidden file

@@ -263,3 +263,17 @@ pending:
       - docs/runs/<main_run_id>/best.json and the main run's checkpoints/best (forge runs promote)
       - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
       - docs/progress.md, the product owner's call on a second epoch if val EX still rose
+  - story: FG-405
+    run: sft-main-comparison
+    platform: kaggle
+    accelerator: none (a report the laptop writes from two committed kernel runs)
+    est_gpu_hours: 0
+    status: blocked
+    since: 2026-11-16
+    blocked_on:
+      - FG-404's sft-main-checkpoints-val runs and the main run's best.json, which names the val run of checkpoints/best
+      - FG-307's baseline-val-p1 run of ADR-0012's chosen model, the base that run is compared with
+    how: docs/runbook.md, "SFT runs", the last paragraph
+    fills:
+      - docs/runs/<best_val_run_id>/eval/compare-<base_val_run_id>.md (forge report compare)
+      - docs/notes/sft.md, bullets on the main model from that report, beside the pilot's
