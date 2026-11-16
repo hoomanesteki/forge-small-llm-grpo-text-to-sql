@@ -31,10 +31,12 @@ failing waits at most 14 s between the store's tries, and at most 23 s inside th
 client's retries of one request. A missing run is ``RunNotFound``, and anything else,
 such as a missing repo or a refused token, fails at once.
 
-``pull`` mirrors a run into a local folder as ``forge kaggle output`` does: each file or
-folder at the top of the run that the store holds replaces the local one, and what only
-the local folder holds, such as ``kernels.json``, stays. An eval run's lock file never
-leaves the machine it was taken on.
+``pull`` makes a local folder hold the store's copy of a run, as ``forge kaggle output``
+does with a kernel's (``replace_run``): what the copy lacks goes, such as a failed
+attempt's ``error.txt`` beside the manifest of the attempt that finished the run, and
+only what this machine alone keeps stays (``LOCAL_ONLY``): ``kernels.json``, the kernels
+``forge kaggle run`` pushed for the run, ``kernel/``, the rest of a kernel's output, and
+an eval run's lock file, which never leaves the machine it was taken on.
 """
 
 from __future__ import annotations
@@ -75,6 +77,9 @@ _SENT_ONCE = re.compile(r"/api/models/[^/]+/[^/]+(?:/revision/[^/]+|/commit/[^/]
 # The names checkpoint_dir writes: six digits, or more without a leading zero, so no two
 # names stand for one step.
 _STEP = re.compile(r"step-(\d{6}|[1-9]\d{6,})")
+KERNELS_FILE = "kernels.json"  # forge kaggle run's record of the run's kernels
+KERNEL_DIR = "kernel"  # where forge kaggle output puts what a kernel wrote beside the run
+LOCAL_ONLY = frozenset({LOCK_FILE, KERNELS_FILE, KERNEL_DIR})
 
 
 class RunNotFound(FileNotFoundError):
@@ -167,25 +172,33 @@ def _same(a: Path, b: Path) -> bool:
     return a.resolve() == b.resolve()
 
 
+def _remove(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
 def _empty(folder: Path) -> None:
     for child in folder.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
+        _remove(child)
 
 
-def _mirror(source: Path, target: Path, *, move: bool) -> None:
-    """Replace each top-level item of ``target`` that ``source`` holds, lock file aside."""
+def replace_run(source: Path, target: Path, *, move: bool) -> None:
+    """Make the run folder ``target`` hold the copy of the run in ``source``.
+
+    Each top-level item of ``source`` replaces ``target``'s of that name, and every other
+    item of ``target`` goes, unless it is ``LOCAL_ONLY``. The lock file is never copied
+    or touched. ``move`` moves the items out of ``source`` instead of copying them.
+    """
     target.mkdir(parents=True, exist_ok=True)
-    for item in sorted(source.iterdir()):
-        if item.name == LOCK_FILE:
-            continue
+    incoming = sorted(item for item in source.iterdir() if item.name != LOCK_FILE)
+    names = {item.name for item in incoming}
+    for there in sorted(target.iterdir()):
+        if there.name in names or there.name not in LOCAL_ONLY:
+            _remove(there)
+    for item in incoming:
         there = target / item.name
-        if there.is_dir() and not there.is_symlink():
-            shutil.rmtree(there)
-        elif there.exists() or there.is_symlink():
-            there.unlink()
         if move:
             shutil.move(item, there)
         elif item.is_dir():
@@ -283,7 +296,7 @@ class LocalRunStore:
         if not source.is_dir():
             raise RunNotFound(f"no run {run_id} in {self.root}")
         if not _same(source, target):
-            _mirror(source, target, move=False)
+            replace_run(source, target, move=False)
 
 
 class HubApi(Protocol):
@@ -600,7 +613,7 @@ class HubRunStore:
             fetched = Path(staging, path)
             if not fetched.is_dir():
                 raise RunNotFound(f"no run {run_id} in {self.repo_id}")
-            _mirror(fetched, target, move=True)
+            replace_run(fetched, target, move=True)
 
 
 def hub_store(env: Mapping[str, str] | None = None) -> HubRunStore:

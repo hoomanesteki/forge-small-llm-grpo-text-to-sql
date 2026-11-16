@@ -217,8 +217,10 @@ uv run forge runs pull <run_id> --store kaggle  # the same as forge kaggle outpu
 uv run forge runs push <run_id>                 # make the store's copy runs/<run_id>/
 ```
 
-- A pull replaces each top-level file or folder of the run that the store holds and keeps the
-  rest, such as `kernels.json`, as `forge kaggle output` does.
+- A pull makes `runs/<run_id>/` the store's copy of the run, as `forge kaggle output` does with
+  a kernel's: a file the copy lacks goes, such as an earlier attempt's `error.txt` or a report
+  made here (`forge report run` makes it again), and only `kernels.json` and `kernel/`, which
+  this machine alone keeps, stay. Other runs' folders are not touched.
 - A pull, from either store, also writes a row in `docs/compute-ledger.md` for each of the
   run's sessions that has ended, once a session, as `forge kaggle wait` and `output` do:
   the UTC date the session started, the run's platform and GPU, the session's wall-clock
