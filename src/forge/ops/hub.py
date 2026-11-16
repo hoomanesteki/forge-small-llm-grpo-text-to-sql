@@ -22,25 +22,37 @@ outlive it.
 
 A Hub call that fails on the network (``network_error`` says which failures count) is
 tried again by one layer only, so the waits never multiply. huggingface_hub 2.4 already
-tries most of its requests 5 more times, 1, 2, 4, 8 and 8 s apart, and a failure that
-comes through those retries is ``StoreUnavailable`` at once. It sends two requests only
-once, a commit and the repo lookup a snapshot download starts with (``client_retried``);
-when one of those fails, the store tries the whole call again ``RETRIES`` times, after
-``BACKOFF_S`` seconds and then twice as long each time, 2, 4 and 8 s. So a call that keeps
-failing waits at most 14 s between the store's tries, and at most 23 s inside the
-client's retries of one request. A missing run is ``RunNotFound``, and anything else,
-such as a missing repo or a refused token, fails at once.
+tries some failures of most requests 5 more times, 1, 2, 4, 8 and 8 s apart, and a
+failure that comes through those retries is ``StoreUnavailable`` at once.
+``client_retried`` tells which from the request that failed and how. The client never
+retries a commit or the repo lookup a snapshot download starts with, nor a 5xx other than
+500, 502, 503 and 504. It retries a download's first request, for the file's metadata,
+only after a refused connection, a timeout or one of its statuses (408, 429, 500, 502,
+503 and 504); the download itself only after a refused connection, a timeout, a broken
+answer (``RemoteProtocolError``), 408 or 429; and any other request after any network
+error or one of its statuses. Any other failure the store tries again, the whole call
+``RETRIES`` more times, after ``BACKOFF_S`` seconds and then twice as long each time, 2,
+4 and 8 s: a dropped connection on a download, for one. So a call that keeps failing
+waits at most 14 s between the store's tries, and at most 23 s inside the client's
+retries of one request, unless the Hub's answer says how long to wait (``Retry-After``,
+or a 429's ``RateLimit`` header): the client then waits that long and 1 s more before
+each of its 5 tries, so 305 s for a ``Retry-After: 60``. A missing run is
+``RunNotFound``, and anything else, such as a missing repo or a refused token, fails at
+once.
 
 ``pull`` makes a local folder hold the store's copy of a run, as ``forge kaggle output``
 does with a kernel's (``replace_run``): what the copy lacks goes, such as a failed
-attempt's ``error.txt`` beside the manifest of the attempt that finished the run, and
-only what this machine alone keeps stays (``LOCAL_ONLY``): ``kernels.json``, the kernels
-``forge kaggle run`` pushed for the run, ``kernel/``, the rest of a kernel's output, and
-an eval run's lock file, which never leaves the machine it was taken on.
+attempt's ``error.txt`` beside the manifest of the attempt that finished the run. What
+only a machine keeps stays (``LOCAL_ONLY``): an eval run's lock file, which never leaves
+the machine it was taken on, and ``kernels.json``, the kernels ``forge kaggle run``
+pushed for the run, with ``kernel/``, the rest of a kernel's output, unless the copy's
+``kernels.json`` lists more pushes than this machine's: ``forge runs push`` uploads them,
+so the store may hold an older record.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -70,10 +82,14 @@ RETRIES = 3
 BACKOFF_S = 2.0
 # Request timeout and rate limiting: the Hub's answer may differ a moment later.
 RETRY_STATUS = frozenset({408, 429})
+# The statuses huggingface_hub 2.4's http_backoff retries (_DEFAULT_RETRY_ON_STATUS_CODES).
+CLIENT_RETRY_STATUS = RETRY_STATUS | {500, 502, 503, 504}
 # The paths of the two requests huggingface_hub 2.4 sends without retrying them: the
 # repo lookup (``/api/models/<repo>``, with ``/revision/<rev>`` from snapshot_download)
-# and a commit (``/commit/<rev>``). It retries every other request itself.
+# and a commit (``/commit/<rev>``).
 _SENT_ONCE = re.compile(r"/api/models/[^/]+/[^/]+(?:/revision/[^/]+|/commit/[^/]+)?$")
+# A Hub API request; a download's own GET, of the file or a CDN copy, is not one.
+_API = re.compile(r"/api/")
 # The names checkpoint_dir writes: six digits, or more without a leading zero, so no two
 # names stand for one step.
 _STEP = re.compile(r"step-(\d{6}|[1-9]\d{6,})")
@@ -189,10 +205,15 @@ def replace_run(source: Path, target: Path, *, move: bool) -> None:
 
     Each top-level item of ``source`` replaces ``target``'s of that name, and every other
     item of ``target`` goes, unless it is ``LOCAL_ONLY``. The lock file is never copied
-    or touched. ``move`` moves the items out of ``source`` instead of copying them.
+    or touched, and nor are ``kernels.json`` and ``kernel/`` when ``target``'s record
+    lists as many pushes as ``source``'s or more, so a pull never puts back an older one.
+    ``move`` moves the items out of ``source`` instead of copying them.
     """
     target.mkdir(parents=True, exist_ok=True)
-    incoming = sorted(item for item in source.iterdir() if item.name != LOCK_FILE)
+    ours, theirs = target / KERNELS_FILE, source / KERNELS_FILE
+    keep_ours = ours.is_file() and (not theirs.is_file() or _pushes(ours) >= _pushes(theirs))
+    kept = LOCAL_ONLY if keep_ours else frozenset({LOCK_FILE})
+    incoming = sorted(item for item in source.iterdir() if item.name not in kept)
     names = {item.name for item in incoming}
     for there in sorted(target.iterdir()):
         if there.name in names or there.name not in LOCAL_ONLY:
@@ -205,6 +226,18 @@ def replace_run(source: Path, target: Path, *, move: bool) -> None:
             shutil.copytree(item, there, ignore=shutil.ignore_patterns(LOCK_FILE))
         else:
             shutil.copy2(item, there)
+
+
+def _pushes(path: Path) -> int:
+    """How many pushes the ``kernels.json`` at ``path`` lists. Each push adds one and none
+    is ever taken out, so of two records of a run the longer is the newer."""
+    try:
+        kernels = json.loads(path.read_text(encoding="utf-8"))["kernels"]
+        if not isinstance(kernels, list):
+            raise TypeError(f"its kernels are {type(kernels).__name__}, not a list")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RunCorrupt(f"{path} is not forge kaggle run's record of kernels: {exc}") from exc
+    return len(kernels)
 
 
 class LocalRunStore:
@@ -398,14 +431,19 @@ def _network_cause(exc: BaseException) -> BaseException | None:
 
 
 def client_retried(exc: BaseException) -> bool:
-    """Whether huggingface_hub already tried again the request whose failure ``exc`` is:
-    any request it names, except the two ``_SENT_ONCE`` matches."""
+    """Whether huggingface_hub 2.4 already tried again the request whose failure ``exc``
+    is, by what it retries for that request, as the module docstring says.
+
+    It decides by the failure that ended the call: in the rare call whose first metadata
+    request is refused and whose retries then drop their connections, both layers retry.
+    """
     import httpx2
     from huggingface_hub.errors import HfHubHTTPError
 
+    status = None
     try:
         if isinstance(exc, HfHubHTTPError):
-            request = exc.response.request
+            request, status = exc.response.request, exc.response.status_code
         elif isinstance(exc, httpx2.RequestError):
             request = exc.request
         else:
@@ -414,7 +452,23 @@ def client_retried(exc: BaseException) -> bool:
     # place, so it retries the call itself.
     except RuntimeError:
         return False
-    return _SENT_ONCE.search(request.url.path) is None
+    path = request.url.path
+    errors: tuple[type[Exception], ...]
+    if _SENT_ONCE.search(path):
+        return False
+    if request.method == "HEAD":
+        # hf_hub_download's metadata request goes once, and again with retries only after
+        # these (file_download._get_metadata_or_catch_error).
+        errors, statuses = (httpx2.ConnectError, httpx2.TimeoutException), CLIENT_RETRY_STATUS
+    elif request.method == "GET" and not _API.search(path):
+        # The download itself, which http_get retries on its own terms.
+        errors = (httpx2.ConnectError, httpx2.TimeoutException, httpx2.RemoteProtocolError)
+        statuses = RETRY_STATUS
+    else:
+        # Everything else goes through http_backoff, with its defaults.
+        errors = (httpx2.TimeoutException, httpx2.NetworkError, httpx2.RemoteProtocolError)
+        statuses = CLIENT_RETRY_STATUS
+    return status in statuses if status is not None else isinstance(exc, errors)
 
 
 class HubRunStore:
