@@ -55,7 +55,13 @@ def test_sft_trains_saves_and_evaluates(
     (folder,) = sft_dir.iterdir()
     meta = read_meta(folder)
     assert folder.name == meta.hash
-    assert manifest.config["sft_data"] == {"hash": meta.hash, "rows": meta.counts.rows}
+    # Every row fits in 2,048 tokens, and the smoke trains on all of them.
+    assert manifest.config["sft_data"] == {
+        "hash": meta.hash,
+        "rows": meta.counts.rows,
+        "over_max_length": 0,
+        "trained": meta.counts.rows,
+    }
     assert meta.counts.rows == len(load_train())  # the fixture's train questions, all kept
     assert manifest.data_manifest_hash == data_manifest_hash(spider_mini)
     # The config hash, over the config the run stored.

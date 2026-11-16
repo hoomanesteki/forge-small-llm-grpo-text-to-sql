@@ -34,17 +34,44 @@ accounts the GPU plan needs were pending. Its report names the platform in its h
 | Run | Model | Made with | Report |
 |---|---|---|---|
 | [2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7](2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7/) | `Qwen/Qwen2.5-Coder-0.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/pilot-qwen25coder05b-val.yaml`: full val split, greedy, prompt p1, float32 on MPS | [val-report.md](2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7/eval/val-report.md) |
+| [2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8](2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/) | The same model, LoRA-trained on train rows (FG-491) | `configs/sft/pilot-qwen25coder05b-mps.yaml`: the subset its `subset_rows` sets of the train rows that fit in 1,536 tokens, bf16 on MPS | [metrics.jsonl](2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/metrics.jsonl) |
+| [2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/) | The same model with that run's adapter | `configs/eval/pilot-qwen25coder05b-val.yaml` with `--adapter runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final`, the first pilot's settings | [val-report.md](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/val-report.md), and against the first pilot [compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md) |
+
+A pilot that trains (FG-491) commits its training run without its weights: the manifest,
+`config.yaml` and `metrics.jsonl`, one line a logging step. The adapter stays in
+`runs/<run_id>/checkpoints/final/` on the laptop that trained it, where the eval run's
+`--adapter` names it, until the run store exists to hold it ([pending.yaml](pending.yaml)).
+The manifest's `sft_data` says which rows it trained on: the hash of the rows
+`forge data build-sft` builds, how many were over `max_length` and left out, and how many
+of the rest the subset took.
 
 Story branches land on `dev` as squash merges, so the commit a manifest names is not on
 `dev` itself. Each committed run has a tag `run/<run_id>` on that commit, which keeps it
 on GitHub: `git switch --detach run/<run_id>`.
 
-To make it again, from the commit in its manifest:
+To make them again, from the commit in their manifests, the base pilot first:
 
 ```bash
 FORGE_DATA_DIR=data/spider uv run forge eval run --config configs/eval/pilot-qwen25coder05b-val.yaml
 FORGE_DATA_DIR=data/spider uv run forge report run <run_id>
 ```
+
+Then the SFT pilot, its adapter's val run, its report and the comparison, each with a
+ledger row from its manifest. Both runs took the MPS watermarks the SFT config names, for
+the laptop's memory; they change no number:
+
+```bash
+export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.45 PYTORCH_MPS_LOW_WATERMARK_RATIO=0.35
+FORGE_DATA_DIR=data/spider uv run forge train sft --config configs/sft/pilot-qwen25coder05b-mps.yaml
+FORGE_DATA_DIR=data/spider uv run forge eval run --config configs/eval/pilot-qwen25coder05b-val.yaml \
+  --adapter runs/<sft_run_id>/checkpoints/final
+FORGE_DATA_DIR=data/spider uv run forge report run <eval_run_id>
+FORGE_DATA_DIR=data/spider uv run forge report compare 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7 <eval_run_id>
+uv run forge ledger record <sft_run_id> && uv run forge ledger record <eval_run_id>
+```
+
+Training again on MPS need not give the same weights bit for bit, so a second adapter's
+scores can differ a little from these.
 
 ## Kaggle runs
 
@@ -82,9 +109,10 @@ so each needs its tag there once the branch lands. To make one again from its co
 ## Pending runs
 
 [pending.yaml](pending.yaml) lists the runs a story needs that haven't been made and
-committed yet, what blocks each one, since when, and what it will fill in. None is listed
-now. FG-307's runs left it when they were committed, the reference's dev run last, on
-2026-11-17, once ADR-0008's note of that day settled I5 for it, and FG-301's spike, FG-302's
-publish and FG-303's eval job on 2026-11-16. `tests/integration/test_artifacts.py` finds a GPU
+committed yet, what blocks each one, since when, and what it will fill in. FG-491's push of
+the SFT pilot, adapter and all, is there until the Hugging Face run store exists. FG-307's
+runs left it when they were committed, the reference's dev run last, on 2026-11-17, once
+ADR-0008's note of that day settled I5 for it, and FG-301's spike, FG-302's publish and
+FG-303's eval job on 2026-11-16. `tests/integration/test_artifacts.py` finds a GPU
 story's runs here by the configs they were made from, and skips its checks on them only
 while the story has an entry in pending.yaml; once it has none, a missing run fails.

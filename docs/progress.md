@@ -60,7 +60,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-403 | SFT trainer with CPU smoke | 3 | done |  |  | `forge train sft --config [--run-id] [--sft-dir] [--allow-dirty]` (`forge.train.sft.run_sft`): builds the rows with the model's tokenizer, keeps an existing `data/sft/<hash>/`, reads it in memory once it hashes to its name, trains with the job callbacks and saves `checkpoints/final`; the manifest's config holds the run, data, LoRA and SFT sections, `sft_data.hash` and the trainer's backend, device and dtype, under the config hash. Local runs are `local-cpu` or `local-mps` only. `configs/sft/`: tiny-smoke, pilot-qwen25coder05b-mps, qwen3-1p7b-pilot and qwen3-4b-main, at ADR-0010's values (written here, with `max_length` 2,048). `make smoke` trains 3 steps and evaluates the adapter on 10 val questions |
 | FG-404 | SFT runs on Kaggle | 3 | todo |  |  |  |
 | FG-405 | SFT results and comparison | 2 | todo |  |  |  |
-| FG-491 | Local SFT pilot on Apple silicon | 3 | in progress |  |  |  |
+| FG-491 | Local SFT pilot on Apple silicon | 3 | done |  | 2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8, 2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8 | `configs/sft/pilot-qwen25coder05b-mps.yaml`: LoRA SFT of the pilot model on `mps` in bf16, `max_length` 1,536 with gradient checkpointing, a row at a time padded to 64 tokens and 16 a step, on 3,168 train rows drawn by hash (`sft.subset_rows`), as a 20-step probe put the epoch past 2.5 h; `forge train sft` leaves out rows over `max_length` rather than letting TRL cut them, and `sft_data` in the manifest counts them and the rows trained; `forge ledger record <run_id>` writes a local run's row from its manifest; the adapter's full val run (FG-291's config with `--adapter`), its report and its comparison with the base pilot are in `docs/runs/`, the training run without weights; val only (ADR-0016). Pending: the adapter's copy in the run store (`docs/runs/pending.yaml`) |
 
 ## Phase 5: Rewards and GRPO (v0.5.0)
 
@@ -1060,3 +1060,44 @@ Work discovered along the way that is not a plan story.
   `date.today()`, in local time, while `plan_job` dates run ids in UTC, so they fail on a
   machine west of UTC between UTC midnight and local midnight. CI runs in UTC; `TZ=UTC make
   check` passes locally (FG-403).
+- On the laptop (16 GB, about 8 GB of it held by a virtual machine), PyTorch's MPS memory
+  grew past what was free when nothing capped it: the first SFT probes reached 9 to 11 GB
+  and stalled in swap. `PYTORCH_MPS_HIGH_WATERMARK_RATIO` caps it as a share of the
+  11.8 GiB Metal recommends. Under 0.6 (7.1 GiB), micro-batches of 2 ran out of memory at
+  step 12 of a probe, in TRL's fused LM head backward; micro-batches of 1 fit, and trained
+  faster. A micro-batch of one 1,536-token row ran out under 0.3 (3.55 GiB) and fit under
+  0.4, holding 4.4 GiB, so the run takes 0.45 with `PYTORCH_MPS_LOW_WATERMARK_RATIO` 0.35,
+  which frees the cache sooner (FG-491).
+- Unpadded, micro-batches of 1 kept the MPS allocator under its cap, but the process still
+  grew, to 11 GB by step 32 of a run, as PyTorch's MPS backend keeps what it builds for each
+  new tensor shape, and nearly every row brought a new length. Padding each row to a multiple
+  of 64 tokens (`sft.pad_to_multiple_of`) leaves at most 24 lengths; the committed run's
+  process held between 5.7 and 6.3 GB from step 15 to step 170 (FG-491).
+- The 20-step timing probe of the committed config: 44.1 s a step from step 2 to 20 (18.8 to
+  97.8 s), about 7,600 tokens a step, so an epoch of the 7,683 rows that fit, 481 steps,
+  would take about 5.9 h. The pilot trains 3,168 of them, 198 steps. The laptop was shared
+  meanwhile (a virtual machine near 200% CPU, another checkout's tests), and an unpadded
+  probe in a quieter hour took 35.9 s a step. The run's own pace is in its `metrics.jsonl`
+  and manifest (FG-491).
+- Three starts of the pilot run before the committed one were stopped and their folders
+  removed: one beside `make check`, which slowed it to about 60 s a step, one under the 0.6
+  cap while the virtual machine was busy, which swapped from its first steps, and one
+  unpadded under the 0.45 cap, which grew as the note above says and took 80 to 90 s a
+  step by step 30. Nothing else should run on the laptop during an MPS run (FG-491).
+- 53 of the 7,736 p1 rows are longer than 1,536 tokens with the pilot's tokenizer, prompt and
+  reply as `SFTTrainer` encodes them; TRL's `keep_start` would have cut their replies. They
+  are left out and counted in the manifest. At FG-404's 2,048 none is (FG-401) (FG-491).
+- transformers 5.23 renamed `gradient_checkpointing` to `activation_checkpointing` and warns
+  on the old name, which TRL 1.18 still sets by default; the old name works as its alias, so
+  Forge passes that one. FG-404 should check the name in a kernel's transformers 5.20.2
+  (FG-491).
+- The adapter trained on the bf16 base and is scored on the float32 base, as FG-291's base
+  run was, so the two val runs differ in the adapter alone. Their comparison is
+  `docs/runs/2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md`:
+  a 0.5B model after 198 steps on 3,168 train rows, a pilot on val only, not FG-404's
+  result (FG-491).
+- The SFT pilot's adapter is only in `runs/` on the laptop that trained it; the committed
+  run holds its manifest, config and metrics. `docs/runs/pending.yaml` keeps the push to the
+  run store until the Hugging Face account exists (FG-491).
+- `docs/runs` now holds a training run, so the tests that read each committed run as an eval
+  run (I5 on committed runs, `gpu_story_runs`) take only eval runs (FG-491).

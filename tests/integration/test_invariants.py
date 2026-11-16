@@ -465,11 +465,13 @@ def test_i5_agreement_on_committed_runs() -> None:
     every disagreement on FG-307's runs goes away once the evaluator keeps DISTINCT, which
     it drops by default and the 8B reference writes more often (scripts/check_i5_distinct.py,
     ADR-0008's note of 2026-11-17). Official EX keeps the default, for comparability with
-    published Spider numbers. Every committed run's agreement is still computed, which needs
-    both verdicts on each of its samples, and reported when the test fails.
+    published Spider numbers. Every committed eval run's agreement is still computed, which
+    needs both verdicts on each of its samples, and reported when the test fails; a training
+    run, such as the FG-491 pilot's, has no replies.
     """
     store = LocalRunStore(ROOT / "docs" / "runs")
-    rates = {run: score_agreement(read_run(store.root / run).scores) for run in store.runs()}
+    evals = [run for run in store.runs() if store.get_manifest(run).kind == "eval"]
+    rates = {run: score_agreement(read_run(store.root / run).scores) for run in evals}
     reported = ", ".join(f"{run} {rate:.2%}" for run, rate in rates.items())
     baselines = gpu_story_runs("FG-307", BASELINES)
     pooled = score_agreement([score for run in baselines.values() for score in run.scores])
