@@ -928,6 +928,28 @@ def test_requirements_file_is_the_trl_vllm_stack() -> None:
 
 
 @pytest.mark.phase(3)
+def test_train_requirements_file_is_the_trl_stack() -> None:
+    # ADR-0006 trains on the stack FG-301 measured GRPO on: the spike's trl list, installed
+    # over the image's torch, so the file pins no torch and no vLLM.
+    trl = spike.STACKS["trl"]
+    path = ROOT / "kaggle" / "requirements-train-gpu.txt"
+    assert tuple(_requirement_lines(path)) == trl.requirements
+    assert trl.system_site_packages
+    pins = _pins(trl.requirements)
+    assert "torch" not in pins and "vllm" not in pins
+    text = path.read_text(encoding="utf-8")
+    for stage in ("install:trl", "grpo:trl:<model>"):
+        assert stage in text, stage
+    # The numbers the file's comment gives, from the spike's own report.
+    report = json.loads((ROOT / "docs" / "spikes" / "kaggle-gpu" / "spike-report.json").read_text())
+    stages = {stage["name"]: stage["result"] for stage in report["stages"]}
+    assert tuple(stages["install:trl"]["requirements"]) == trl.requirements
+    assert f"{stages['install:trl']['install_seconds']:.1f} s" in text
+    four_b = stages["grpo:trl:Qwen/Qwen3-4B"]["memory"]["peak_allocated_bytes"] / 1e9
+    assert f"{four_b:.2f} GB" in text
+
+
+@pytest.mark.phase(3)
 def test_sql_block_reward() -> None:
     completions = [
         [{"role": "assistant", "content": "```sql\nSELECT 1\n```"}],
