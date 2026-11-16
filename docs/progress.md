@@ -124,6 +124,7 @@ Work discovered along the way that is not a plan story.
 | FG-293 | Gate 2 fixes: statistics and reports | done | McNemar's exact test pairs gold clusters, which key on gold queries with whitespace collapsed; the taxonomy reads a whole ORDER BY alias as SQLite does and drops derived-table and CTE qualifiers; `rebuild` masks only the Generated line's time, fails without the chart and compares its bytes where the renderer its PNG names is this machine's; `compare --out` that resolves to the default path is the default; a spy shows retried SQL runs in `SandboxPool`; the pilot's report regenerated |
 | FG-294 | Gate 2 fixes: plan and pilot notes | done | FG-291 gets a Phase 2 story block whose Tests line names its 15 tests, so traceability covers 22 Phase 0 to 2 stories, and moves to the Phase 2 table; section 5.5 lets a pilot or found story hold `FG-N91`, with gate fixes from the next free number; the pilot's unfenced replies and rule-3 cuts counted; the Phase 2 demo says `make smoke` prints its report from a scratch folder |
 | FG-295 | Gate 2 fixes: last items | done | The taxonomy reads a whole ORDER BY alias in parentheses or with COLLATE, drops parentheses around a whole ORDER BY term, and lets a derived table's or CTE's columns win over an alias; `rebuild` skips a chart only for a renderer-shaped Software text, and the full-data pilot test skips rather than pass when its chart isn't compared; `compare --out` naming the default file through a symlink or letter case writes that file; `git_sha` excludes the logs where `forge.ops.paths` puts them; the pilot's rule-3 note recounted by `scripts/count_pilot_extraction.py`; `GitError` hand-off for Phase 3 |
+| FG-391 | Gate 3 fixes: UTC dates and ledger sessions | done | One UTC date for run ids, ledger rows, dev-usage rows and the ledger's week (`forge.ops.clock`), and runner tests that take the UTC date, with one pinned ten hours west of UTC; each attempt at a run is a session in its `sessions.json`, a manifest's GPU hours add up its sessions, and each session gets its own ledger row, marked `(session N)` after the first, which `append_once` keys on and I7 checks; a kernel's session spans the whole kernel (`status.json`, `sessions.json`); `forge kaggle wait` and `output` add the rows |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -719,7 +720,8 @@ Work discovered along the way that is not a plan story.
 - A resumed run keeps its first `started_at`, so its wall-clock GPU hours include the time
   between sessions, and a ledger row is written once a run id, so a row pulled after the
   first session misses the later ones. FG-507's two-session GRPO run is the first to hit
-  this; it needs per-session hours or rows (FG-305).
+  this; it needs per-session hours or rows (FG-305). Since FG-391 each attempt is a session
+  with its own hours and row.
 - `kaggle/entry.py` gives eval jobs no `Deadline` yet, and would have to skip the report of
   a run the guard stopped, since `read_run` refuses unfinished runs. A kernel's own timeout
   (the estimate and half again) stops an eval job meanwhile (FG-305).
@@ -789,3 +791,23 @@ Work discovered along the way that is not a plan story.
   of install, download and engine start per kernel; FG-301's measurements should replace
   them before the first push, as the kernel's timeout is the estimate and half again
   (FG-307).
+- The ledger keeps the seven columns plan 3.8 names, so a later session names itself at the
+  end of its row's purpose, `(session 2)`, and a row that names none is its run's first:
+  every committed row stays valid. A row added by hand for a session that never recorded
+  its end has to name it the same way for I7 to count it (FG-391).
+- A Kaggle run's ledger rows count each whole kernel session, while its manifest's
+  `gpu_hours` adds up the job's own spans, so the ledger's hours are the larger by the
+  setup, preflight and upload. The Hub copy is uploaded before the kernel ends, so a run
+  pulled only from the Hub misses the upload's minutes; `forge kaggle wait` logs the whole
+  session first (FG-391).
+- A kernel that fails before its job (install, data, preflight) holds no run, so no
+  manifest says what to log; its minutes still need `forge ledger add` (FG-391).
+- Training runs (FG-403, FG-504) don't go through `forge.eval.run_files`, so they keep no
+  `sessions.json` themselves. In a kernel `entry.py` adds each kernel's session, but on the
+  laptop a resumed training run is one session from its first start, and
+  `TimeGuardCallback`'s `close` counts from there, until those jobs call
+  `forge.ops.sessions.begin` and `end` (FG-391).
+- Five runner tests read the local date, so west of UTC they failed every evening while
+  CI, in UTC, passed. The far-west test stops the clock on a Sunday evening ten hours west
+  (`TZ=HST10`, a POSIX zone that needs no zone database), where the local date is the day
+  before the UTC one (FG-391).

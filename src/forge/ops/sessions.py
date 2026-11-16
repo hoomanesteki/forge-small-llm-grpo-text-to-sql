@@ -91,7 +91,7 @@ def read_sessions(run_dir: Path) -> list[Session] | None:
 def sessions_of(manifest: RunManifest, run_dir: Path) -> list[Session]:
     """The run's sessions as its folder records them, or else the one its manifest spans."""
     recorded = read_sessions(run_dir)
-    return [_span(manifest)] if recorded is None else recorded
+    return [manifest_session(manifest)] if recorded is None else recorded
 
 
 def begin(run_dir: Path, started_at: datetime, *, resumes: RunManifest | None = None) -> None:
@@ -103,7 +103,7 @@ def begin(run_dir: Path, started_at: datetime, *, resumes: RunManifest | None = 
     """
     sessions = read_sessions(run_dir)
     if sessions is None:
-        sessions = [] if resumes is None else [_span(resumes)]
+        sessions = [] if resumes is None else [manifest_session(resumes)]
     sessions = [replace(s, status="failed") if s.status == "running" else s for s in sessions]
     _write(run_dir, [*sessions, Session(started_at)])
 
@@ -121,7 +121,8 @@ def end(run_dir: Path, ended_at: datetime, status: str) -> list[Session]:
     return sessions
 
 
-def _span(manifest: RunManifest) -> Session:
+def manifest_session(manifest: RunManifest) -> Session:
+    """The one session a manifest spans, from its ``started_at`` to its ``ended_at``."""
     return Session(manifest.started_at, manifest.ended_at, manifest.status)
 
 

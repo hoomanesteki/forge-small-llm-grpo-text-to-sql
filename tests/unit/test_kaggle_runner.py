@@ -12,7 +12,7 @@ import subprocess
 import time
 import types
 from collections.abc import Iterator, Sequence
-from datetime import UTC, date, datetime, tzinfo
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +20,11 @@ import pytest
 from typer.testing import CliRunner
 
 from forge import cli
+from forge.core.types import RunManifest
 from forge.eval.config import EvalConfig
 from forge.ops import clock, kaggle, kaggle_job
 from forge.ops.dev_usage import log_dev_use, read_uses
+from forge.ops.hub import manifest_bytes
 from forge.ops.kaggle import KaggleClient, KaggleError, check_kernel_metadata
 from forge.ops.kaggle_job import (
     COLAB_DIRS,
@@ -35,6 +37,7 @@ from forge.ops.kaggle_job import (
     write_kernel,
 )
 from forge.ops.ledger import read_rows, summary
+from forge.ops.sessions import Session
 from tests.kernel import WHEEL
 from tests.spike import entry, load_script
 
@@ -562,6 +565,8 @@ def test_wait_ends_on_the_kernel_state_and_the_jobs_own_status(
         f"{kernel}: RUNNING",
         f"{kernel}: COMPLETE",
         "job finished at stage upload; upload: skipped",
+        # This output holds no run's manifest, so nothing says what to log.
+        "ledger: no row, the output has no manifest; use forge ledger add",
     ]
     assert [c[3] for c in fake.ran("kernels", "status")] == [kernel] * 4
     assert script.STATUS_FILE == kaggle_job.STATUS_FILE
@@ -592,7 +597,7 @@ def test_output_brings_the_run_into_runs(repo: Path, monkeypatch: pytest.MonkeyP
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
     assert _eval(repo, "--yes", "--run-id", "run-1").exit_code == 0
     fake.outputs = {
-        "runs/run-1/manifest.json": "{}",
+        "runs/run-1/manifest.json": _kernel_manifest("run-1").decode(),
         "runs/run-1/eval/val-scores.jsonl": "{}\n",
         "preflight/run-1-preflight/manifest.json": "{}",
     }
@@ -611,6 +616,90 @@ def test_output_brings_the_run_into_runs(repo: Path, monkeypatch: pytest.MonkeyP
         "kernels.json",
         "manifest.json",
     ]
+    # The run it holds ended, so its session gets its ledger row.
+    logged = "eval run, finished\nledger: added 0.50 h on kaggle for run run-1\n"
+    assert result.stdout.endswith(logged)
+
+
+START = datetime(2026, 11, 16, 1, 0, tzinfo=UTC)
+
+
+def _kernel_manifest(run_id: str, **changes: Any) -> bytes:
+    """The manifest of an eval job that ran in a kernel, finished half an hour in."""
+    fields: dict[str, Any] = {
+        "run_id": run_id,
+        "kind": "eval",
+        "git_sha": "c" * 40,
+        "config": {"split": "val"},
+        "config_hash": "4" * 64,
+        "data_manifest_hash": "5" * 64,
+        "model_ref": "gold",
+        "platform": "kaggle",
+        "gpu": "Tesla T4",
+        "seed": 0,
+        "started_at": START,
+        "ended_at": START + timedelta(minutes=30),
+        "status": "finished",
+        **changes,
+    }
+    return manifest_bytes(RunManifest(**fields))
+
+
+def _ended(run_id: str, status: str, sessions: list[Session]) -> dict[str, str]:
+    """A kernel's output for a job that ended with ``status``: status.json, the manifest
+    and the run's sessions, the last one the kernel's own."""
+    last = sessions[-1]
+    assert last.ended_at is not None
+    record = {"status": status, "stage": "upload", "stages": {}}
+    record |= {"started_at": last.started_at.isoformat(), "ended_at": last.ended_at.isoformat()}
+    manifest = _kernel_manifest(run_id, status=status, ended_at=last.ended_at)
+    return {
+        f"runs/{run_id}/status.json": json.dumps({**record, "session": len(sessions)}),
+        f"runs/{run_id}/manifest.json": manifest.decode(),
+        f"runs/{run_id}/sessions.json": json.dumps([s.to_json() for s in sessions]),
+    }
+
+
+@pytest.mark.phase(3)
+def test_wait_and_output_log_each_kernel_session_once(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
+    assert _eval(repo, "--yes", "--run-id", "run-1").exit_code == 0
+    ledger = repo.parent / "ledger.md"
+    # The kernel's whole session, setup and upload included, which the time guard ended.
+    first = Session(START, START + timedelta(hours=11, minutes=15), "stopped_time_guard")
+    fake.outputs = _ended("run-1", "stopped_time_guard", [first])
+
+    waited = CliRunner().invoke(cli.app, ["kaggle", "wait", "run-1"])
+
+    assert waited.exit_code == 1, waited.output
+    assert waited.stdout.endswith(
+        "eval run, stopped_time_guard\nledger: added 11.25 h on kaggle for run run-1\n"
+    )
+    # Fetching the output after, or pulling it, logs the session no second time.
+    for args in (["kaggle", "output", "run-1"], ["runs", "pull", "run-1", "--store", "kaggle"]):
+        again = CliRunner().invoke(cli.app, args)
+        assert again.exit_code == 0, again.output
+        assert again.stdout.endswith("ledger: run run-1 has its row already\n")
+
+    # Resumed in a second kernel two days later: its output holds both sessions, and only
+    # the second is new, with its own hour.
+    assert _eval(repo, "--yes", "--run-id", "run-1", "--resume").exit_code == 0
+    later = START + timedelta(days=2)
+    second = Session(later, later + timedelta(hours=1), "finished")
+    fake.outputs = _ended("run-1", "finished", [first, second])
+
+    waited = CliRunner().invoke(cli.app, ["kaggle", "wait", "run-1"])
+
+    assert waited.exit_code == 0, waited.output
+    assert waited.stdout.endswith(
+        "ledger: session 1 of run run-1 has its row already\n"
+        "ledger: added 1.00 h on kaggle for session 2 of run run-1\n"
+    )
+    assert [(row.hours, row.session) for row in read_rows(ledger)] == [(11.25, 1), (1.0, 2)]
+    # The output wait read went to a scratch folder: runs/ holds what output fetched.
+    assert json.loads((repo / "runs" / "run-1" / "sessions.json").read_text()) == [first.to_json()]
 
 
 @pytest.mark.phase(3)
