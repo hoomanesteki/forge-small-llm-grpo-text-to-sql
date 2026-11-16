@@ -1,0 +1,44 @@
+data:
+  prompt_version: p1
+  split: train
+lora:
+  alpha: 32
+  dropout: 0.0
+  r: 16
+  target:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+run:
+  backend: trl
+  device: mps
+  kind: sft
+  load_in_4bit: false
+  model_ref: Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25
+  seed: 42
+sft:
+  gradient_accumulation_steps: 16
+  gradient_checkpointing: true
+  learning_rate: 0.0002
+  logging_steps: 5
+  lr_scheduler_type: cosine
+  max_length: 1536
+  max_steps: null
+  num_train_epochs: 1.0
+  pad_to_multiple_of: 64
+  per_device_train_batch_size: 1
+  subset_rows: 3168
+  warmup_ratio: 0.03
+sft_data:
+  hash: 89d0ac7f03f589bc57a536a10aeeb8bbf4ef766678f0e91121685bbde2d3dafb
+  over_max_length: 53
+  rows: 7736
+  trained: 3168
+trainer:
+  backend: trl
+  device: mps
+  dtype: bfloat16

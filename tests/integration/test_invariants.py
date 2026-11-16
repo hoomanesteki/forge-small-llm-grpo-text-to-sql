@@ -457,10 +457,12 @@ def test_i5_agreement_on_full_val() -> None:
 
 @pytest.mark.phase(3)
 def test_i5_agreement_on_committed_runs() -> None:
-    # Real model replies, each with both verdicts stored: the FG-291 pilot for now, and
-    # FG-307's baselines once they are committed beside it.
+    # Real model replies, each with both verdicts stored: the FG-291 and FG-491 pilots for
+    # now, and FG-307's baselines once they are committed beside them. A training run has
+    # no replies.
     store = LocalRunStore(ROOT / "docs" / "runs")
-    rates = {run: score_agreement(read_run(store.root / run).scores) for run in store.runs()}
+    evals = [run for run in store.runs() if store.get_manifest(run).kind == "eval"]
+    rates = {run: score_agreement(read_run(store.root / run).scores) for run in evals}
     assert rates, "docs/runs holds the FG-291 pilot"
     assert all(rate >= AGREEMENT_TARGET for rate in rates.values()), rates
 

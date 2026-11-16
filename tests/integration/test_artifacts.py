@@ -7,24 +7,36 @@ skips the checks on them only while the story is listed there.
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
+from datasets import Dataset
 
+from forge.core.types import RunManifest
+from forge.data.manifest import data_manifest_hash
+from forge.data.prompts import chat_token_counter, load_tokenizer
 from forge.data.spider import FAILING_GOLD_IDS, resolve_data_dir
-from forge.data.splits import read_split_ids
+from forge.data.splits import load_train, read_split_ids
 from forge.eval.config import HOSTS, EvalConfig, read_config_file
 from forge.eval.report import rebuild, write_run_report
 from forge.eval.reproducibility import compare_runs
-from forge.eval.run_files import MANIFEST_FILE, StoredRun, read_run
+from forge.eval.run_files import StoredRun, read_run
 from forge.eval.runner import run_eval
 from forge.ops.dev_usage import read_uses
-from forge.ops.ledger import read_rows
+from forge.ops.hub import FINAL, LocalRunStore
+from forge.ops.ledger import LedgerRow, read_rows, run_hours
+from forge.ops.manifest import config_hash
+from forge.train.config import load_train_config
+from forge.train.sft import fit_rows
+from forge.train.sft_data import build_sft_dataset
 from tests.report_trace import untraced
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -89,6 +101,156 @@ def test_pilot_report_rebuilds_and_traces_to_its_files() -> None:
     assert chart.diff == ()
 
 
+# FG-491's SFT pilot on the laptop's GPU (ADR-0016): the run that trained the adapter,
+# committed without its weights, and the adapter's val run, made with FG-291's config.
+SFT_PILOT_RUN = "2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8"
+SFT_PILOT_EVAL = "2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8"
+SFT_PILOT_CONFIG = ROOT / "configs" / "sft" / "pilot-qwen25coder05b-mps.yaml"
+# Where the adapter stays: the run's folder on the laptop that trained it.
+SFT_PILOT_ADAPTER = f"runs/{SFT_PILOT_RUN}/{FINAL}"
+
+
+def _ledger_rows(run_id: str) -> list[LedgerRow]:
+    return [row for row in read_rows(ROOT / "docs" / "compute-ledger.md") if row.run_id == run_id]
+
+
+def _made_from_its_commit(manifest: RunManifest) -> None:
+    # Made from a clean commit, the one its id ends with, on the laptop's GPU.
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest.git_sha), manifest.git_sha
+    assert manifest.run_id.endswith(manifest.git_sha[:7])
+    assert manifest.platform == "local-mps" and manifest.gpu
+    # Logged, on a platform that spends no GPU budget, with the manifest's own hours to the
+    # ledger's two places.
+    assert manifest.ended_at is not None
+    hours = run_hours(manifest.started_at, manifest.ended_at)
+    (row,) = _ledger_rows(manifest.run_id)
+    assert (row.platform, row.gpu) == ("local-mps", manifest.gpu)
+    assert row.hours == pytest.approx(hours, abs=0.005)
+    assert f"({manifest.run_id}/" in (RUNS / "README.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.phase(4)
+def test_sft_pilot_run_is_committed_without_weights() -> None:
+    root = RUNS / SFT_PILOT_RUN
+    manifest = LocalRunStore(RUNS).get_manifest(SFT_PILOT_RUN)
+    assert (manifest.kind, manifest.status) == ("sft", "finished")
+    _made_from_its_commit(manifest)
+
+    # The committed config, with the model pinned in configs/models.yaml, on the train split,
+    # and a config hash over everything the manifest records.
+    config = load_train_config(SFT_PILOT_CONFIG)
+    assert config.sft is not None
+    pilot = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))["pilot"]
+    assert manifest.model_ref == config.run.model_ref == f"{pilot['repo']}@{pilot['revision']}"
+    sections = {"run", "data", "lora", "sft"}
+    assert {name: manifest.config[name] for name in sections} == config.model_dump(
+        mode="json", include=sections
+    )
+    assert manifest.config["data"]["split"] == "train"
+    assert manifest.config["trainer"] == {"backend": "trl", "device": "mps", "dtype": "bfloat16"}
+    assert manifest.config_hash == config_hash(manifest.config)
+    stored = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    assert stored == manifest.config
+    # The subset the config sets, of the rows that fit in max_length.
+    sft_data = manifest.config["sft_data"]
+    assert sft_data["trained"] == config.sft.subset_rows
+    assert sft_data["trained"] <= sft_data["rows"] - sft_data["over_max_length"]
+
+    # Its files, and not its weights: the adapter stays in runs/ where it was trained.
+    assert manifest.outputs == {
+        "config": "config.yaml",
+        "metrics": "metrics.jsonl",
+        "adapter": FINAL,
+    }
+    assert sorted(path.name for path in root.iterdir()) == [
+        "config.yaml",
+        "manifest.json",
+        "metrics.jsonl",
+    ]
+    # A line every logging step to the last, each loss a number, then the trainer's summary.
+    lines = [json.loads(line) for line in (root / "metrics.jsonl").read_text().splitlines()]
+    steps = math.ceil(sft_data["trained"] / 16)
+    every = config.sft.logging_steps
+    losses = [line for line in lines if "loss" in line]
+    assert [line["step"] for line in losses] == list(range(every, steps + 1, every))
+    assert all(math.isfinite(line["loss"]) for line in losses)
+    assert lines[-1]["step"] == steps and "train_runtime" in lines[-1]
+
+
+@pytest.mark.phase(4)
+@pytest.mark.requires_full_data
+def test_sft_pilot_trained_on_the_rows_it_names() -> None:
+    manifest = LocalRunStore(RUNS).get_manifest(SFT_PILOT_RUN)
+    config = load_train_config(SFT_PILOT_CONFIG)
+    assert config.sft is not None
+    data = resolve_data_dir()
+    assert manifest.data_manifest_hash == data_manifest_hash(data)
+    # The rows forge data build-sft builds with the model's tokenizer, hashing as recorded.
+    tokenizer = load_tokenizer(manifest.model_ref)
+    built = build_sft_dataset(
+        config.data.prompt_version, manifest.model_ref, chat_token_counter(tokenizer)
+    )
+    sft_data = manifest.config["sft_data"]
+    assert (built.meta.hash, built.meta.counts.rows) == (sft_data["hash"], sft_data["rows"])
+    fit = fit_rows(Dataset.from_list(list(built.rows)), tokenizer, config.sft, seed=config.run.seed)
+    assert (fit.over_max_length, len(fit.rows)) == (
+        sft_data["over_max_length"],
+        sft_data["trained"],
+    )
+    # Train questions only: none from val's databases, which its adapter is scored on.
+    trained = set(fit.rows["example_id"])
+    assert trained <= {example.id for example in load_train()}
+    assert not trained & {example_id for example_id, _ in read_split_ids("val")}
+
+
+@pytest.mark.phase(4)
+def test_sft_pilot_adapter_run_is_committed_whole() -> None:
+    stored = read_run(RUNS / SFT_PILOT_EVAL)
+    manifest = stored.manifest
+    _made_from_its_commit(manifest)
+    assert manifest.config["device"] == "mps"
+
+    # The FG-291 pilot's settings, from its config, with the SFT run's final adapter: the
+    # base run and this one differ in the adapter alone.
+    config = replace(EvalConfig(**read_config_file(PILOT_CONFIG)), adapter=SFT_PILOT_ADAPTER)
+    assert manifest.config == config.manifest_config()
+    base = read_run(RUNS / PILOT_RUN).manifest
+    assert manifest.config == {**base.config, "adapter": SFT_PILOT_ADAPTER}
+    assert (manifest.model_ref, manifest.adapter_ref) == (base.model_ref, SFT_PILOT_ADAPTER)
+    trained = LocalRunStore(RUNS).get_manifest(SFT_PILOT_RUN)
+    assert trained.model_ref == manifest.model_ref
+    assert trained.ended_at is not None and trained.ended_at <= manifest.started_at
+
+    # Every val question but the known failing golds, once each: val only, never dev.
+    val = {example_id for example_id, _ in read_split_ids("val")} - FAILING_GOLD_IDS
+    assert sorted(score.example_id for score in stored.scores) == sorted(val)
+    report = stored.paths.report.read_text(encoding="utf-8")
+    assert "\n| Platform | `local-mps` |\n" in report
+    assert f"\n| Git commit | `{manifest.git_sha}` |\n" in report
+    assert f"\n| Adapter | `{SFT_PILOT_ADAPTER}` |\n" in report
+    assert stored.paths.chart.is_file()
+    # Its comparison with the base pilot, beside its report.
+    assert (stored.paths.report.parent / f"compare-{PILOT_RUN}.md").is_file()
+
+
+@pytest.mark.phase(4)
+@pytest.mark.requires_full_data
+def test_sft_pilot_reports_rebuild_and_trace_to_their_files() -> None:
+    data = resolve_data_dir()
+    checks = rebuild(SFT_PILOT_EVAL, runs_root=RUNS, data_dir=data)
+    names = [check.path.name for check in checks]
+    assert names == ["val-report.md", "val-hardness.png", f"compare-{PILOT_RUN}.md"]
+    report, chart, comparison = checks
+    assert (report.diff, report.skipped) == ((), None)
+    assert (comparison.diff, comparison.skipped) == ((), None)
+    text = report.path.read_text(encoding="utf-8")
+    assert untraced(text, RUNS / SFT_PILOT_EVAL, data_dir=data) == []
+    # The chart where this machine draws as the one that drew it did, as for FG-291's.
+    if chart.skipped is not None:
+        pytest.skip(f"the SFT pilot's chart wasn't compared: {chart.skipped}")
+    assert chart.diff == ()
+
+
 def pending_stories(pending: Path = PENDING) -> set[str]:
     entries = yaml.safe_load(pending.read_text(encoding="utf-8"))["pending"]
     return {entry["story"] for entry in entries}
@@ -112,10 +274,9 @@ def gpu_story_runs(
     When any is missing the calling test skips while ``story`` is in ``pending``, and fails
     once it isn't: a story off that list has run its jobs.
     """
+    store = LocalRunStore(runs)
     stored = [
-        read_run(folder)
-        for folder in sorted(runs.iterdir())
-        if folder.is_dir() and (folder / MANIFEST_FILE).is_file()
+        read_run(runs / run) for run in store.runs() if store.get_manifest(run).kind == "eval"
     ]
     kernel_runs = [run for run in stored if run.manifest.platform in HOSTS]
     found: dict[str, StoredRun] = {}

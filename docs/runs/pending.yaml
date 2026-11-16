@@ -181,3 +181,16 @@ pending:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
       - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
       - docs/dev-usage.md, dev look 2
+  - story: FG-491
+    run: sft-pilot-to-run-store
+    platform: local-mps
+    accelerator: none (an upload of a finished run)
+    est_gpu_hours: 0
+    status: blocked
+    since: 2026-11-16
+    blocked_on:
+      - a Hugging Face account with a write token in HF_TOKEN
+      - the private run store repo FORGE_RUN_STORE names (docs/runbook.md, "Accounts", step 2)
+    how: docs/runbook.md, "Run store", forge runs push with the SFT pilot's run id (docs/runs/README.md)
+    fills:
+      - the run store's copy of the SFT pilot run, its adapter in checkpoints/final with it, which only the laptop that trained it holds until then
