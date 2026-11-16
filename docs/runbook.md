@@ -82,13 +82,19 @@ Once the job has ended, `forge kaggle wait` adds its kernel session's row to
 session, as `forge runs pull` does (see Run store). A kernel that ends ERROR or CANCEL_*
 has no job outcome to read, so `wait` says to fetch what it kept with `output`.
 
-`forge kaggle run` stops at the first check that fails, before anything is uploaded:
+`forge kaggle run` runs these checks in order and stops at the first that fails. Steps 1
+and 2 upload nothing. Step 3 may publish a new version of `<owner>/forge-code`, so a job
+the budget refuses at step 4, or one declined at step 5, leaves that version behind; it
+holds HEAD, so the next push from the same commit mounts it.
 
 1. `.smoke-ok-<HEAD sha>` must be at the repo root, and the tree clean.
 2. The job's config is checked as the kernel will check it. An eval config is a
    `configs/eval/*.yaml` file whose `backend` is `vllm` (FG-306; `hf` runs on the CPU, so it
    is refused on a T4), with an `ops` section giving `est_gpu_hours`. `--job sft` and
-   `--job grpo` come with FG-403 and FG-504.
+   `--job grpo` come with FG-403 and FG-504. The run id must make a kernel slug Kaggle
+   takes (`forge-<run_id>`, and `-<n>` on a resume: lowercase letters and digits with
+   single hyphens between them, so not `a--b` or `run-`), the run must not clash with an
+   earlier push, and a dev job needs a dev look left (see Dev).
 3. The current version of `<owner>/forge-code` must hold HEAD's wheel (its `GIT_SHA`), or
    HEAD is published as a new version, which is waited for until Kaggle says `ready`. The
    kernel mounts that version by number, with `<owner>/forge-spider`, which must exist
@@ -191,7 +197,9 @@ through the same checks; it runs without Forge, so it mounts no dataset and has 
 preflight. `--emit-notebook out.ipynb` writes the job as a Colab notebook and pushes
 nothing: a cell fetches both datasets with the kaggle CLI (a `KAGGLE_API_TOKEN` Colab
 secret), the next holds `entry.py` with the same arguments and `--host colab`, and the
-last runs it. Add its hours with `forge ledger add --platform colab`.
+last runs it. Add its hours with `forge ledger add --platform colab`. A resume has no
+notebook: the fetch cell gets the two datasets, never a kernel's output, so `--resume
+--emit-notebook` is refused.
 
 ## Run store
 

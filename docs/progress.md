@@ -125,6 +125,7 @@ Work discovered along the way that is not a plan story.
 | FG-294 | Gate 2 fixes: plan and pilot notes | done | FG-291 gets a Phase 2 story block whose Tests line names its 15 tests, so traceability covers 22 Phase 0 to 2 stories, and moves to the Phase 2 table; section 5.5 lets a pilot or found story hold `FG-N91`, with gate fixes from the next free number; the pilot's unfenced replies and rule-3 cuts counted; the Phase 2 demo says `make smoke` prints its report from a scratch folder |
 | FG-295 | Gate 2 fixes: last items | done | The taxonomy reads a whole ORDER BY alias in parentheses or with COLLATE, drops parentheses around a whole ORDER BY term, and lets a derived table's or CTE's columns win over an alias; `rebuild` skips a chart only for a renderer-shaped Software text, and the full-data pilot test skips rather than pass when its chart isn't compared; `compare --out` naming the default file through a symlink or letter case writes that file; `git_sha` excludes the logs where `forge.ops.paths` puts them; the pilot's rule-3 note recounted by `scripts/count_pilot_extraction.py`; `GitError` hand-off for Phase 3 |
 | FG-391 | Gate 3 fixes: UTC dates and ledger sessions | done | One UTC date for run ids, ledger rows, dev-usage rows and the ledger's week (`forge.ops.clock`), and runner tests that take the UTC date, with one pinned ten hours west of UTC; each attempt at a run is a session in its `sessions.json`, a manifest's GPU hours add up its sessions, and each session gets its own ledger row, marked `(session N)` after the first, which `append_once` keys on and I7 checks; a kernel's session spans the whole kernel (`status.json`, `sessions.json`); `forge kaggle wait` and `output` add the rows |
+| FG-392 | Gate 3 fixes: kernel jobs | done | A kernel's eval job stops at a deadline counted from the kernel's start to the push's timeout (`--timeout-s`), a tenth kept back for official EX and the upload, then uploads and resumes; `forge eval run --deadline-minutes` does the same; the restore is the first stage, so a resume that fails early still carries the run; every stage result, the error and `error.txt` are redacted, with secrets cleaned as huggingface_hub sends them; the data is checked against the wheel's pinned list; a dev look is logged as soon as Kaggle accepts the push, one row a run id across resumes (ADR-0004 notes); a push that dropped a source is recorded with a warning; run ids that make no kernel slug and `--resume --emit-notebook` are refused before any upload; the runbook says when the code dataset is published |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -724,7 +725,9 @@ Work discovered along the way that is not a plan story.
   with its own hours and row.
 - `kaggle/entry.py` gives eval jobs no `Deadline` yet, and would have to skip the report of
   a run the guard stopped, since `read_run` refuses unfinished runs. A kernel's own timeout
-  (the estimate and half again) stops an eval job meanwhile (FG-305).
+  (the estimate and half again) stops an eval job meanwhile (FG-305). Since FG-392 the push
+  passes that timeout to the entry script, whose eval job stops at the time guard first and
+  writes its report only once the run finishes.
 - A manifest that `kaggle/entry.py` closes as failed after a crash keeps `gpu_hours` 0; its
   ledger row is still right, since a pulled row takes its hours from `started_at` and
   `ended_at` (FG-305).
@@ -801,7 +804,9 @@ Work discovered along the way that is not a plan story.
   pulled only from the Hub misses the upload's minutes; `forge kaggle wait` logs the whole
   session first (FG-391).
 - A kernel that fails before its job (install, data, preflight) holds no run, so no
-  manifest says what to log; its minutes still need `forge ledger add` (FG-391).
+  manifest says what to log; its minutes still need `forge ledger add` (FG-391). Since
+  FG-392 that holds for a new run's kernel only: a resume restores the run first, so its
+  early failure is a session of the run, with its row.
 - Training runs (FG-403, FG-504) don't go through `forge.eval.run_files`, so they keep no
   `sessions.json` themselves. In a kernel `entry.py` adds each kernel's session, but on the
   laptop a resumed training run is one session from its first start, and
@@ -811,3 +816,18 @@ Work discovered along the way that is not a plan story.
   CI, in UTC, passed. The far-west test stops the clock on a Sunday evening ten hours west
   (`TZ=HST10`, a POSIX zone that needs no zone database), where the local date is the day
   before the UTC one (FG-391).
+- An eval deadline guards the batches, but official EX, the report and the upload come after
+  the last one, so `eval_deadline` keeps a tenth of the time back for them: official EX
+  grows with the run, as the estimate and so the timeout do. Kaggle's timeout may count
+  from before the script starts, which the tenth covers too. FG-301's measurements show
+  whether a tenth is enough (FG-392).
+- `status.json` and `sessions.json` keep whole seconds, so two attempts started within one
+  second (only in tests) looked like one; the entry script now tells the session its job
+  began from those the restore brought back by counting them (FG-392).
+- A resume whose kernel source Kaggle dropped fails at its restore stage, and its output
+  holds no run, so the resume after it mounts nothing to restore either. Such a run needs
+  a new `--run-id`, unless a later story has `plan_job` mount the last attempt whose
+  output holds the run (FG-392).
+- A dev look is one row a run id only for `forge kaggle run --resume`: the push can't tell
+  whether the attempt before it reached dev. On the laptop `load_dev` still logs each load,
+  a resume's included, as ADR-0004 decided (FG-392).

@@ -548,6 +548,28 @@ def test_a_dev_look_is_logged_once_kaggle_accepts_the_push(
 
 
 @pytest.mark.phase(3)
+def test_bad_kernel_slugs_and_notebook_resumes_are_refused_before_any_upload(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The code dataset holds another commit, so anything that got past the checks would
+    # publish one.
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")[::-1]), monkeypatch)
+    # Good run ids, but no kernel slug: Kaggle's has single hyphens between letters and digits.
+    for run_id in ("a--b", "run-"):
+        result = _eval(repo, "--yes", "--run-id", run_id)
+        assert result.exit_code == 1, result.output
+        assert f"run id {run_id} makes the kernel slug forge-{run_id}, which Kaggle refuses" in (
+            result.stderr
+        )
+    # A notebook fetches the datasets but no kernel's output, so it has nothing to resume.
+    book = repo.parent / "resume.ipynb"
+    result = _eval(repo, "--resume", "--emit-notebook", str(book))
+    assert result.exit_code == 1
+    assert "a notebook can't fetch the last attempt's kernel output" in result.stderr
+    assert fake.commands == [] and not book.exists() and not (repo / "runs").exists()
+
+
+@pytest.mark.phase(3)
 def test_spike_job_pushes_the_throughput_script(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

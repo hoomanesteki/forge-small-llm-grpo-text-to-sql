@@ -27,7 +27,10 @@ writes the row in ``docs/dev-usage.md`` here, where the repo is, since the kerne
 log stays in its output, as soon as Kaggle has accepted the push and before anything else
 that could fail. A ``--resume`` of the same run is the same look, so it adds no row and
 goes even once the looks are spent. A notebook can run any number of times, so a dev job
-has none.
+has none, and it can't fetch a kernel's output, so it resumes nothing.
+
+The kernel's slug, ``forge-<run_id>`` with ``-<attempt>`` on a resume, must be one Kaggle
+takes; ``plan_job`` checks it with the run id, before any dataset is published.
 
 The ``spike`` job pushes FG-301's throughput script instead of the entry script. It runs
 without Forge, so it mounts no dataset and has no preflight.
@@ -71,6 +74,7 @@ from forge.ops.kaggle import (
     load_template,
     publish_code,
     render_kernel_metadata,
+    valid_slug,
     write_kernel_dir,
 )
 from forge.ops.ledger import Summary
@@ -200,13 +204,20 @@ def plan_job(
 
     ``preflight`` is on by default for entry jobs. ``reason`` goes with a dev eval job,
     and only with one. Raises ``JobRefused`` for a job that can't go yet, a run that
-    clashes with an earlier push, a dev job once the dev looks are spent or as a notebook,
-    ``ValueError`` for a bad config, and ``NotAvailable`` for options a later story builds.
+    clashes with an earlier push, a run id that makes no kernel slug, a resume or a dev
+    job as a notebook, a dev job once the dev looks are spent, ``ValueError`` for a bad
+    config, and ``NotAvailable`` for options a later story builds.
     """
     if job in LATER_JOBS:
         raise JobRefused(f"--job {job} comes with {LATER_JOBS[job]}")
     if job not in JOBS:
         raise ValueError(f"job must be one of {', '.join(JOBS)}, got {job!r}")
+    if resume and notebook:
+        raise JobRefused(
+            "a notebook can't fetch the last attempt's kernel output, so it can't resume a "
+            "run; push the resume with forge kaggle run --resume, or give the notebook a new "
+            "--run-id"
+        )
     day = today or utc_today()
     options: dict[str, Any]
     if job == "spike":
@@ -271,6 +282,11 @@ def plan_job(
         kernel_sources = (f"{last['kernel']}/{last['version']}",)
         attempt = len(record["kernels"]) + 1
         slug, title = f"{slug}-{attempt}", f"{title} {attempt}"
+    if not valid_slug(slug):
+        raise JobRefused(
+            f"run id {run_id} makes the kernel slug {slug}, which Kaggle refuses: lowercase "
+            "letters and digits with single hyphens between them; pass another --run-id"
+        )
     reads_dev = options.get("split") == "dev"
     same_look = resume and _look_logged(run_id)
     if reads_dev and not same_look and count_dev_uses() >= MAX_DEV_USES:
