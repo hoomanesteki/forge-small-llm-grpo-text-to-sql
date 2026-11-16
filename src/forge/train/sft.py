@@ -191,7 +191,8 @@ def run_sft(
         raise ValueError(f"run.kind is {config.run.kind}, and forge train sft trains sft runs")
     root = resolve_data_dir(data_dir).resolve()
     runs_root = runs_dir() if runs_root is None else runs_root
-    # Asked before a model loads, so uncommitted changes cost no time.
+    # Asked before a model loads, so uncommitted changes cost no time, and only here: the
+    # manifest names this commit, whatever the tree does while the model and rows load.
     sha = code_sha(allow_dirty=allow_dirty)
     run_id = run_id or make_run_id("sft", config.run.model_ref, sha)
     check_run_id(run_id)
@@ -230,8 +231,8 @@ def run_sft(
         run_id=run_id,
         platform=platform,
         gpu=accelerator(platform),
-        allow_dirty=allow_dirty,
         data_dir=root,
+        git_sha=sha,
     )
     try:
         # Not exist_ok: of two processes given one run id, the second stops here.

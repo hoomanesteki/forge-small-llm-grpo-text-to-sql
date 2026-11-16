@@ -6,6 +6,8 @@ import json
 import logging
 import math
 import os
+import shutil
+import subprocess
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +20,7 @@ from transformers import TrainerCallback, TrainerControl, TrainerState, Training
 
 from forge.core.types import RunManifest
 from forge.ops.hub import LocalRunStore, StoreUnavailable
+from forge.ops.manifest import DirtyTreeError, git_sha
 from forge.train.callbacks import (
     WANDB_KEY,
     CheckpointCallback,
@@ -29,6 +32,7 @@ from forge.train.callbacks import (
 )
 from forge.train.config import OpsConfig
 
+ROOT = Path(__file__).resolve().parents[2]
 RUN = "2026-11-15-qwen3-4b-grpo-abc1234"
 
 
@@ -514,3 +518,37 @@ def test_training_callbacks_from_ops(tmp_path: Path, monkeypatch: pytest.MonkeyP
         "MetricsCallback",
         "FakeWandb",
     ]
+
+
+@pytest.mark.phase(4)
+def test_wandb_files_leave_the_tree_clean(tmp_path: Path) -> None:
+    # W&B writes wandb/ in the folder training starts in, the checkout's top for forge
+    # train sft, and the next run refuses a dirty tree, so the repo's ignore rules take it.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shutil.copy2(ROOT / ".gitignore", repo / ".gitignore")
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Test"],
+        ["add", "."],
+        ["commit", "-q", "-m", "init"],
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    head = git_sha(repo)
+    written = [
+        "wandb/run-20261116_035420-abc123/files/wandb-metadata.json",
+        "kaggle/wandb/latest-run/files/config.yaml",
+    ]
+    for rel in written:
+        (repo / rel).parent.mkdir(parents=True)
+        (repo / rel).write_text("{}\n", encoding="utf-8")
+    ignored = subprocess.run(
+        ["git", "check-ignore", *written], cwd=repo, check=True, capture_output=True, text=True
+    )
+    assert ignored.stdout.splitlines() == written
+    assert git_sha(repo) == head
+    # Only a folder of that name: a module called wandb is code, and still counts.
+    (repo / "wandb.py").write_text("import wandb\n", encoding="utf-8")
+    with pytest.raises(DirtyTreeError):
+        git_sha(repo)
