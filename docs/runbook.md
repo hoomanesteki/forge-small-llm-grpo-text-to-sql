@@ -380,7 +380,8 @@ uv run forge runs promote <run_id> --config <base val config> --eval <eval_run_i
 - `forge runs promote <sft_run_id> --config <base val config> --eval <eval_run_id> ...`
   copies the SFT run's checkpoint that val scores highest to `checkpoints/best/`, where GRPO
   starts (`forge.train.sft.promote_best`). The config is the base model's on the whole val
-  split, `configs/eval/<name>-val.yaml`. Each eval run is a finished run in `runs/` of that
+  split at the prompt version the run trained on, `configs/eval/<name>-val.yaml` for p1 and
+  `configs/eval/<name>-val-p2.yaml` for p2. Each eval run is a finished run in `runs/` of that
   config with one of the run's checkpoints as its adapter and nothing else changed,
   `runs/<sft_run_id>/checkpoints/step-NNNNNN` or `.../final`, and it must have scored the
   files the SFT run saved there, by their `adapter_sha256`. The highest official EX wins,

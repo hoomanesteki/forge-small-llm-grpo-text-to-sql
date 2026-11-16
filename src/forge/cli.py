@@ -1493,13 +1493,13 @@ def runs_promote(
     """Copy the SFT run's checkpoint that val scores highest to checkpoints/best.
 
     Each --eval is a finished run in runs/ (FORGE_RUNS_DIR) of the --config, the base
-    model's on the whole val split such as configs/eval/qwen3-4b-val.yaml, with one of the
-    run's checkpoints as its adapter, runs/<run_id>/checkpoints/step-NNNNNN or .../final,
-    on the files the run saved there. The one with the highest official EX, the later one
-    on a tie, is copied to runs/<run_id>/checkpoints/best/, and best.json beside the
-    manifest records the scores and the eval runs they come from. With --store hub, the
-    default, the run store gets them too, so pull the run first: its checkpoints must be
-    here. Dev is never used.
+    model's on the whole val split such as configs/eval/qwen3-4b-val.yaml, at the prompt
+    version the run trained on, with one of the run's checkpoints as its adapter,
+    runs/<run_id>/checkpoints/step-NNNNNN or .../final, on the files the run saved there.
+    The one with the highest official EX, the later one on a tie, is copied to
+    runs/<run_id>/checkpoints/best/, and best.json beside the manifest records the scores
+    and the eval runs they come from. With --store hub, the default, the run store gets
+    them too, so pull the run first: its checkpoints must be here. Dev is never used.
     """
     from forge.eval.config import EvalConfig, read_config_file
     from forge.eval.run_files import RunUnfinished

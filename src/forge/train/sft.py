@@ -448,7 +448,8 @@ def checkpoint_scores(
     runs ``eval_run_ids`` in ``runs_root`` scored, and that eval run's id, by checkpoint.
 
     ``base`` is the base model's full val config, such as ``configs/eval/qwen3-4b-val.yaml``:
-    the SFT run's model on every val question, with no adapter. Each eval run must be
+    the SFT run's model on every val question, with no adapter, at the prompt version the
+    run trained on (its config's ``data.prompt_version``). Each eval run must be
     finished and made with that config and one of the run's checkpoints as the adapter
     (``<...>/<run_id>/checkpoints/<name>``, wherever its folder was, as
     ``forge.ops.adapters.checkpoint_ref`` reads it), on the files the run saved there, by
@@ -511,7 +512,8 @@ def checkpoint_scores(
 
 def _check_base(base: EvalConfig, trained: RunManifest) -> None:
     """Raise ``ValueError`` unless ``base`` scores the training run's model alone on every
-    val question, as a checkpoint's eval runs must too."""
+    val question, with the prompt version it trained on, as a checkpoint's eval runs must
+    too."""
     if base.split != "val" or base.limit is not None:
         asked = f"the first {base.limit} {base.split} questions" if base.limit else base.split
         raise ValueError(
@@ -523,6 +525,15 @@ def _check_base(base: EvalConfig, trained: RunManifest) -> None:
         raise ValueError(
             f"the base config scores {base.model}, and run {trained.run_id} trained "
             f"{trained.model_ref}"
+        )
+    # The eval runs agree with the base config, so a base at another prompt version would
+    # pick best/ from scores at a prompt the adapter never trained on.
+    prompt = trained.config.get("data", {}).get("prompt_version")
+    if base.prompt_version != prompt:
+        trained_on = prompt or "no prompt version its config names"
+        raise ValueError(
+            f"the base config prompts with {base.prompt_version}, and run {trained.run_id} "
+            f"trained on {trained_on}"
         )
 
 

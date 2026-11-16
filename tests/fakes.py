@@ -334,8 +334,8 @@ def sft_run_folder(
     runs: Path, run_id: str, model_ref: str, checkpoints: Sequence[str], **changes: Any
 ) -> RunManifest:
     """A finished SFT run in ``runs/<run_id>/`` as a GPU job leaves one, without training:
-    its manifest, and an adapter in each of ``checkpoints`` whose files name the folder,
-    with the digest of each in the manifest's outputs."""
+    its manifest, trained on p1 prompts, and an adapter in each of ``checkpoints`` whose
+    files name the folder, with the digest of each in the manifest's outputs."""
     folder = runs / run_id
     folder.mkdir(parents=True)
     for rel in checkpoints:
@@ -346,7 +346,7 @@ def sft_run_folder(
         "run_id": run_id,
         "kind": "sft",
         "git_sha": "c" * 40,
-        "config": {"sft": {"num_train_epochs": 1.0}},
+        "config": {"data": {"prompt_version": "p1"}, "sft": {"num_train_epochs": 1.0}},
         "config_hash": "4" * 64,
         "data_manifest_hash": "5" * 64,
         "model_ref": model_ref,

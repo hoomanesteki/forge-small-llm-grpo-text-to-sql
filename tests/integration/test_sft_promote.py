@@ -195,5 +195,24 @@ def test_runs_promote_takes_the_base_models_full_val_config_alone(runs: Path) ->
         assert f"error: the base config {message}" in done.stderr, done.stderr
     absent = _promote(runs, "--eval", "final-on-val", "--store", "local", config="absent.yaml")
     assert absent.exit_code == 1 and "error: " in absent.stderr
-    assert not (runs / RUN / BEST).exists()
+
+    # The p2 config, and the checkpoint's val run made with it: the two agree, but the run
+    # trained on p1 prompts, so that is no base its checkpoints are scored against.
+    p2 = BASE.replace("prompt_version: p1", "prompt_version: p2")
+    (runs.parent / "p2.yaml").write_text(p2, encoding="utf-8")
+    _evaluate(runs, "final-on-val-p2", f"{runs}/{RUN}/{FINAL}", right=4, prompt_version="p2")
+    at_p2 = _promote(runs, "--eval", "final-on-val-p2", "--store", "local", config="p2.yaml")
+    assert at_p2.exit_code == 1
+    assert f"error: the base config prompts with p2, and run {RUN} trained on p1" in at_p2.stderr
+    # A run whose config names no prompt version can't show which one its checkpoints take.
+    sft_run_folder(runs, OTHER, MODEL, [FINAL], config={"sft": {"num_train_epochs": 1.0}})
+    _evaluate(runs, "other-on-val", f"{runs}/{OTHER}/{FINAL}", right=4)
+    base = ("--config", str(runs.parent / "base.yaml"))
+    unnamed = CliRunner().invoke(
+        cli.app, ["runs", "promote", OTHER, *base, "--eval", "other-on-val", "--store", "local"]
+    )
+    assert unnamed.exit_code == 1
+    assert f"run {OTHER} trained on no prompt version its config names" in unnamed.stderr
+
+    assert not (runs / RUN / BEST).exists() and not (runs / OTHER / BEST).exists()
     assert _promote(runs, "--eval", "final-on-val", "--store", "local").exit_code == 0
