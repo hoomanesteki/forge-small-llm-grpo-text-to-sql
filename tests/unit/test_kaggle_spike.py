@@ -400,11 +400,31 @@ def test_env_stage_reports_off_kaggle_too(monkeypatch: pytest.MonkeyPatch) -> No
     json.dumps(info)
 
 
-@pytest.mark.phase(3)
-def test_install_stage_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A stand-in uv that logs its arguments, so the commands are checked without installing.
+# The venv's python, which the stand-in uv writes: it logs its arguments too, and its pip
+# puts a torch into the venv's own site-packages when FAKE_PIP_TORCH is set, as uv's
+# installer does whatever system site packages hold.
+FAKE_VENV_PYTHON = """\
+#!{python}
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open({log!r}, "a") as log:
+    log.write("python " + " ".join(args) + "\\n")
+if args[:3] == ["-m", "pip", "install"] and os.environ.get("FAKE_PIP_TORCH"):
+    site = next(Path(sys.argv[0]).parents[1].glob("lib/python*/site-packages"))
+    info = site / "torch-2.14.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.1\\nName: torch\\nVersion: 2.14.0\\n")
+"""
+
+
+@pytest.fixture
+def fake_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A stand-in uv on PATH that logs its arguments, so commands are checked without
+    installing; returns the log, which the venv's python writes to as well."""
     bin_dir, log = tmp_path / "bin", tmp_path / "uv.log"
     bin_dir.mkdir()
+    python = FAKE_VENV_PYTHON.format(python=sys.executable, log=str(log))
     uv = bin_dir / "uv"
     uv.write_text(
         textwrap.dedent(
@@ -416,7 +436,11 @@ def test_install_stage_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
             with open({str(log)!r}, "a") as log:
                 log.write(" ".join(args) + "\\n")
             if args[0] == "venv":
-                Path(args[-1], "bin").mkdir(parents=True)
+                venv = Path(args[-1])
+                (venv / "lib" / "python3.13" / "site-packages").mkdir(parents=True)
+                (venv / "bin").mkdir()
+                (venv / "bin" / "python").write_text({python!r})
+                (venv / "bin" / "python").chmod(0o755)
             elif args == ["--version"]:
                 print("uv 0.12.3")
             elif args[:2] == ["pip", "freeze"]:
@@ -426,22 +450,63 @@ def test_install_stage_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     )
     uv.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    venv = tmp_path / "venvs" / "trl"
-    args = spike.parse_args(["install", "--out", "x.json", "--stack", "trl", "--venv", str(venv)])
-    result = spike.install_stage(args)
+    monkeypatch.delenv("FAKE_PIP_TORCH", raising=False)
+    return log
+
+
+def _install(tmp_path: Path, stack: str) -> tuple[Path, dict[str, Any]]:
+    venv = tmp_path / "venvs" / stack
+    args = spike.parse_args(["install", "--out", "x.json", "--stack", stack, "--venv", str(venv)])
+    return venv, spike.install_stage(args)
+
+
+@pytest.mark.phase(3)
+def test_install_stage_commands(tmp_path: Path, fake_uv: Path) -> None:
+    venv, result = _install(tmp_path, "trl")
 
     python = str(venv / "bin" / "python")
     requirements = " ".join(spike.STACKS["trl"].requirements)
-    assert log.read_text().splitlines() == [
-        f"venv --python {sys.executable} --system-site-packages {venv}",
-        f"pip install --python {python} {requirements}",
+    # uv ignores system site packages when it installs, so the stack that runs on the
+    # image's torch installs with the venv's own pip, which counts them.
+    assert fake_uv.read_text().splitlines() == [
+        f"venv --python {sys.executable} --seed --system-site-packages {venv}",
+        f"python -m pip install --no-input --progress-bar off {requirements}",
         "--version",
         f"pip freeze --python {python}",
     ]
+    assert result["installer"] == "pip"
+    assert result["system_site_packages"] is True
     assert result["uv"] == "uv 0.12.3"
     assert result["uv_bootstrap_seconds"] is None  # uv was already there
     assert result["freeze"] == ["trl==1.18.0"]
     assert result["install_seconds"] >= 0
+
+
+@pytest.mark.phase(3)
+def test_install_stage_uses_uv_for_a_stack_with_its_own_torch(
+    tmp_path: Path, fake_uv: Path
+) -> None:
+    venv, result = _install(tmp_path, "trl-vllm")
+
+    python = str(venv / "bin" / "python")
+    requirements = " ".join(spike.STACKS["trl-vllm"].requirements)
+    assert fake_uv.read_text().splitlines()[:2] == [
+        f"venv --python {sys.executable} {venv}",
+        f"pip install --python {python} {requirements}",
+    ]
+    assert (result["installer"], result["system_site_packages"]) == ("uv", False)
+
+
+@pytest.mark.phase(3)
+def test_install_stage_refuses_a_torch_inside_a_venv_meant_to_reuse_the_images(
+    tmp_path: Path, fake_uv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_PIP_TORCH", "1")
+    with pytest.raises(RuntimeError, match=r"torch 2\.14\.0 .*image's torch"):
+        _install(tmp_path, "trl")
+    # A stack that brings its own torch may install one.
+    _, result = _install(tmp_path, "unsloth")
+    assert result["installer"] == "uv"
 
 
 @pytest.mark.phase(3)
