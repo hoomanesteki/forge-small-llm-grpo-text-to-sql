@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# make smoke: the whole eval pipeline on CPU with the tiny model, on the fixture data. It
-# runs the smoke tests, then `forge eval run` with the tiny model on the fixture's 20 val
-# questions and `forge report run` on that run, and prints the report, all in a scratch
-# runs folder removed at the end.
+# make smoke: the whole pipeline on CPU with the tiny model, on the fixture data. It runs
+# the smoke tests, then `forge eval run` with the tiny model on the fixture's 20 val
+# questions and `forge report run` on that run, and prints the report. Then `forge train
+# sft` trains a LoRA adapter for 3 steps (configs/sft/tiny-smoke.yaml), and `forge eval
+# run --adapter` evaluates it on 10 val questions. All of it goes in a scratch folder
+# removed at the end.
 #
 # When every step passes on a clean tree it writes .smoke-ok-<commit sha> at the repo root,
 # which `forge kaggle run` requires before it pushes a GPU job (FG-303). The marker vouches
@@ -19,6 +21,7 @@ last_phase=8 # the plan's last, as in the Makefile
 phase="${PHASE:-$last_phase}"
 sha="$(git rev-parse HEAD)"
 run_id="smoke-${sha:0:7}"
+sft_id="smoke-sft-${sha:0:7}"
 rm -f ".smoke-ok-$sha"
 
 scratch="$(mktemp -d)"
@@ -51,6 +54,15 @@ uv run forge report run "$run_id"
 report="$FORGE_RUNS_DIR/$run_id/eval/val-report.md"
 step "$report"
 cat "$report"
+
+step "forge train sft --config configs/sft/tiny-smoke.yaml"
+uv run forge train sft --config configs/sft/tiny-smoke.yaml --run-id "$sft_id" \
+    --sft-dir "$scratch/sft" --allow-dirty
+
+adapter="$FORGE_RUNS_DIR/$sft_id/checkpoints/final"
+step "forge eval run --adapter $adapter --split val --limit 10"
+uv run forge eval run --backend hf --model "$model" --adapter "$adapter" --split val \
+    --limit 10 --run-id "$sft_id-eval" --workers 2 --allow-dirty
 
 if [[ "$phase" != "$last_phase" ]]; then
     printf '\nsmoke passed with the smoke tests of phases 0 to %s only, so no marker: ' "$phase"
