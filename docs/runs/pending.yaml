@@ -1,0 +1,34 @@
+# Runs a story needs that can't happen yet. Each entry says what blocks it, how to run it
+# and what it fills in. The story that makes the run removes its entry in the same change
+# and adds its ledger row. Nothing here is a result.
+pending:
+  - story: FG-301
+    run: kaggle-throughput-spike
+    kernel: forge-throughput-spike
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    est_gpu_hours: 1.5
+    status: blocked
+    blocked_on:
+      - a phone-verified Kaggle account (GPU and internet need it)
+      - a Kaggle API token in ~/.kaggle/access_token
+      - an HF_TOKEN secret attached to the kernel in the Kaggle editor (question 2 only)
+    how: docs/spikes/kaggle-gpu.md, "Running the spike", steps 1 to 5, 7 and 8
+    fills:
+      - docs/spikes/kaggle-gpu.md, every "To be measured" item of questions 1 to 5
+      - docs/adr/0006-train-backend.md, accepted or replaced
+      - docs/compute-ledger.md, one kaggle row
+      - docs/PLAN.md section 3.8 budget table, at Gate 3
+  - story: FG-301
+    run: kaggle-session-limit-probe
+    kernel: forge-session-limit-probe
+    platform: kaggle
+    accelerator: none (a CPU kernel)
+    est_gpu_hours: 0
+    status: blocked
+    blocked_on:
+      - a phone-verified Kaggle account (GPU and internet need it)
+      - a Kaggle API token in ~/.kaggle/access_token
+    how: docs/spikes/kaggle-gpu.md, "Running the spike", step 6
+    fills:
+      - docs/spikes/kaggle-gpu.md, every "To be measured" item of question 6
