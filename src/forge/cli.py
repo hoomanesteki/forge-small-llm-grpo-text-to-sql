@@ -759,14 +759,15 @@ def ledger_add(
     purpose: str = typer.Option(...),
     gpu: str = typer.Option("T4"),
     cost: float = typer.Option(0.0, help="cash spent in USD"),
-    on: str = typer.Option("", help="session date, YYYY-MM-DD (default today)"),
+    on: str = typer.Option("", help="session date in UTC, YYYY-MM-DD (default today in UTC)"),
 ) -> None:
     """Add a row by hand, for sessions the CLI didn't launch (for example Colab)."""
     from datetime import date
 
+    from forge.ops.clock import utc_today
     from forge.ops.ledger import LedgerRow, append
 
-    day = date.fromisoformat(on) if on else date.today()
+    day = date.fromisoformat(on) if on else utc_today()
     append(LedgerRow(day, platform, gpu, hours, run_id, purpose, cost))
     typer.echo(f"added {hours:.2f} h on {platform} for {run_id}")
 
@@ -1071,28 +1072,38 @@ def kaggle_wait(
 ) -> None:
     """Wait until the run's kernel ends: COMPLETE, ERROR or CANCEL_*.
 
-    Exits 0 only when the job itself finished, as the status.json in the kernel's output
-    says: the entry script ends a failed job without an error, so its output is kept.
+    Once the job has ended, its session gets its row in docs/compute-ledger.md, as forge
+    runs pull adds it, from the status.json, manifest and sessions in the kernel's output.
+    Exits 0 only when the job itself finished, as status.json says: the entry script ends
+    a failed job without an error, so its output is kept.
     """
+    import tempfile
+
     from forge.ops import kaggle_job as jobs
     from forge.ops.kaggle import KaggleClient
 
     client = KaggleClient()
-    try:
-        kernel, job = _run_kernel(run_id)
-        state = jobs.wait_for(client, kernel, poll_s=poll, say=typer.echo)
-        if state != "COMPLETE":
-            raise jobs.JobRefused(f"the kernel ended {state}; read forge kaggle logs {run_id}")
-        if job == "spike":
-            typer.echo(f"the spike ran; fetch its report with forge kaggle output {run_id}")
-            return
-        outcome = jobs.job_status(client, kernel, run_id)
-    except _kaggle_job_errors() as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(1) from exc
-    stages = outcome.get("stages", {})
-    upload = stages.get("upload", {}).get("result", "not reached")
-    typer.echo(f"job {outcome['status']} at stage {outcome['stage']}; upload: {upload}")
+    with tempfile.TemporaryDirectory(prefix="forge-status-") as folder:
+        try:
+            kernel, job = _run_kernel(run_id)
+            state = jobs.wait_for(client, kernel, poll_s=poll, say=typer.echo)
+            if state != "COMPLETE":
+                raise jobs.JobRefused(
+                    f"the kernel ended {state}; read forge kaggle logs {run_id}, and fetch "
+                    f"what it kept with forge kaggle output {run_id}, which logs its hours"
+                )
+            if job == "spike":
+                typer.echo(f"the spike ran; fetch its report with forge kaggle output {run_id}")
+                return
+            record = jobs.job_record(client, kernel, run_id, Path(folder))
+            outcome = jobs.read_status(record)
+        except _kaggle_job_errors() as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        stages = outcome.get("stages", {})
+        upload = stages.get("upload", {}).get("result", "not reached")
+        typer.echo(f"job {outcome['status']} at stage {outcome['stage']}; upload: {upload}")
+        _log_run(record, "has ended")
     if outcome["status"] != "finished":
         typer.echo(f"error: {outcome.get('error') or outcome['status']}", err=True)
         raise typer.Exit(1)
@@ -1100,11 +1111,13 @@ def kaggle_wait(
 
 @kaggle_app.command("output")
 def kaggle_output(run_id: RunIdArgument) -> None:
-    """Download the run's kernel output into runs/<run_id>/ (FORGE_RUNS_DIR).
+    """Download the run's kernel output into runs/<run_id>/ (FORGE_RUNS_DIR), and add the
+    ledger rows of its sessions.
 
     The run's files go in that folder and the rest, the kernel's log and the preflight
     among it, in its kernel/ folder. It is how results come back when the kernel had no
-    HF_TOKEN to upload them with.
+    HF_TOKEN to upload them with. Each of the run's sessions that has ended gets its row in
+    docs/compute-ledger.md once, as forge runs pull adds them.
     """
     from forge.ops.kaggle import KaggleClient
     from forge.ops.kaggle_job import fetch_output
@@ -1117,6 +1130,33 @@ def kaggle_output(run_id: RunIdArgument) -> None:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"run {run_id}: {run_dir}; the kernel's log and the rest in {run_dir / 'kernel'}")
+    _log_run(run_dir, "is fetched")
+
+
+def _log_run(run_dir: Path, done: str) -> None:
+    """Say what the run in ``run_dir`` is, and add the ledger rows of its sessions that have
+    ended, once each. A folder with no manifest, a spike's output or a kernel's that failed
+    before its run began, gets none. ``done`` says where the run is, for an error."""
+    from forge.eval.run_files import MANIFEST_FILE
+    from forge.ops.hub import LocalRunStore
+    from forge.ops.ledger import record_run
+    from forge.ops.sessions import sessions_of
+
+    if not (run_dir / MANIFEST_FILE).is_file():
+        typer.echo("ledger: no row, the output has no manifest; use forge ledger add")
+        return
+    try:
+        manifest = LocalRunStore(run_dir.parent).get_manifest(run_dir.name)
+        typer.echo(f"{manifest.kind} run, {manifest.status}")
+        _, notes = record_run(manifest, sessions_of(manifest, run_dir))
+    except _runs_errors() as exc:
+        typer.echo(
+            f"error: run {run_dir.name} {done}, but its ledger rows weren't added: {exc}",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    for note in notes:
+        typer.echo(note)
 
 
 runs_app = typer.Typer(
@@ -1188,45 +1228,27 @@ def runs_pull(
         ),
     ] = "hub",
 ) -> None:
-    """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR), and add its ledger row.
+    """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR), and add its ledger rows.
 
     Each file or folder at the top of the run that the store holds replaces the local one,
     and what only runs/<run_id>/ holds, such as kernels.json, stays. A run that held a GPU
-    and has ended gets its row in docs/compute-ledger.md from its manifest, once.
+    gets a row in docs/compute-ledger.md for each of its sessions that has ended, once.
+    --store kaggle is forge kaggle output.
     """
-    from forge.eval.run_files import MANIFEST_FILE
     from forge.ops.hub import LocalRunStore, hub_store
-    from forge.ops.ledger import record_run
     from forge.ops.paths import runs_dir
 
     if store == "kaggle":
         kaggle_output(run_id)
-        if not (runs_dir() / run_id / MANIFEST_FILE).is_file():
-            # A spike's output, or a kernel that failed before its run began.
-            typer.echo("ledger: no row, the output has no manifest; use forge ledger add")
-            return
-    pulled_from = None
+        return
     try:
-        local = LocalRunStore(runs_dir())
-        if store == "hub":
-            hub = hub_store()
-            hub.pull(run_id, local.root / run_id)
-            pulled_from = str(hub)
-        manifest = local.get_manifest(run_id)
+        local, hub = LocalRunStore(runs_dir()), hub_store()
+        hub.pull(run_id, local.root / run_id)
     except _runs_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
-    if pulled_from is not None:
-        typer.echo(f"run {run_id}: {local.root / run_id}, from {pulled_from}")
-    typer.echo(f"{manifest.kind} run, {manifest.status}")
-    try:
-        _, note = record_run(manifest)
-    except _runs_errors() as exc:
-        typer.echo(
-            f"error: run {run_id} is pulled, but its ledger row wasn't added: {exc}", err=True
-        )
-        raise typer.Exit(1) from exc
-    typer.echo(note)
+    typer.echo(f"run {run_id}: {local.root / run_id}, from {hub}")
+    _log_run(local.root / run_id, "is pulled")
 
 
 @runs_app.command("push")

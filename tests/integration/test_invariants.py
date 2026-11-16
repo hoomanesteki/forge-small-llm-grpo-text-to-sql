@@ -7,7 +7,8 @@ I4 (a run's report, for now): every number in it traces to the run's stored scor
 manifest.
 I5: the fast comparator agrees with the official evaluator on at least 98% of predictions.
 I6: the same greedy eval run twice agrees within 0.5 points of official EX.
-I7: every GPU run kept here has a ledger row, and the ledger's cash stays within $50.
+I7: every session of a GPU run kept here has a ledger row, and the ledger's cash stays
+within $50.
 """
 
 from __future__ import annotations
@@ -58,9 +59,10 @@ from forge.eval.run_files import read_run
 from forge.eval.runner import run_eval
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend
-from forge.ops.hub import LocalRunStore, open_store
+from forge.ops.hub import LocalRunStore
 from forge.ops.ledger import LedgerRow, append, audit, read_rows, record_run
-from forge.ops.paths import ledger_path
+from forge.ops.paths import ledger_path, runs_dir
+from forge.ops.sessions import Session, begin, end, sessions_of
 from forge.sql import sandbox
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
@@ -566,13 +568,22 @@ def _gpu_run(run_id: str, platform: str, gpu: str | None) -> RunManifest:
     )
 
 
+def _with_sessions(store: LocalRunStore) -> list[tuple[RunManifest, list[Session]]]:
+    """Each run ``store`` keeps, with its sessions, as I7 checks them."""
+    kept = []
+    for run in store.runs():
+        manifest = store.get_manifest(run)
+        kept.append((manifest, sessions_of(manifest, store.root / run)))
+    return kept
+
+
 @pytest.mark.phase(3)
 def test_i7_gpu_runs_in_ledger(tmp_path: Path) -> None:
-    # The gate's check: every run committed under docs/runs or kept in the local runs
-    # store, against the real ledger. No Kaggle run exists yet, so only the FG-291 pilot,
-    # whose local-mps row must name its platform, is checked for now.
-    stores = [LocalRunStore(ROOT / "docs" / "runs"), open_store("local")]
-    kept = [store.get_manifest(run) for store in stores for run in store.runs()]
+    # The gate's check: every session of every run committed under docs/runs or kept in
+    # the local runs store, against the real ledger. No Kaggle run exists yet, so only the
+    # FG-291 pilot, whose local-mps row must name its platform, is checked for now.
+    stores = [LocalRunStore(ROOT / "docs" / "runs"), LocalRunStore(runs_dir())]
+    kept = [run for store in stores for run in _with_sessions(store)]
     assert kept, "docs/runs holds the FG-291 pilot"
     assert audit(kept, read_rows(ledger_path())) == []
 
@@ -583,14 +594,32 @@ def test_i7_gpu_runs_in_ledger(tmp_path: Path) -> None:
     laptop = _gpu_run("2026-11-20-tiny-eval-abc1234", "local-cpu", None)
     for manifest in (kaggle, pilot, laptop):
         store.put_manifest(manifest)
-    found = [store.get_manifest(run) for run in store.runs()]
+    found = _with_sessions(store)
     # Only a run on a budget platform needs a row: a pilot's is welcome, not required.
     assert audit(found, read_rows(ledger)) == [
         f"run {kaggle.run_id} ran on kaggle, and the ledger has no row for it"
     ]
     # Pulling the run writes the row that settles it.
-    row, _ = record_run(kaggle, ledger)
-    assert row is not None and row.hours == 0.5
+    rows, _ = record_run(kaggle, path=ledger)
+    assert [row.hours for row in rows] == [0.5]
+    assert audit(found, read_rows(ledger)) == []
+
+    # A resumed run needs a row for each session: one pulled after its first still lacks
+    # the second's.
+    resumed = _gpu_run("2026-11-20-qwen3-4b-eval-def5678", "kaggle", "Tesla T4")
+    folder = store.root / resumed.run_id
+    begin(folder, resumed.started_at)
+    end(folder, resumed.started_at + timedelta(hours=11), "stopped_time_guard")
+    record_run(resumed, sessions_of(resumed, folder), ledger)
+    begin(folder, resumed.started_at + timedelta(days=1))
+    end(folder, resumed.started_at + timedelta(days=1, hours=2), "finished")
+    store.put_manifest(resumed)
+    found = _with_sessions(store)
+    assert audit(found, read_rows(ledger)) == [
+        f"run {resumed.run_id} ran on kaggle, and the ledger has no row for its session 2"
+    ]
+    rows, _ = record_run(resumed, sessions_of(resumed, folder), ledger)
+    assert [(row.session, row.hours) for row in rows] == [(2, 2.0)]
     assert audit(found, read_rows(ledger)) == []
 
     day = date(2026, 11, 20)

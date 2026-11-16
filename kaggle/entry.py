@@ -34,6 +34,14 @@ Whatever happens, a ``finally`` marks a manifest still ``running`` as failed and
 ``runs/<run_id>/status.json``: the stage reached, how the job ended (finished, failed or
 stopped_time_guard) and why. The script exits 0 either way, because a kernel that ends in
 an error might not keep its output; ``forge kaggle wait`` reads status.json instead.
+
+The GPU is held from the kernel's start to its end, setup and upload included, so that is
+the session the ledger counts. status.json gives its ``started_at`` and ``ended_at``, and
+the same span goes into the run's ``sessions.json`` (``forge.ops.sessions``): the session
+the job began in this kernel is stretched to it, or, when none began, as when a resumed
+job fails before its run starts again, the kernel's session is added. ``session`` in
+status.json is its number. The upload stage stretches it up to the upload first, so the
+run store's copy holds nearly all of it.
 """
 
 from __future__ import annotations
@@ -70,6 +78,8 @@ GIT_SHA_FILE = "GIT_SHA"
 REQUIREMENTS_FILE = "requirements-gpu.txt"
 CHECKSUM_FILE = "spider.sha256"
 CODE_SHA_ENV = "FORGE_CODE_SHA"
+MANIFEST_FILE = "manifest.json"
+SESSIONS_FILE = "sessions.json"
 DEV_USAGE_ENV = "FORGE_DEV_USAGE"
 DEV_USAGE_FILE = "dev-usage.md"
 HOSTS = ("kaggle", "colab")
@@ -335,6 +345,7 @@ def upload_stage(kernel: Kernel) -> str:
     from forge.ops.hub import HubRunStore
 
     repo = kernel.args.run_store
+    _record_session(kernel.run_dir, kernel.status["started_at"], _now())
     try:
         HubRunStore(repo, token=token).put_folder(kernel.args.run_id, kernel.run_dir)
     # The run is complete in the kernel output whatever the Hub says, so a failed upload
@@ -373,6 +384,7 @@ def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
         "error": None,
         "started_at": _now(),
         "ended_at": None,
+        "session": None,
         "stages": {},
     }
     kernel = Kernel(args, run or _run, status)
@@ -399,6 +411,9 @@ def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
         signal.signal(signal.SIGTERM, previous)
         _close_manifest(kernel.run_dir)
         status["ended_at"] = _now()
+        status["session"] = _record_session(
+            kernel.run_dir, status["started_at"], status["ended_at"]
+        )
         _write_json(kernel.run_dir / STATUS_FILE, status)
         print(f"[forge] {args.job} {args.run_id}: {status['status']}", flush=True)
     return 0
@@ -406,12 +421,41 @@ def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
 
 def _close_manifest(run_dir: Path) -> None:
     """Mark failed a manifest that a crash or a kill left ``running``."""
-    path = run_dir / "manifest.json"
+    path = run_dir / MANIFEST_FILE
     if path.is_file():
         manifest = json.loads(path.read_text(encoding="utf-8"))
         if manifest.get("status") == "running":
             manifest.update(status="failed", ended_at=_now())
             _write_json(path, manifest)
+
+
+def _record_session(run_dir: Path, started_at: str, ended_at: str) -> int | None:
+    """Make the run's session in this kernel span ``started_at`` to ``ended_at``, the
+    kernel's, and return its number; None when the kernel holds no run.
+
+    The session the job began here is the run's last, begun after the kernel started. A
+    session still running then failed. When the job began none, the kernel's is added, with
+    the run's status if the run ended in this kernel, and failed if not.
+    """
+    manifest_path = run_dir / MANIFEST_FILE
+    if not manifest_path.is_file():
+        return None
+    path = run_dir / SESSIONS_FILE
+    sessions = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    start = datetime.fromisoformat(started_at)
+    if sessions and datetime.fromisoformat(sessions[-1]["started_at"]) >= start:
+        session = sessions[-1]
+        if session["status"] == "running":
+            session["status"] = "failed"
+    else:
+        run = json.loads(manifest_path.read_text(encoding="utf-8"))
+        ended = run.get("ended_at")
+        here = ended is not None and datetime.fromisoformat(ended) >= start
+        session = {"status": run["status"] if here else "failed"}
+        sessions.append(session)
+    session.update(started_at=started_at, ended_at=ended_at)
+    _write_json(path, sessions)
+    return len(sessions)
 
 
 def _stop(signum: int, frame: object) -> None:

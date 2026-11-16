@@ -8,6 +8,7 @@ commit comes from the code dataset. A vLLM job runs with vLLM faked.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from forge.core.types import RunManifest
 from forge.data.splits import load_val
 from forge.eval.config import EvalConfig
 from forge.ops.dev_usage import read_uses
+from forge.ops.sessions import read_sessions
 from tests.fakes import FakeVllm, gold_reply
 from tests.kernel import SHA, argv, build_inputs, kernel_folder
 from tests.spike import entry
@@ -43,6 +45,12 @@ def test_entry_runs_an_eval_job_end_to_end(
     assert (work / "runs" / "run-1" / "eval" / "val-report.md").is_file()
     scores = (work / "runs" / "run-1" / "eval" / "val-scores.jsonl").read_text().splitlines()
     assert len(scores) == 6
+    # The run's one session is the whole kernel's, which held the GPU from start to end.
+    (session,) = read_sessions(work / "runs" / "run-1") or []
+    assert (session.status, status["session"]) == ("finished", 1)
+    assert session.started_at == datetime.fromisoformat(status["started_at"])
+    assert session.ended_at == datetime.fromisoformat(status["ended_at"])
+    assert run.started_at >= session.started_at and run.gpu_hours > 0
 
     # The preflight ran the same job on five examples, in a run of its own.
     preflight = work / "preflight" / "run-1-preflight"

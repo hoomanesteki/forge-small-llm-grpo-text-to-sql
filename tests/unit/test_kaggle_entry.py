@@ -15,14 +15,16 @@ import sys
 import textwrap
 import types
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from forge.data.spider import raw_files
+from forge.eval import run_files
 from forge.eval.config import HOSTS
-from forge.ops import kaggle, manifest
+from forge.ops import kaggle, manifest, sessions
 from tests.fakes import FakeHub
 from tests.kernel import KERNEL_ENV, SHA, WHEEL, argv, build_inputs, kernel_folder
 from tests.spike import ENTRY, entry
@@ -97,6 +99,8 @@ def test_names_match_forges() -> None:
     assert script.CHECKSUM_FILE == kaggle.CHECKSUM_FILE
     assert kaggle.REQUIREMENTS.name == script.REQUIREMENTS_FILE
     assert script.CODE_SHA_ENV == manifest.CODE_SHA_ENV
+    assert script.MANIFEST_FILE == run_files.MANIFEST_FILE
+    assert script.SESSIONS_FILE == sessions.SESSIONS_FILE
     assert script.HOSTS == HOSTS
     assert set(script.STAGE_FUNCTIONS) == set(script.STAGES)
 
@@ -297,7 +301,12 @@ def test_secrets_are_recorded_by_where_they_came_from_never_by_value(
             },
         )
     ]
-    assert hub.files == {"runs/run-1/manifest.json": b'{"status": "finished"}'}
+    assert set(hub.files) == {"runs/run-1/manifest.json", "runs/run-1/sessions.json"}
+    assert hub.files["runs/run-1/manifest.json"] == b'{"status": "finished"}'
+    # The store's copy holds the kernel's session up to its upload; the end comes after.
+    (uploaded,) = json.loads(hub.files["runs/run-1/sessions.json"])
+    assert uploaded["started_at"] == status["started_at"]
+    assert uploaded["ended_at"] <= status["ended_at"]
     assert TOKEN not in capsys.readouterr().out
     assert TOKEN not in (run / "status.json").read_text()
 
@@ -324,3 +333,73 @@ def test_a_resume_starts_from_the_last_attempts_output(
     assert status_of(kernel_root)["status"] == "finished"
     # The preflight sees a fresh folder; the job, the last attempt's files.
     assert seen == [[], ["eval", "eval/val-scores.jsonl", "manifest.json"]]
+
+
+def _sessions_of(root: Path) -> list[dict[str, Any]]:
+    path = root / "working" / "runs" / "run-1" / "sessions.json"
+    data: list[dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))
+    return data
+
+
+@pytest.mark.phase(3)
+def test_the_run_session_spans_the_whole_kernel(
+    kernel_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def job(kernel: Any, preflight: bool) -> str:
+        if not preflight:
+            # As run_eval keeps it: the session spans the job alone.
+            now = datetime.now(UTC)
+            sessions.begin(kernel.run_dir, now)
+            sessions.end(kernel.run_dir, now, "finished")
+            ended = {"status": "finished", "ended_at": now.isoformat()}
+            (kernel.run_dir / "manifest.json").write_text(json.dumps(ended))
+        return "finished"
+
+    monkeypatch.setitem(script.JOBS, "eval", job)
+
+    script.main(argv(kernel_root), run=lambda c: None)
+
+    status = status_of(kernel_root)
+    # Setup, preflight and upload hold the GPU too, so the session is the kernel's.
+    whole = {"started_at": status["started_at"], "ended_at": status["ended_at"]}
+    assert _sessions_of(kernel_root) == [{**whole, "status": "finished"}]
+    assert status["session"] == 1
+    run = kernel_root / "working" / "runs" / "run-1"
+    (session,) = sessions.read_sessions(run) or []
+    assert (session.started_at, session.ended_at) == tuple(
+        datetime.fromisoformat(whole[name]) for name in ("started_at", "ended_at")
+    )
+
+
+@pytest.mark.phase(3)
+def test_a_resume_that_fails_before_its_run_starts_is_a_failed_session(
+    kernel_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    last = kernel_root / "input" / "forge-run-1" / "runs" / "run-1"
+    last.mkdir(parents=True)
+    first = {"started_at": "2026-11-15T09:00:00+00:00", "ended_at": "2026-11-15T20:15:00+00:00"}
+    stopped = {**first, "status": "stopped_time_guard"}
+    (last / "manifest.json").write_text(json.dumps(stopped))
+    (last / "sessions.json").write_text(json.dumps([stopped]))
+
+    def refused(kernel: Any, preflight: bool) -> str:
+        if not preflight:
+            raise script.JobError("the run can't resume on other data")
+        return "finished"
+
+    monkeypatch.setitem(script.JOBS, "eval", refused)
+
+    script.main(argv(kernel_root, "--resume"), run=lambda c: None)
+
+    status = status_of(kernel_root)
+    assert (status["status"], status["session"]) == ("failed", 2)
+    # The first session stays as it was; the kernel's hours are a session of their own.
+    whole = {"started_at": status["started_at"], "ended_at": status["ended_at"]}
+    assert _sessions_of(kernel_root) == [stopped, {"status": "failed", **whole}]
+
+    # A kernel that fails before its job holds no run, so it has no session.
+    early = kernel_root / "early"
+    early.mkdir()
+    script.main(argv(early), run=lambda c: None)
+    assert status_of(early)["session"] is None
+    assert not (early / "working" / "runs" / "run-1" / "sessions.json").exists()

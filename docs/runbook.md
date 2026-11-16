@@ -73,9 +73,14 @@ Every GPU job goes through `forge kaggle run`, on a clean commit that passed `ma
 
 ```bash
 uv run forge kaggle run --job eval --config configs/eval/<name>.yaml   # prints the run id
-uv run forge kaggle wait <run_id>      # until COMPLETE, ERROR or CANCEL_*
+uv run forge kaggle wait <run_id>      # until COMPLETE, ERROR or CANCEL_*, then the ledger row
 uv run forge kaggle output <run_id>    # the kernel's output into runs/<run_id>/
 ```
+
+Once the job has ended, `forge kaggle wait` adds its kernel session's row to
+`docs/compute-ledger.md`, and `forge kaggle output` does too if `wait` didn't, each once a
+session, as `forge runs pull` does (see Run store). A kernel that ends ERROR or CANCEL_*
+has no job outcome to read, so `wait` says to fetch what it kept with `output`.
 
 `forge kaggle run` stops at the first check that fails, before anything is uploaded:
 
@@ -89,8 +94,9 @@ uv run forge kaggle output <run_id>    # the kernel's output into runs/<run_id>/
    kernel mounts that version by number, with `<owner>/forge-spider`, which must exist
    (`forge kaggle publish-data`).
 4. The estimate must fit what the ledger (`forge ledger summary`) leaves of the week's 30
-   hours, and what `kaggle quota -v` says is left when it answers. `--allow-over-budget`
-   pushes anyway; the eval run's manifest config then holds `allow_over_budget: true`.
+   hours, over the last seven UTC days, and what `kaggle quota -v` says is left when it
+   answers. `--allow-over-budget` pushes anyway; the eval run's manifest config then holds
+   `allow_over_budget: true`.
 5. It prints the estimate and asks, unless `--yes`.
 6. It writes `build/kaggle-kernel/<run_id>/`: `kaggle/entry.py` with the job's arguments
    in `KERNEL_ARGV`, and private GPU metadata with internet. It pushes with
@@ -105,6 +111,12 @@ The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the k
 run again from the same commit with the same options, as `<owner>/forge-<run_id>-<n>`,
 mounting the last attempt's kernel so the eval carries on from its stored files.
 
+Dates are UTC everywhere Forge writes one: a run id's, a ledger row's, a
+`docs/dev-usage.md` row's, and the last day of `forge ledger summary`'s week. `forge ledger
+add` takes today's UTC date unless `--on` names another. West of UTC, a job pushed in the
+evening is dated the next day in all of them, and this week's window counts its hours at
+once. Rows already committed keep the dates they were written with.
+
 In the kernel, `entry.py` runs its stages in order: env (the interpreter, for the log),
 code (the code dataset's `GIT_SHA` must be the pushed commit), install (`pip install
 --no-deps` the wheel, then `requirements-gpu.txt`; it names any package the wheel needs
@@ -115,6 +127,17 @@ in `preflight/`), job, and upload (`runs/<run_id>/` to the Hub run store, only w
 marks a manifest left `running` as failed. It exits 0 even when the job fails, since a
 kernel that ends in an error might not keep its output, so a COMPLETE kernel is not yet a
 finished job: `forge kaggle wait` reads `status.json` and exits 0 only for `finished`.
+
+Sessions. The kernel holds its GPU from its start to its end, the setup, preflight, model
+load and upload included, so that is the session its ledger row counts. `status.json`
+gives the session's `started_at` and `ended_at` and its number in the run (`session`), and
+the run's `sessions.json` gets the same span: the session the job began is stretched to
+the kernel's, or, when a resumed job fails before its run starts again, the kernel's
+session is added as failed. A kernel that fails before its job holds no run and logs no
+row; add it with `forge ledger add`. The upload stage first stretches the session up to the
+upload, so the Hub's copy misses only the upload's own minutes; `forge kaggle wait` logs
+the whole session first. A resumed run's output holds every session so far, so a session
+that was never waited for still gets its row.
 
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the
@@ -175,14 +198,21 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 
 - A pull replaces each top-level file or folder of the run that the store holds and keeps the
   rest, such as `kernels.json`, as `forge kaggle output` does.
-- A pull, from either store, also writes the run's row in `docs/compute-ledger.md` from its
-  manifest, once a run id: the UTC date it started, its platform and GPU, its wall-clock
-  hours from `started_at` to `ended_at`, what it was and its cost. A `local-cpu` run gets no
-  row, and a run still `running` none yet: pull it again once it ends. Kernel output with
-  no manifest, such as a spike's, gets none either; add it with `forge ledger add`.
-- Invariant I7 (`tests/integration/test_invariants.py`) checks that every `kaggle`, `colab`
-  or `modal` run under `docs/runs/` and `runs/` has a row, that a run's row names its
-  platform, and that the ledger's cash stays within $50.
+- A pull, from either store, also writes a row in `docs/compute-ledger.md` for each of the
+  run's sessions that has ended, once a session, as `forge kaggle wait` and `output` do:
+  the UTC date the session started, the run's platform and GPU, the session's wall-clock
+  hours, what the run was and how the session ended, and the run's cost so far less what
+  its earlier rows hold. A run's `sessions.json` lists its sessions, one an attempt
+  (`forge.ops.sessions`); a run without one has one session, from its manifest's
+  `started_at` to `ended_at`. A later session's row ends its purpose with `(session N)`.
+  A `local-cpu` run gets no row, and a session still running none yet: pull the run again
+  once it ends. A session killed before it could record its end has no hours to log, so
+  the pull names it; add it with `forge ledger add`, its purpose ending `(session N)`.
+  Kernel output with no manifest, such as a spike's, gets no row either; add it the same
+  way.
+- Invariant I7 (`tests/integration/test_invariants.py`) checks that every session of every
+  `kaggle`, `colab` or `modal` run under `docs/runs/` and `runs/` has a row, that a run's
+  rows name its platform, and that the ledger's cash stays within $50.
 - `forge eval run --store hub` fetches the run from the store when `runs/<run_id>/` has no
   manifest, so a run another machine started resumes here, and puts the folder in the store
   when the run ends, finished or failed. If that upload fails after the run finished, the
@@ -220,9 +250,11 @@ before the next one.
   `stopped_time_guard` in its manifest and goes to its run store like a run that ended.
   It resumes like a failed one: the same `--run-id`, or `forge kaggle run --resume`.
   `forge eval run` and the kernel's entry script don't pass a deadline yet.
-- A manifest's `gpu_hours` is its wall-clock time from `started_at` to `ended_at` on a
-  platform with a GPU (`local-mps` too), and none on `local-cpu`. A resumed run keeps its
-  first `started_at`, so its hours include the time between its sessions.
+- A resumed run keeps its first `started_at`, but each attempt is a session of its own in
+  the run's `sessions.json`, with its own start, end and status. A manifest's `gpu_hours`
+  adds up its sessions' wall-clock hours on a platform with a GPU (`local-mps` too), and is
+  none on `local-cpu`; each session gets its own ledger row. The time between two sessions
+  holds no GPU, so it counts in neither.
 
 ## Baselines
 
@@ -242,8 +274,8 @@ Push them in this order, from one clean commit that passed `make smoke`:
 
 The same model's runs from one commit on one day would share a default run id, so name
 each: `--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`.
-For each run, `forge kaggle wait <run_id>`, then `forge runs pull <run_id> --store kaggle`
-(or the hub store, with an `HF_TOKEN` in the kernel), which adds its ledger row. Render its
+For each run, `forge kaggle wait <run_id>`, which adds its ledger row, then `forge runs pull
+<run_id> --store kaggle` (or the hub store, with an `HF_TOKEN` in the kernel). Render its
 report on the laptop with `FORGE_DATA_DIR=data/spider uv run forge report run <run_id>`, so
 its rebuild compares the chart, and copy the folder whole to `docs/runs/`.
 `tests/integration/test_artifacts.py::test_phase3_baseline_reports_present` then checks

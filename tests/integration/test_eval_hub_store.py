@@ -75,6 +75,7 @@ def test_eval_run_store_hub_puts_the_run_in_the_hub(
         "eval/val-generations.jsonl",
         "eval/val-scores.jsonl",
         "manifest.json",
+        "sessions.json",
     ]
     assert RunManifest.model_validate_json(stored["manifest.json"]).status == "finished"
     # It looked for an earlier attempt first, then uploaded once, with no token to give.

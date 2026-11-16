@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shutil
 import subprocess
+import time
 import types
-from collections.abc import Sequence
-from datetime import date
+from collections.abc import Iterator, Sequence
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +20,11 @@ import pytest
 from typer.testing import CliRunner
 
 from forge import cli
+from forge.core.types import RunManifest
 from forge.eval.config import EvalConfig
-from forge.ops import kaggle, kaggle_job
+from forge.ops import clock, kaggle, kaggle_job
 from forge.ops.dev_usage import log_dev_use, read_uses
+from forge.ops.hub import manifest_bytes
 from forge.ops.kaggle import KaggleClient, KaggleError, check_kernel_metadata
 from forge.ops.kaggle_job import (
     COLAB_DIRS,
@@ -32,6 +36,8 @@ from forge.ops.kaggle_job import (
     plan_job,
     write_kernel,
 )
+from forge.ops.ledger import read_rows, summary
+from forge.ops.sessions import Session
 from tests.kernel import WHEEL
 from tests.spike import entry, load_script
 
@@ -184,9 +190,15 @@ def _eval(repo: Path, *extra: str) -> Any:
     return _run("--job", "eval", "--config", str(repo / "configs/eval/job.yaml"), *extra)
 
 
-def _spent(repo: Path, hours: float) -> None:
+def _today() -> date:
+    """Today's UTC date, which run ids and log rows take, whatever the machine's zone."""
+    return datetime.now(UTC).date()
+
+
+def _spent(repo: Path, hours: float, on: date | None = None) -> None:
     ledger = Path(repo.parent / "ledger.md")
-    row = f"| {date.today().isoformat()} | kaggle | T4 | {hours:.2f} | earlier-run | test | 0.00 |"
+    day = (on or _today()).isoformat()
+    row = f"| {day} | kaggle | T4 | {hours:.2f} | earlier-run | test | 0.00 |"
     ledger.write_text(f"# Compute ledger\n\n| a |\n|---|\n{row}\n", encoding="utf-8")
 
 
@@ -244,7 +256,7 @@ def test_refuses_over_budget(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     # Allowed, the job goes, and its run's config says it was over budget.
     result = _eval(repo, "--yes", "--allow-over-budget")
     assert result.exit_code == 0, result.output
-    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
     argv = _baked_argv(fake.pushed[0]["entry.py"])
     options = json.loads(argv[argv.index("--options") + 1])
     assert options == {"model": "gold", "backend": "fake", "limit": 5, "allow_over_budget": True}
@@ -269,7 +281,7 @@ def test_run_pushes_the_job_and_records_its_kernel(
     result = _eval(repo, "--yes")
 
     assert result.exit_code == 0, result.output
-    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
     kernel = f"{OWNER}/forge-{run_id}"
     assert f"code {OWNER}/forge-code/1 at {head[:7]}, data {OWNER}/forge-spider" in result.stdout
     assert "estimate 0.50 GPU h" in result.stdout
@@ -446,12 +458,12 @@ def test_dev_job_needs_a_reason_and_its_push_logs_the_look(
     result = _run("--job", "eval", "--config", str(dev), "--reason", "baseline", "--yes")
 
     assert result.exit_code == 0, result.output
-    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
     # The kernel gets the reason it needs to load dev, and the push logs the look here.
     argv = _baked_argv(fake.pushed[0]["entry.py"])
     options = json.loads(argv[argv.index("--options") + 1])
     assert options == {"model": "gold", "backend": "fake", "split": "dev", "reason": "baseline"}
-    assert read_uses(dev_log) == [(date.today().isoformat(), run_id, "baseline")]
+    assert read_uses(dev_log) == [(_today().isoformat(), run_id, "baseline")]
     assert "dev look 1 of 6 logged in docs/dev-usage.md" in result.stdout
 
     # Once the six looks are spent, a dev job is refused before anything is uploaded.
@@ -483,7 +495,7 @@ def test_spike_job_pushes_the_throughput_script(
     assert (meta["code_file"], meta["dataset_sources"]) == ("throughput.py", [])
     assert _baked_argv(fake.pushed[0]["throughput.py"]) == ["run"]
     assert fake.ran("kernels", "push")[0][-2:] == ["-t", "8100"]  # 1.5 h and half again
-    run_id = f"{date.today():%Y-%m-%d}-throughput-spike-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-throughput-spike-{head[:7]}"
     assert _record(repo, run_id)["job"] == "spike"
     # The same kernel scripts/kaggle_spike.py bundles, so FG-301's steps still meet.
     bundler = load_script(ROOT / "scripts" / "kaggle_spike.py", "forge_spike_bundler")
@@ -522,7 +534,7 @@ def test_emit_notebook_valid(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert f"{OWNER}/forge-code/1" in fetch and f"{OWNER}/forge-spider" in fetch
     assert run == "main()"
     notebook = load_script_text(code, repo.parent / "notebook_entry.py")
-    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
     config = repo / "configs" / "eval" / "job.yaml"
     plan = plan_job("eval", config, owner=OWNER, sha=head, runs_root=repo / "runs")
     assert plan.run_id == run_id
@@ -553,6 +565,8 @@ def test_wait_ends_on_the_kernel_state_and_the_jobs_own_status(
         f"{kernel}: RUNNING",
         f"{kernel}: COMPLETE",
         "job finished at stage upload; upload: skipped",
+        # This output holds no run's manifest, so nothing says what to log.
+        "ledger: no row, the output has no manifest; use forge ledger add",
     ]
     assert [c[3] for c in fake.ran("kernels", "status")] == [kernel] * 4
     assert script.STATUS_FILE == kaggle_job.STATUS_FILE
@@ -583,7 +597,7 @@ def test_output_brings_the_run_into_runs(repo: Path, monkeypatch: pytest.MonkeyP
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
     assert _eval(repo, "--yes", "--run-id", "run-1").exit_code == 0
     fake.outputs = {
-        "runs/run-1/manifest.json": "{}",
+        "runs/run-1/manifest.json": _kernel_manifest("run-1").decode(),
         "runs/run-1/eval/val-scores.jsonl": "{}\n",
         "preflight/run-1-preflight/manifest.json": "{}",
     }
@@ -602,6 +616,90 @@ def test_output_brings_the_run_into_runs(repo: Path, monkeypatch: pytest.MonkeyP
         "kernels.json",
         "manifest.json",
     ]
+    # The run it holds ended, so its session gets its ledger row.
+    logged = "eval run, finished\nledger: added 0.50 h on kaggle for run run-1\n"
+    assert result.stdout.endswith(logged)
+
+
+START = datetime(2026, 11, 16, 1, 0, tzinfo=UTC)
+
+
+def _kernel_manifest(run_id: str, **changes: Any) -> bytes:
+    """The manifest of an eval job that ran in a kernel, finished half an hour in."""
+    fields: dict[str, Any] = {
+        "run_id": run_id,
+        "kind": "eval",
+        "git_sha": "c" * 40,
+        "config": {"split": "val"},
+        "config_hash": "4" * 64,
+        "data_manifest_hash": "5" * 64,
+        "model_ref": "gold",
+        "platform": "kaggle",
+        "gpu": "Tesla T4",
+        "seed": 0,
+        "started_at": START,
+        "ended_at": START + timedelta(minutes=30),
+        "status": "finished",
+        **changes,
+    }
+    return manifest_bytes(RunManifest(**fields))
+
+
+def _ended(run_id: str, status: str, sessions: list[Session]) -> dict[str, str]:
+    """A kernel's output for a job that ended with ``status``: status.json, the manifest
+    and the run's sessions, the last one the kernel's own."""
+    last = sessions[-1]
+    assert last.ended_at is not None
+    record = {"status": status, "stage": "upload", "stages": {}}
+    record |= {"started_at": last.started_at.isoformat(), "ended_at": last.ended_at.isoformat()}
+    manifest = _kernel_manifest(run_id, status=status, ended_at=last.ended_at)
+    return {
+        f"runs/{run_id}/status.json": json.dumps({**record, "session": len(sessions)}),
+        f"runs/{run_id}/manifest.json": manifest.decode(),
+        f"runs/{run_id}/sessions.json": json.dumps([s.to_json() for s in sessions]),
+    }
+
+
+@pytest.mark.phase(3)
+def test_wait_and_output_log_each_kernel_session_once(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
+    assert _eval(repo, "--yes", "--run-id", "run-1").exit_code == 0
+    ledger = repo.parent / "ledger.md"
+    # The kernel's whole session, setup and upload included, which the time guard ended.
+    first = Session(START, START + timedelta(hours=11, minutes=15), "stopped_time_guard")
+    fake.outputs = _ended("run-1", "stopped_time_guard", [first])
+
+    waited = CliRunner().invoke(cli.app, ["kaggle", "wait", "run-1"])
+
+    assert waited.exit_code == 1, waited.output
+    assert waited.stdout.endswith(
+        "eval run, stopped_time_guard\nledger: added 11.25 h on kaggle for run run-1\n"
+    )
+    # Fetching the output after, or pulling it, logs the session no second time.
+    for args in (["kaggle", "output", "run-1"], ["runs", "pull", "run-1", "--store", "kaggle"]):
+        again = CliRunner().invoke(cli.app, args)
+        assert again.exit_code == 0, again.output
+        assert again.stdout.endswith("ledger: run run-1 has its row already\n")
+
+    # Resumed in a second kernel two days later: its output holds both sessions, and only
+    # the second is new, with its own hour.
+    assert _eval(repo, "--yes", "--run-id", "run-1", "--resume").exit_code == 0
+    later = START + timedelta(days=2)
+    second = Session(later, later + timedelta(hours=1), "finished")
+    fake.outputs = _ended("run-1", "finished", [first, second])
+
+    waited = CliRunner().invoke(cli.app, ["kaggle", "wait", "run-1"])
+
+    assert waited.exit_code == 0, waited.output
+    assert waited.stdout.endswith(
+        "ledger: session 1 of run run-1 has its row already\n"
+        "ledger: added 1.00 h on kaggle for session 2 of run run-1\n"
+    )
+    assert [(row.hours, row.session) for row in read_rows(ledger)] == [(11.25, 1), (1.0, 2)]
+    # The output wait read went to a scratch folder: runs/ holds what output fetched.
+    assert json.loads((repo / "runs" / "run-1" / "sessions.json").read_text()) == [first.to_json()]
 
 
 @pytest.mark.phase(3)
@@ -654,3 +752,74 @@ def test_run_outside_a_checkout_is_one_error_line(
     assert result.exit_code == 1, result.output
     assert f"error: {plain} is not in a git checkout" in result.stderr
     assert isinstance(result.exception, SystemExit)
+
+
+# 19:30 on a Sunday evening in Honolulu, ten hours west of UTC, is already Monday in UTC.
+EVENING = datetime(2026, 11, 16, 5, 30, tzinfo=UTC)
+LOCAL_DAY, UTC_DAY = date(2026, 11, 15), date(2026, 11, 16)
+
+
+class _Evening(datetime):
+    """A clock stopped at ``EVENING``."""
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        local = EVENING.astimezone().replace(tzinfo=None)
+        return EVENING.astimezone(tz) if tz is not None else local
+
+
+@pytest.fixture
+def far_west_evening(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The machine ten hours west of UTC, its clocks stopped at ``EVENING``: the local date
+    is the day before the UTC one. The zone is put back afterwards."""
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "HST10"  # POSIX: needs no zone database
+    time.tzset()
+    # Both clocks a date can come from: the UTC one and, through time.time, the local one.
+    monkeypatch.setattr(clock, "datetime", _Evening)
+    monkeypatch.setattr(time, "time", EVENING.timestamp)
+    try:
+        yield
+    finally:
+        if before is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
+
+
+@pytest.mark.phase(3)
+def test_dates_follow_utc_far_west_of_it(
+    repo: Path, dev_log: Path, far_west_evening: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert (date.today(), clock.utc_today()) == (LOCAL_DAY, UTC_DAY)
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    dev = repo.parent / "dev.yaml"
+    dev.write_text("model: gold\nbackend: fake\nsplit: dev\nops: {est_gpu_hours: 0.5}\n")
+    push = ["--job", "eval", "--config", str(dev), "--reason", "baseline", "--yes"]
+    # Hours logged on today's UTC date count in this week's window, so the push is checked
+    # against them.
+    _spent(repo, 29.8, on=UTC_DAY)
+
+    refused = _run(*push)
+
+    assert refused.exit_code == 1, refused.output
+    assert "ledger: 0.20 of 30 h left this week" in refused.stdout
+    assert fake.ran("kernels") == []
+
+    pushed = _run(*push, "--allow-over-budget")
+
+    assert pushed.exit_code == 0, pushed.output
+    run_id = f"{UTC_DAY:%Y-%m-%d}-gold-eval-{head[:7]}"
+    assert _record(repo, run_id)["kernels"][0]["over_budget"] is True
+    # The dev look the push spends is dated as its run id is.
+    assert read_uses(dev_log) == [(UTC_DAY.isoformat(), run_id, "baseline")]
+    # So is a row added by hand, and the window counts it with the others.
+    by_hand = ["--platform", "kaggle", "--hours", "0.1", "--purpose", "the push, by hand"]
+    added = CliRunner().invoke(cli.app, ["ledger", "add", *by_hand, "--run-id", run_id])
+    assert added.exit_code == 0, added.output
+    assert [row.date for row in read_rows(repo.parent / "ledger.md")] == [UTC_DAY, UTC_DAY]
+    week = summary()
+    assert week.quota_hours_window == pytest.approx(29.9)
+    assert "of 30 (remaining 0.10)" in week.render()
