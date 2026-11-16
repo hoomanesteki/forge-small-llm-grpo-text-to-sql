@@ -834,12 +834,12 @@ Write docs/gates/final-review.md, ranked by severity.
 | E06 | Evaluation harness | T2 | 2 | 28 |
 | E07 | Kaggle and Hub operations | T3 | 3 | 22 |
 | E08 | Baselines and model choice | T2 | 3 | 3 |
-| E09 | Supervised fine-tuning | T4 | 4 | 16 |
+| E09 | Supervised fine-tuning | T4 | 4 | 19 |
 | E10 | Rewards and GRPO | T4 | 5 | 30 |
 | E11 | Integrity, audit and ablations | T5 | 6 | 21 |
 | E12 | Packaging and demo | T6 | 7 | 16 |
 | E13 | Results and release | T6 | 8 | 11 |
-| | **Total** | | | **193** |
+| | **Total** | | | **196** |
 
 ### 6.3 Phase summary
 
@@ -849,12 +849,12 @@ Write docs/gates/final-review.md, ranked by severity.
 | 1 | Data and SQL environment | 8 | 28 | 0 | v0.1.0 | Gold SQL scores 100% fast EX on val; a write attempt is denied; comparator agrees with the official evaluator |
 | 2 | Evaluation harness | 8 | 28 | 0 | v0.2.0 | `make smoke` runs the whole eval pipeline on CPU and renders a report |
 | 3 | Free-GPU ops and baselines | 7 | 25 | 4.5 | v0.3.0 | One command runs a GPU eval on Kaggle and pulls the report; model chosen |
-| 4 | Supervised fine-tuning | 5 | 16 | 4.5 | v0.4.0 | SFT adapter beats base on val |
+| 4 | Supervised fine-tuning | 6 | 19 | 4.5 | v0.4.0 | SFT adapter beats base on val |
 | 5 | Rewards and GRPO | 8 | 30 | 17.5 | v0.5.0 | GRPO adapter beats SFT on val; dev evaluated once |
 | 6 | Integrity and ablations | 6 | 21 | 11 | v0.6.0 | Audit report with 3+ hacks fixed; ablation table |
 | 7 | Packaging and demo | 5 | 16 | 0 | v0.7.0 | `ollama run forge-sql` answers locally; public Space works |
 | 8 | Results and release | 4 | 11 | 0 | v1.0.0 | Results page from manifests; fresh-clone smoke passes |
-| | **Total** | **57** | **193** | **about 37.5 + 6 reserve** | | |
+| | **Total** | **58** | **196** | **about 37.5 + 6 reserve** | | |
 
 Velocity assumption: about 12 to 18 points per working day, plus waiting for GPU runs, so about 3 to 4 weeks part-time. GPU phases overlap with CPU work on the next phase's stories while runs are going.
 
@@ -881,7 +881,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 **Demo at the end.**
 - CI is green on a PR to `dev`.
 - `uv run forge doctor` prints a table with Python, uv, Kaggle auth, Hugging Face auth, the run store repo and free disk space, all OK.
-- `scripts/import_backlog.py --dry-run` lists 57 stories and 193 points.
+- `scripts/import_backlog.py --dry-run` lists 58 stories and 196 points.
 - `uv run forge ledger summary` shows 0 GPU hours and $0.
 
 **Entry criteria.** A GitHub account with `gh` authenticated, `uv` installed, and Docker not required.
@@ -964,7 +964,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
   - `scripts/import_backlog.py`: creates milestones, labels and one issue per story. Idempotent by story ID. Options `--dry-run` and `--phase`.
   - `scripts/check_story_tests.py --phase N`: confirms each named test exists, using `ast` for Python.
 - **Acceptance criteria:**
-  - [ ] The dry run shows 57 stories, 193 points, 9 phases, and 11 stories labeled GPU.
+  - [ ] The dry run shows 58 stories, 196 points, 9 phases, and 11 stories labeled GPU.
   - [ ] A second import run creates nothing new.
 - **Tests:** `tests/unit/test_plan_parser.py::test_parses_story_blocks`, `tests/unit/test_plan_parser.py::test_totals_match_plan`, `tests/unit/test_check_story_tests.py::test_reports_missing_test`
 - **Files:** `scripts/plan_parser.py`, `scripts/import_backlog.py`, `scripts/check_story_tests.py`
@@ -1578,6 +1578,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 | FG-403 | SFT trainer with CPU smoke | E09 | 3 |
 | FG-404 | SFT runs on Kaggle | E09 | 3 |
 | FG-405 | SFT results and comparison | E09 | 2 |
+| FG-491 | Local SFT pilot on Apple silicon | E09 | 3 |
 
 #### FG-401 · SFT dataset builder
 - **Epic:** E09 · **Points:** 3 · **Branch:** `feat/fg-401-sft-data` · **Depends on:** FG-105
@@ -1654,6 +1655,23 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
   - [ ] The notes cite only report numbers.
 - **Tests:** `tests/integration/test_artifacts.py::test_phase4_compare_report_rebuildable`
 - **Files:** `docs/runs/**`, `docs/notes/sft.md`
+
+#### FG-491 · Local SFT pilot on Apple silicon
+- **Epic:** E09 · **Points:** 3 · **Branch:** `exp/fg-491-local-pilot-sft` · **Depends on:** FG-403, FG-291
+- **Story:** As the product owner, with the Kaggle and Hugging Face accounts still pending, I want the pilot model fine-tuned for real on the laptop's GPU and scored on val beside its FG-291 base run, so the SFT path meets a real model and the full train split before any GPU hour is spent.
+- **Build:** a found story; its runs are pilots, as ADR-0016 decides:
+  - `configs/sft/pilot-qwen25coder05b-mps.yaml` trains `configs/models.yaml`'s `pilot` at its commit with LoRA on `mps`, at ADR-0010's values but `max_length` 1,536, with gradient checkpointing and micro-batches that fit the laptop's memory. It trains 1 epoch of the train split or, if a 20-step timing probe shows the epoch would take more than about 2.5 h, a deterministic subset whose size the file sets.
+  - `forge train sft` leaves out a row longer than `max_length` tokens, prompt and reply as TRL's `SFTTrainer` encodes them, rather than letting TRL cut its reply, and the manifest counts the rows left out and trained on.
+  - `forge ledger record <run_id>` adds the ledger row of a run in `runs/` from its manifest, as `forge runs pull` does for a pulled run, so no hours are typed.
+  - Train from a clean commit, evaluate `checkpoints/final` on the full val split with the FG-291 eval config and `--adapter`, write its report and its comparison with the FG-291 run, add both ledger rows, and commit both runs under `docs/runs/`: the SFT run's manifest, config and `metrics.jsonl` without its weights, which stay in `runs/`, and the eval run whole. Pilot numbers are val only; FG-404 still trains the Kaggle runs.
+- **Acceptance criteria:**
+  - [ ] The pilot SFT config trains the pinned pilot model on `mps` at ADR-0010's values with `max_length` 1,536, and a subset's size, if it has one, is in the file.
+  - [ ] A row longer than `max_length` is left out and counted in the manifest, never cut.
+  - [ ] A local run's ledger row comes from its manifest, once.
+  - [ ] The SFT run is committed without weights: finished, `local-mps`, made from the clean commit its id ends with, on the train rows its manifest hashes, with its metrics and a `local-mps` ledger row.
+  - [ ] The adapter's val run is committed whole: the FG-291 settings plus that adapter, every val question once, `local-mps`, a ledger row, and a report and comparison that rebuild from their files, every number of the report traced (I4).
+- **Tests:** `tests/unit/test_train_config.py::test_sft_configs_start_from_adr_0010`, `tests/unit/test_backends.py::test_trl_accepts_every_setting`, `tests/unit/test_sft_run.py::test_rows_over_max_length_are_left_out_not_cut`, `tests/unit/test_ledger.py::test_ledger_record_adds_a_local_run_once`, `tests/integration/test_artifacts.py::test_sft_pilot_run_is_committed_without_weights`, `tests/integration/test_artifacts.py::test_sft_pilot_trained_on_the_rows_it_names`, `tests/integration/test_artifacts.py::test_sft_pilot_adapter_run_is_committed_whole`, `tests/integration/test_artifacts.py::test_sft_pilot_reports_rebuild_and_trace_to_their_files`
+- **Files:** `train/config.py`, `train/backends.py`, `train/sft.py`, `cli.py`, `configs/sft/pilot-qwen25coder05b-mps.yaml`, `docs/runs/**`
 
 ### Integration checkpoint 4
 - `make gate PHASE=4`: CPU tests, invariants, and `make smoke` (now eval plus SFT plus eval-of-adapter).
@@ -2304,7 +2322,7 @@ Gap closed (M3) = (GRPO − base) / (reference − base).
 | Base model already near ceiling (contamination) | Medium | Medium | Model choice requires headroom; BIRD OOD check; claim relative uplift |
 | Reward hacking slips through | Medium | High | Adversarial tests, audit detectors, official-evaluator agreement on rewarded samples |
 | A token leaks through a notebook or log | Low | High | Secrets only via Kaggle Secrets or env; doctor canary test; gitleaks; never print env |
-| Executor drift across 57 stories | Medium | Medium | Contract-drift check at each gate; small stories; CONTRIBUTING.md rules |
+| Executor drift across 58 stories | Medium | Medium | Contract-drift check at each gate; small stories; CONTRIBUTING.md rules |
 
 ### 9.2 Assumptions
 
