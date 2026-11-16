@@ -1019,10 +1019,14 @@ def test_main_comparison_skips_only_while_fg405_is_pending(
     assert fg405_comparison(runs=runs, pending=unlisted) == report
 
 
+def _number_list(text: str) -> list[str]:
+    """The numbers ``text`` states, in order, as a report writes them, leaving out its
+    names and a report's Generated time."""
+    return NUMBER.findall(_NAMES.sub(" ", GENERATED.sub(" ", text)))
+
+
 def _numbers(text: str) -> set[str]:
-    """The numbers ``text`` states, as a report writes them, leaving out its names and
-    a report's Generated time."""
-    return set(NUMBER.findall(_NAMES.sub(" ", GENERATED.sub(" ", text))))
+    return set(_number_list(text))
 
 
 @pytest.mark.phase(4)
@@ -1054,20 +1058,107 @@ def test_phase4_compare_report_rebuildable(monkeypatch: pytest.MonkeyPatch) -> N
     assert main in comparisons.get(main.parent.parent.name, []), comparisons
 
 
-def bullet_lists(text: str, folder: Path) -> dict[Path, list[int]]:
-    """The size of each bullet list in ``text``, by the comparison it reads: the last one
-    linked in it or above it, as a path from ``folder``."""
-    lists: dict[Path, list[int]] = {}
+def reading_blocks(text: str, folder: Path) -> list[tuple[Path | None, str]]:
+    """Each block of ``text`` between blank lines, with the comparison it reads: the last
+    one linked in it or above it, as a path from ``folder``."""
+    blocks: list[tuple[Path | None, str]] = []
     reading: Path | None = None
     for block in text.split("\n\n"):
         links = _COMPARISON_LINK.findall(block)
         if links:
             reading = (folder / links[-1]).resolve()
-        size = block.count("\n- ") + block.startswith("- ")
-        if size:
+        blocks.append((reading, block))
+    return blocks
+
+
+def _bullets(block: str) -> tuple[str, list[str]]:
+    """A block's text before its first bullet, and each bullet with the lines it wraps to."""
+    lead, *bullets = re.split(r"(?:^|\n)- ", block)
+    return lead, bullets
+
+
+def bullet_lists(text: str, folder: Path) -> dict[Path, list[int]]:
+    """The size of each bullet list in ``text``, by the comparison it reads."""
+    lists: dict[Path, list[int]] = {}
+    for reading, block in reading_blocks(text, folder):
+        _, bullets = _bullets(block)
+        if bullets:
             assert reading is not None, f"a list reads no comparison: {block[:60]!r}"
-            lists.setdefault(reading, []).append(size)
+            lists.setdefault(reading, []).append(len(bullets))
     return lists
+
+
+def report_lines(report: str) -> dict[str, list[list[str]]]:
+    """The numbers of each line of a compare report, in order, by the labels a reader cites
+    them under, casefolded: a table row's first cell, such as ``medium`` or
+    ``schema_link``, for that row, and a section's heading, such as ``McNemar's test``, for
+    every line under it."""
+    lines: dict[str, list[list[str]]] = {}
+    section = ""
+    for line in report.splitlines():
+        if line.startswith("## "):
+            section = line.removeprefix("## ").strip().casefold()
+            continue
+        numbers = _number_list(line)
+        row = line.split("|")[1].strip().casefold() if line.startswith("|") else ""
+        for label in {section, row} - {""}:
+            if numbers:
+                lines.setdefault(label, []).append(numbers)
+    return lines
+
+
+# Where a clause of a bullet ends: a full stop, a semicolon or a colon before a space.
+_CLAUSE_END = r"[.;:](?=\s|$)"
+
+
+def citations(bullet: str, labels: Collection[str]) -> list[tuple[str | None, list[str]]]:
+    """The numbers ``bullet`` states, in runs, each with the label of ``labels`` it named
+    last before them, casefolded. A run ends at the next label and at a clause's end; a
+    clause that names no label goes on with the one before it."""
+    # Longest first, so "valid sql" wins over a shorter label it starts with; with no
+    # labels, a pattern that never matches.
+    named = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
+    named = named or "(?!)"
+    token = re.compile(
+        rf"(?P<name>{_NAMES.pattern})|(?<!\w)(?P<label>{named})(?!\w)"
+        rf"|(?P<end>{_CLAUSE_END})|(?P<number>{NUMBER.pattern})",
+        re.IGNORECASE,
+    )
+    runs: list[tuple[str | None, list[str]]] = []
+    label: str | None = None
+    numbers: list[str] = []
+    for match in token.finditer(" ".join(bullet.split())):
+        kind, found = match.lastgroup, match.group().strip("`").casefold()
+        if kind == "number":
+            numbers.append(match.group())
+        elif kind != "name" or found in labels:
+            if numbers:
+                runs.append((label, numbers))
+                numbers = []
+            if kind != "end":
+                label = found
+    if numbers:
+        runs.append((label, numbers))
+    return runs
+
+
+def miscited(bullet: str, report: str) -> list[str]:
+    """Each run of numbers ``bullet`` states that isn't, in its order, on one line of
+    ``report`` that the label it is cited under names; empty when all are."""
+    lines = report_lines(report)
+    problems = []
+    for label, numbers in citations(bullet, lines):
+        cited = ", ".join(numbers)
+        if label is None:
+            problems.append(f"{cited}: after no row or section of the report: {bullet[:60]!r}")
+        elif not any(_in_order(numbers, line) for line in lines[label]):
+            problems.append(f"{cited}: not on the report's {label} line(s), in that order")
+    return problems
+
+
+def _in_order(numbers: Sequence[str], line: Sequence[str]) -> bool:
+    rest = iter(line)
+    return all(number in rest for number in numbers)
 
 
 @pytest.mark.phase(4)
@@ -1077,12 +1168,48 @@ def test_sft_notes_cite_only_report_numbers() -> None:
     linked = [(NOTES.parent / target).resolve() for target in _COMPARISON_LINK.findall(text)]
     assert COMPARISON in linked, linked
     assert all(path.is_file() for path in linked), linked
-    reported = set().union(*(_numbers(path.read_text(encoding="utf-8")) for path in linked))
-    # Three to five bullets a list, the pilot's and each one a later comparison adds, and no
-    # number in them or around them that those reports lack.
+    # Three to five bullets a list, the pilot's and each one a later comparison adds.
     lists = bullet_lists(text, NOTES.parent)
     assert COMPARISON in lists, lists
     assert all(3 <= size <= 5 for sizes in lists.values() for size in sizes), lists
-    assert sorted(_numbers(text) - reported) == []
+    # Every number comes from the comparison its block reads: in a bullet, from the row or
+    # section the bullet names before it, in the report's order, and around the lists,
+    # from anywhere in that report.
+    problems = []
+    for reading, block in reading_blocks(text, NOTES.parent):
+        report = reading.read_text(encoding="utf-8") if reading is not None else ""
+        lead, bullets = _bullets(block)
+        problems += [f"{n} is not in {reading}" for n in sorted(_numbers(lead) - _numbers(report))]
+        for bullet in bullets:
+            problems += miscited(bullet, report)
+    assert problems == []
     # And a list of its own on the main model's comparison, once that is committed.
     assert fg405_comparison().resolve() in lists, lists
+
+
+@pytest.mark.phase(4)
+def test_notes_check_ties_each_number_to_its_row() -> None:
+    report = COMPARISON.read_text(encoding="utf-8")
+    cited = "Only medium's interval clears zero, at +6.1 [+0.3, +12.4]"
+    assert miscited(cited, report) == []
+    # Numbers the report holds, but on another row, in another order or under no label:
+    # each one is somewhere in the report, so only a check by row tells them apart.
+    wrong = {
+        "Only medium's interval clears zero, at +4.9 [+0.0, +9.9]": "medium",
+        "schema_link failures fell from 266 to 2 (-63)": "schema_link",
+        "where went from 22 to 13 (+9)": "where",
+        "McNemar's test pairs clusters. The adapter alone is right on 71, the base on 115.": (
+            "mcnemar's test"
+        ),
+    }
+    for bullet, label in wrong.items():
+        assert _numbers(bullet) <= _numbers(report), bullet
+        assert miscited(bullet, report) == [
+            f"{', '.join(_number_list(bullet))}: not on the report's {label} line(s), in that order"
+        ], bullet
+    unlabeled = "The pilot gained on 115 questions."
+    assert miscited(unlabeled, report) == [
+        f"115: after no row or section of the report: {unlabeled!r}"
+    ]
+    # A label in a code span names its row as one in the text does.
+    assert miscited("`schema_link` fell from 266 to 203", report) == []
