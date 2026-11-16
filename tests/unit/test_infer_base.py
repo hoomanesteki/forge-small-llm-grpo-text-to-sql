@@ -3,12 +3,14 @@ and the fake backend."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
 
 from forge.core.types import GenParams, Prompt
 from forge.infer.base import (
+    MIN_TEMPERATURE,
     FakeBackend,
     InferenceBackend,
     chat_template_kwargs,
@@ -146,6 +148,22 @@ def test_check_params_refuses_what_no_backend_can_honor(params: GenParams, messa
         check_params(params)
     with pytest.raises(ValueError, match=message):
         FakeBackend(_unreachable).generate([_prompt("q-0", "How many singers?")], params)
+
+
+@pytest.mark.phase(3)
+def test_check_params_refuses_a_temperature_vllm_would_raise() -> None:
+    # vLLM decodes 0 < t < 0.01 at 0.01, while the manifest would record t.
+    for temperature in (1e-9, 0.005, 0.0099):
+        message = f"temperature must be 0 or at least 0.01, got {temperature}: vLLM would"
+        with pytest.raises(ValueError, match=re.escape(message)):
+            check_params(GenParams(temperature=temperature))
+        with pytest.raises(ValueError, match=re.escape(message)):
+            FakeBackend(_unreachable).generate(
+                [_prompt("q-0", "How many singers?")], GenParams(temperature=temperature)
+            )
+    assert MIN_TEMPERATURE == 0.01
+    for temperature in (0.0, MIN_TEMPERATURE, 0.7):
+        check_params(GenParams(temperature=temperature))
 
 
 @pytest.mark.phase(2)

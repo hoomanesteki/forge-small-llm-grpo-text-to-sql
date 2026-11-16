@@ -26,6 +26,10 @@ from forge.sql.extract import extract_sql
 # The chat template variable Qwen3 reads: false pre-fills an empty think block, so the
 # model answers without reasoning first (plan section 3.7).
 THINKING_FLAG = "enable_thinking"
+# vLLM decodes a temperature above 0 but below this one at this one (SamplingParams), with
+# a warning in the log only, so a run's manifest would record a temperature it never used.
+# Every backend refuses those, so a config decodes alike on each.
+MIN_TEMPERATURE = 0.01
 
 # A fake model: (prompt, params, sample_idx) -> reply text.
 ReplyFn = Callable[[Prompt, GenParams, int], str]
@@ -53,6 +57,12 @@ def check_params(params: GenParams) -> None:
     # Negated so that a NaN temperature fails too.
     if not params.temperature >= 0:
         raise ValueError(f"temperature must be 0 or more, got {params.temperature}")
+    if 0 < params.temperature < MIN_TEMPERATURE:
+        raise ValueError(
+            f"temperature must be 0 or at least {MIN_TEMPERATURE}, got {params.temperature}: "
+            f"vLLM would decode at {MIN_TEMPERATURE} instead, which the run's manifest "
+            "wouldn't say"
+        )
     if not 0 < params.top_p <= 1:
         raise ValueError(f"top_p must be above 0 and at most 1, got {params.top_p}")
     if params.max_new_tokens < 1:

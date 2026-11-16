@@ -12,12 +12,13 @@ template holds every one the model expects. So both backends give a model the sa
 ``LLM.chat`` would render with vLLM's own code, and a text prompt would be encoded by
 vLLM's rules, where a tokenizer that adds a BOS puts a second one before the template's.
 
-Decoding follows ``GenParams`` and nothing else (``sampling_kwargs``). vLLM applies a
-checkpoint's ``generation_config.json`` sampling defaults only to a call that passes no
-``SamplingParams``; from that file it takes the end token ids alone. Each prompt is seeded
-by its example id (``sample_seed``), and vLLM seeds the prompt's n samples with that seed,
-the seed plus 1 and so on, so a sample draws the same in any batch and two questions
-don't share their draws.
+Decoding follows ``GenParams`` and nothing else (``sampling_kwargs``), and ``check_params``
+refuses a temperature between 0 and ``MIN_TEMPERATURE``, which vLLM would raise. vLLM
+applies a checkpoint's ``generation_config.json`` sampling defaults only to a call that
+passes no ``SamplingParams``; from that file it takes the end token ids alone. Each prompt
+is seeded by its example id (``sample_seed``), and vLLM seeds the prompt's n samples with
+that seed, the seed plus 1 and so on, so a sample draws the same in any batch and two
+questions don't share their draws.
 
 ``tokens_in`` and ``tokens_out`` are vLLM's counts of the prompt and of the reply, and
 ``latency_ms`` is the wall time of the whole call, which every generation shares.

@@ -382,7 +382,10 @@ def eval_run(
     ] = "p1",
     n: Annotated[int, typer.Option("--n", min=1, help="Samples per question.")] = 1,
     temperature: Annotated[
-        float, typer.Option(min=0.0, help="0 decodes greedily; --n above 1 needs more.")
+        float,
+        typer.Option(
+            min=0.0, help="0 decodes greedily; sampling takes 0.01 or more, as --n above 1 does."
+        ),
     ] = 0.0,
     retry: Annotated[
         int,
