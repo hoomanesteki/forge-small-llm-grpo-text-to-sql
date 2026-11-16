@@ -35,7 +35,8 @@ Once `uv run forge doctor` shows Kaggle auth ok, on a clean commit that passed `
    It pushes a new version of the same `<owner>/forge-throughput-spike` kernel, on a T4,
    and prints the run id. Its timeout is the 1.5-hour estimate and half again, but the
    script starts no stage after 80 minutes and bounds each stage by its own cap and the
-   time left, so the session ends long before the cut.
+   time left, so the session ends long before the cut. The last 20 of those minutes are
+   kept for the 4-bit reference (see below).
 5. `uv run forge kaggle wait <run_id>` until it is `COMPLETE` or `ERROR`, then
    `uv run forge kaggle output <run_id>`. That brings back `spike-report.json` and the
    log, `forge-throughput-spike.log`, into `runs/<run_id>/kernel/`.
@@ -54,6 +55,11 @@ Once `uv run forge doctor` shows Kaggle auth ok, on a clean commit that passed `
 If the GPU kernel fails in its first 10 minutes, stop, read the log and reproduce on CPU
 before pushing again (plan section 5.3). The report says which stage failed and why.
 
+If `vllm:Qwen/Qwen3-8B:bnb` still ends skipped or timed out, which leaves FG-306's 4-bit
+allowance and FG-307's reference waiting, a second push can run vLLM's stages alone: the
+same command with a copy of the config whose `argv` is `[run, --stacks]`, no GRPO stack.
+That costs another GPU session, so it is the gatekeeper's call.
+
 ## What the spike script measures
 
 `throughput.py run` runs each stage in a child process and rewrites the report after
@@ -62,10 +68,15 @@ in the report. Each GPU stack gets a venv of its own, deleted after its benches,
 their pins conflict (question 3). The GRPO stacks come before vLLM's, since ADR-0006
 rests on their numbers, and each kind of stage is killed at its own cap
 (`STAGE_CAPS_MINUTES` in the script, in the report as `stage_caps_minutes`: 5 minutes for
-`env`, 2 for `secrets`, 15 for a download, 20 for an install, 25 for a GRPO bench and 15
-for a vLLM one, guessed before any session), so a stage that hangs costs its cap and not
-the rest of the 80 minutes. Each stage's `timeout_seconds` in the report is the smaller of
-its cap and the time left. The stages, in order:
+`env`, 2 for `secrets`, 15 for a download, 20 for an install, 25 for a GRPO bench, 15 for
+a vLLM one and 10 for the 4-bit load, guessed before any session), so a stage that hangs
+costs its cap and not the rest of the 80 minutes. FG-306 and FG-307 wait on the 4-bit
+answer, and the GRPO benches could take every minute before it, so the last 20 minutes
+(`bnb_reserve_minutes`) are kept for the reference's download, vLLM's install and the
+4-bit load, which runs right after that install: no stage before them may start or run in
+those minutes, and the fp16 benches after the load take what is left. Each stage's
+`timeout_seconds` in the report is the smaller of its cap and the time it may use. The
+stages, in order:
 
 | Stage | Answers | Records |
 |---|---|---|
@@ -74,8 +85,8 @@ its cap and the time left. The stages, in order:
 | `download:<model>` | 4, 5 | Seconds and bytes to fetch Qwen3 1.7B and 4B, and the commit fetched; Qwen3-8B's just before vLLM's stack |
 | `install:<stack>` | 3 | Seconds to install each stack, venv size, `uv pip freeze` of the venv's own packages, the installer used |
 | `grpo:<stack>:<model>` | 5 | Seconds per step over 10 steps, peak memory, TRL's log, for 4-bit LoRA with 6 generations of up to 256 tokens; the GPUs the trainer saw (`n_gpu`), the completions TRL scored a step, the mean completion length |
+| `vllm:Qwen/Qwen3-8B:bnb` | 4 | Whether vLLM loads FG-307's reference in 4-bit with bitsandbytes (`quantization="bitsandbytes"` over fp16 weights, as FG-306's backend asks), then the records of `vllm:<model>` on 10 prompts |
 | `vllm:<model>` | 4 | Load seconds, tokens per second on 100 prompts, greedy, fp16, up to 256 tokens a reply, device memory |
-| `vllm:Qwen/Qwen3-8B:bnb` | 4 | Whether vLLM loads FG-307's reference in 4-bit with bitsandbytes (`quantization="bitsandbytes"` over fp16 weights, as FG-306's backend asks), then the same records on 10 prompts |
 | `limit-probe` (own kernel) | 6 | A heartbeat rewritten every 30 s until the session is killed |
 
 The prompts are 100 made-up text-to-SQL questions in Forge's p1 format over a six-table
