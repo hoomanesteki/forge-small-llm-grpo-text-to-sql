@@ -48,6 +48,27 @@ The manifest's `sft_data` says which rows it trained on: the hash of the rows
 `forge data build-sft` builds, how many were over `max_length` and left out, and how many
 of the rest the subset took.
 
+Both FG-491 runs were made at db0d8d8, where `make smoke` fails: one assertion in
+`tests/smoke/test_sft_smoke.py` still expected the manifest's `sft_data` as it was before
+0789ce9 added `over_max_length` and `trained`. The next commit, 510e07d, which committed the
+runs, fixed that assertion and changed none of the code that trained and scored them:
+
+```bash
+$ git diff --stat db0d8d8 510e07d -- src configs kaggle scripts Makefile pyproject.toml uv.lock
+$ git diff --stat db0d8d8 510e07d -- tests/smoke
+ tests/smoke/test_sft_smoke.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+```
+
+The first prints nothing. The commit's other 17 files are the checks of the committed runs
+in `tests/integration/test_artifacts.py` and `tests/integration/test_invariants.py`, the
+runs themselves and docs. The runs stand as they were made, and were not made again.
+
+The FG-491 runs also come from before adapter digests: their manifests name the adapter by
+its path alone. Since FG-492 an eval run with an adapter records the `adapter_sha256` of its
+files, and a training run the digest of each checkpoint it keeps, so a later SFT run's val
+scores are tied to the weights that made them.
+
 Story branches land on `dev` as squash merges, so the commit a manifest names is not on
 `dev` itself. Each committed run has a tag `run/<run_id>` on that commit, which keeps it
 on GitHub: `git switch --detach run/<run_id>`.
@@ -124,3 +145,7 @@ in pending.yaml; once it has none, a missing run fails. A Kaggle SFT run is comm
 FG-491's is, without its checkpoints, which the run store keeps, and with the `best.json`
 that `forge runs promote` writes: which checkpoint is `checkpoints/best`, and the val runs
 whose scores chose it (docs/runbook.md, "SFT runs").
+Each of those val runs is its base model's full val config with the checkpoint's files
+alone added, so FG-405's comparison of the best one with FG-307's run of that config
+measures the adapter alone; the test checks it does, and fails once FG-405 is off
+pending.yaml without that comparison or its bullets in `docs/notes/sft.md`.

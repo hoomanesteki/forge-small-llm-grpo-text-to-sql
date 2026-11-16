@@ -360,11 +360,16 @@ class RunStore(Protocol):                          # FG-304
     def latest_checkpoint(self, run_id: str) -> str | None: ...
     def pull(self, run_id: str, local_dir: str) -> None: ...
 
-class TrainBackend(Protocol):                      # FG-402
-    def load(self, model_ref: str, lora: "LoraConfig", *, load_in_4bit: bool) -> tuple[Any, Any]: ...  # model, tokenizer
-    def sft(self, model, tok, dataset, cfg: "SftConfig", callbacks: list) -> str: ...      # returns adapter dir
-    def grpo(self, model, tok, dataset, rewards: list[RewardFunc], cfg: "GrpoConfig",
-             callbacks: list) -> str: ...
+class TrainBackend(Protocol):                      # FG-402, ADR-0017
+    name: str                                      # "trl" or "unsloth"
+    device: str                                    # where it trains: cpu, mps or cuda
+    precision: "Precision"                         # dtype and fp16/bf16 flags; the manifest records them
+    def load(self, model_ref: str, lora: "LoraConfig", *, load_in_4bit: bool,
+             seed: int) -> tuple[Any, Any]: ...    # model, tokenizer; seed draws LoRA's first weights
+    def sft(self, model, tok, dataset, cfg: "SftConfig", callbacks: Sequence["TrainerCallback"], *,
+            output_dir: "str | Path", seed: int) -> str: ...  # returns adapter dir
+    def grpo(self, model, tok, dataset, rewards: Sequence[RewardFunc], cfg: "GrpoConfig",
+             callbacks: Sequence["TrainerCallback"], *, output_dir: "str | Path", seed: int) -> str: ...
 ```
 
 ### 3.6 Data
@@ -1602,17 +1607,17 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 - **Story:** As the executor, I want one training interface for CPU and GPU, so every training path is tested in CI before it costs GPU time.
 - **Build:**
   - `train/config.py`: pydantic `LoraConfig`, `SftConfig`, `GrpoConfig` and `OpsConfig`, loaded from YAML, with validation (for example, `max_completion_length ≤ 512`, and `num_generations` must divide the effective batch).
-  - `train/backends.py`:
+  - `train/backends.py`, with `TrainBackend` as section 3.5 shows it: `load` takes the run's seed, since LoRA draws its first weights there, and `sft` and `grpo` the seed and the folder the trainer writes in, all keyword-only. This story changes the contract, with ADR-0017.
     - `UnslothBackend`: 4-bit load, `get_peft_model`, fast inference for GRPO with `gpu_memory_utilization` from config, fp16 on T4.
-    - `TrlCpuBackend`: transformers float32 plus PEFT LoRA and the TRL trainers, without vLLM.
-    - `select_backend("auto")` picks Unsloth when CUDA and Unsloth are available, otherwise CPU.
+    - `TrlBackend`: transformers plus PEFT LoRA and the TRL trainers, without vLLM, on `cpu`, `mps` or `cuda`: float32 on the CPU, bf16 on MPS from macOS 14 (ADR-0016) and float32 before it, bf16 on a CUDA GPU that has it and fp16 on a T4. 4-bit loading is CUDA only.
+    - `select_backend("auto")` picks Unsloth when CUDA and Unsloth are available, otherwise `TrlBackend` on the best local device: CUDA, then MPS, then the CPU, which is all CI has.
   - Both return trainers with the same callbacks: time guard, Hub checkpointing every N steps, and metrics to JSONL (plus W&B if a key is present).
 - **Acceptance criteria:**
   - [ ] Configs load and reject invalid values.
   - [ ] Auto-select picks CPU in CI.
   - [ ] LoRA targets are applied to the tiny model (the trainable parameter count is greater than 0 and the base is frozen).
 - **Tests:** `tests/unit/test_train_config.py::test_config_validation`, `tests/unit/test_backends.py::test_auto_selects_cpu_without_cuda`, `tests/smoke/test_backends.py::test_lora_applied_to_tiny_model`
-- **Files:** `train/config.py`, `train/backends.py`, `train/callbacks.py`
+- **Files:** `train/config.py`, `train/backends.py`, `train/callbacks.py`, `docs/adr/0017-train-backend-contract.md`
 
 #### FG-403 · SFT trainer with CPU smoke
 - **Epic:** E09 · **Points:** 3 · **Branch:** `feat/fg-403-sft-trainer` · **Depends on:** FG-402

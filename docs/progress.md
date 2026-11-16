@@ -133,6 +133,7 @@ Work discovered along the way that is not a plan story.
 | FG-396 | Gate 3 fixes: last items | done | A push Kaggle started is never called refused (kaggle 2.2.5's versionless "successfully pushed" included, recorded with no version), and its dev look and its record are each written whatever the other raises; a resume whose kernel source Kaggle dropped is marked in `kernels.json` and the next resume mounts the attempt before it; a new run's kernel that failed before its job gets a note quoting its `status.json` span for `forge ledger add`; publish-data removes its bundle after a failed upload too; the run store retries what huggingface_hub didn't, told by the request's method, path and failure (a dropped download, a 5xx outside 500/502/503/504), and states the `Retry-After` worst case; a pull keeps this machine's `kernels.json` and `kernel/` unless the store's record lists more pushes; the kernel redacts every log record (stderr tested with a retried canary); the spike's 4-bit load runs right after vLLM's install under a 10-minute cap, and the budget's last 20 minutes are kept for its download, install and load; docstrings and comments corrected |
 | FG-397 | Kaggle's answer for a missing dataset | done | The first real `forge kaggle publish-data` stopped at `kaggle datasets status`: for a slug in the owner's own namespace that holds no dataset, the live API answers 403, "You don't have access to this resource.", where the client expected the 404 "not found" the research notes describe, so a first publish could never create its dataset. Both answers now mean "no dataset yet", tested with the live API's exact text |
 | FG-398 | Kaggle live-run fixes | done | What the first live Kaggle runs on 2026-11-16 showed, each fixed after a test that failed first, with the kaggle CLI and vLLM faked: a kernel title or slug over Kaggle's 50 characters is refused before any push, and a run whose `forge-<run_id>` would pass it gets the run id cut at a dash and 8 hex digits of its sha256 (`kernel_name`), found by the run id through `kernels.json` as before (FG-303's 57-character case and its resume tested); training jobs install `kaggle/requirements-train-gpu.txt`, the spike's `trl` stack with no vLLM, published beside the eval list, and the install stage names the file; the 4-bit reference is `Qwen/Qwen3-8B-AWQ` at 4da05a8 with `quantization: awq` (`scripts/check_models.py` ok on 2026-11-16), bitsandbytes refused in one line, its estimates kept as no run has measured it; a push whose CLI fails is checked with `kaggle kernels status`, and counts as made, recorded with its dev look and a warning, when Kaggle has the attempt's kernel |
+| FG-492 | Gate 4 fixes: run checks | done | One parser of a checkpoint adapter, `forge.ops.adapters.checkpoint_ref` (`<folder>/<run_id>/checkpoints/<name>`, `final`, `best` or a step, a trailing `/` or a leading `./` alike), for `forge kaggle run --adapter`, which pushes it spelled the one way and refuses before any upload a checkpoint outside `runs/`, a folder on this machine, a bad name or a run this machine knows trained another model, for the kernel's fetch and for `forge runs promote`; an eval run with an adapter records its files' `adapter_sha256` in its outputs (a local folder, or the Hub repo's two files), a resume must find the same files, and an SFT run records `adapter_sha256:<checkpoint>` for each checkpoint it keeps, which promote checks; `forge runs promote --config <base val config>` and `checkpoint_scores(base=...)` take only eval runs of the base model's full val config with the checkpoint's files alone added, and `test_phase4_sft_runs_present` checks the same, with fixture runs in `test_sft_runs_are_scored_on_their_base_models_full_val`; `test_phase4_compare_report_rebuildable` and `test_sft_notes_cite_only_report_numbers` look for the main model's comparison (the val run of the main run's best/ against FG-307's run of its config) and skip only while FG-405 is in `docs/runs/pending.yaml`; a kept checkpoint whose push fails waits out of the trainer's rotation and is pushed again after the next push that goes through and at the end, tested on the tiny model; ADR-0017 records the `TrainBackend` signatures and `TrlBackend` on cpu, mps and cuda in plan section 3.5 and FG-402; `make smoke` failed at the pilots' commit db0d8d8 on one smoke assertion, which 510e07d fixed with no code change (`git diff --stat db0d8d8 510e07d -- src configs kaggle scripts Makefile pyproject.toml uv.lock` prints nothing, and `-- tests/smoke` shows `tests/smoke/test_sft_smoke.py`, 7 insertions and 1 deletion), recorded in `docs/runs/README.md`; the runs stand |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -1026,7 +1027,7 @@ Work discovered along the way that is not a plan story.
   (about 21 MB); a cache step like the smoke job's would save that (FG-401).
 - `TrainBackend.sft` and `grpo` take `output_dir` and `seed` as keywords, and `load` takes
   `seed`, since LoRA draws its first weights before any trainer seeds; plan section 3.5's
-  signatures have no place for them (FG-402).
+  signatures have no place for them (FG-402). ADR-0017 puts them there (FG-492).
 - The train config has no `ops.hub_run_repo`: the run store is the one `FORGE_RUN_STORE`
   names, as for eval, so one setting names it. `run.init_adapter`, `data.curriculum`,
   `data.filter_by_sft_pass_rate` and `rewards` are refused until FG-504, FG-505 and FG-501
@@ -1143,3 +1144,22 @@ Work discovered along the way that is not a plan story.
   of either run's failures in another class, so the comparison's class rows hold. Nothing
   checks this for a comparison of runs from different commits; `forge report compare`
   could (FG-405).
+- FG-405's two named checks run the pilot's checks first and then skip while FG-405 is in
+  `docs/runs/pending.yaml`, so a gate sees them skipped rather than passed until the main
+  comparison is committed; a failing pilot check still fails them (FG-492).
+- An eval of a Hub adapter fetches its two files with `snapshot_download` before the run
+  starts, to hash them, into the cache PEFT and vLLM load it from, so a missing or private
+  repo fails before any file is written (FG-492).
+- FG-491's pilot runs come from before adapter digests and stay as they are:
+  `test_sft_pilot_run_is_committed_without_weights` still pins the SFT pilot's outputs, and
+  its eval run has no `adapter_sha256`, so nothing ties those scores to the laptop's
+  `checkpoints/final` but the path until the run store holds it (FG-492).
+- A kept checkpoint the store never took stays in `unpushed-checkpoint-<step>` in the
+  trainer's output folder, which `forge train sft` makes temporary. Its store is local and
+  never fails on the network, but GRPO (FG-504), which pushes to the Hub mid-run, has to
+  keep or upload that folder when `CheckpointCallback.unpushed` isn't empty at the end
+  (FG-492).
+- `forge runs promote` takes `--config`, the base model's full val config, so the runbook's
+  SFT steps name `configs/eval/qwen3-1-7b-val.yaml` and `configs/eval/qwen3-4b-val.yaml`;
+  if ADR-0012 or ADR-0007 pick another model or prompt, the config changes with them
+  (FG-492).

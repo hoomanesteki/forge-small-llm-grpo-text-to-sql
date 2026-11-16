@@ -1,12 +1,11 @@
 """Training backends: one interface for SFT and GRPO on the CPU, Apple's MPS and CUDA
 (ADR-0006), so every training path runs in CI before it costs GPU time.
 
-``TrainBackend`` is plan section 3.5's protocol. ``load`` gives the model with LoRA on
-the config's target modules, the rest of it frozen, and its tokenizer; ``sft`` and
-``grpo`` train it and return the folder they saved the adapter in. Where the trainer
-writes and the run's seed are keywords the plan's signatures have no place for, and
-``load`` takes the seed too: LoRA draws its first weights there, before any trainer
-seeds.
+``TrainBackend`` is plan section 3.5's protocol, as ADR-0017 records it. ``load`` gives
+the model with LoRA on the config's target modules, the rest of it frozen, and its
+tokenizer; ``sft`` and ``grpo`` train it and return the folder they saved the adapter in.
+Where the trainer writes and the run's seed are keywords, and ``load`` takes the seed too:
+LoRA draws its first weights there, before any trainer seeds.
 
 - ``TrlBackend``: transformers, PEFT LoRA and TRL's trainers, generating with
   transformers rather than vLLM, at the precision ``precision_for`` picks for its
