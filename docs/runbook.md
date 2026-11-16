@@ -245,11 +245,17 @@ before the next one.
   `checkpoints/step-NNNNNN/` in the run store, marks the stored manifest
   `stopped_time_guard` and prunes the older checkpoints as retention says. A new session
   resumes from `latest_checkpoint`.
-- Eval: `run_eval(..., deadline=Deadline(minutes))` asks before each batch. A stopped run
-  keeps the batches it stored, leaves official EX to the attempt that finishes it, says
-  `stopped_time_guard` in its manifest and goes to its run store like a run that ended.
-  It resumes like a failed one: the same `--run-id`, or `forge kaggle run --resume`.
-  `forge eval run` and the kernel's entry script don't pass a deadline yet.
+- Eval: `run_eval(..., deadline=...)` asks before each batch. A stopped run keeps the
+  batches it stored, leaves official EX and its report to the attempt that finishes it,
+  says `stopped_time_guard` in its manifest and goes to its run store like a run that
+  ended. It resumes like a failed one: the same `--run-id`, or `forge kaggle run
+  --resume`. Official EX, the report and the upload follow the last batch, where no
+  guard asks, so an eval deadline keeps a tenth of its time back for them
+  (`forge.ops.timeguard.eval_deadline`). A kernel's eval job gets the push's timeout in
+  its arguments (`--timeout-s`) and counts it from the kernel's start, setup included;
+  its upload stage still runs, and `forge kaggle wait` exits 1 and names the resume.
+  `forge eval run --deadline-minutes N` counts from the command's start and exits 1 when
+  it stops.
 - A resumed run keeps its first `started_at`, but each attempt is a session of its own in
   the run's `sessions.json`, with its own start, end and status. A manifest's `gpu_hours`
   adds up its sessions' wall-clock hours on a platform with a GPU (`local-mps` too), and is

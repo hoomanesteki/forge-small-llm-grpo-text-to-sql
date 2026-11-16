@@ -365,6 +365,8 @@ def test_entry_renders_job_args(repo: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert (args.job, args.run_id, args.code_sha) == ("eval", plan.run_id, head)
     assert args.options == {"model": "gold", "backend": "fake", "limit": 5}
     assert (args.preflight, args.resume, args.run_store) == (True, False, "forge-owner/forge-runs")
+    # The job's deadline counts to the push's timeout, the estimate and half again.
+    assert args.timeout_s == plan.timeout_s == 2700
     assert EvalConfig(**args.options, host="kaggle").platform == "kaggle"
     # Everything else in the script is as committed.
     baked = f"KERNEL_ARGV: list[str] = {json.dumps(rendered.KERNEL_ARGV)}"
@@ -677,6 +679,7 @@ def test_wait_and_output_log_each_kernel_session_once(
     assert waited.stdout.endswith(
         "eval run, stopped_time_guard\nledger: added 11.25 h on kaggle for run run-1\n"
     )
+    assert "carry it on with forge kaggle run --resume --run-id run-1" in waited.stderr
     # Fetching the output after, or pulling it, logs the session no second time.
     for args in (["kaggle", "output", "run-1"], ["runs", "pull", "run-1", "--store", "kaggle"]):
         again = CliRunner().invoke(cli.app, args)

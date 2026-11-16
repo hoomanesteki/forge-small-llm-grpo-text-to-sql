@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from forge.ops.timeguard import Deadline
+from forge.ops.timeguard import EVAL_MARGIN_SHARE, Deadline, eval_deadline
 
 
 class Clock:
@@ -59,6 +59,27 @@ def test_longest_step_and_margin_are_kept_back() -> None:
     assert deadline.remaining_s() == 240 and not deadline.near()
     clock.advance(30)
     assert deadline.remaining_s() == 210 and deadline.near()
+
+
+@pytest.mark.phase(3)
+def test_deadline_counts_from_its_start_and_an_eval_one_keeps_a_tenth_back() -> None:
+    clock = Clock()
+    # A kernel's deadline counts from the kernel's start, before the code that makes it
+    # was installed: three minutes of setup are already gone.
+    started = clock()
+    clock.advance(180)
+    deadline = eval_deadline(10, clock=clock, start=started)
+    assert (deadline.minutes, deadline.remaining_s()) == (10, 420)
+    # Official EX, the report and the upload follow the last batch, unguarded.
+    assert EVAL_MARGIN_SHARE == 0.1 and deadline.margin_s == 60
+    deadline.mark()
+    clock.advance(100)
+    deadline.lap()
+    assert deadline.remaining_s() == 320 and not deadline.near()  # 320 > 100 + 60
+    clock.advance(170)
+    assert deadline.remaining_s() == 150 and deadline.near()  # 150 <= 100 + 60
+    # Without a start it counts from now, as before.
+    assert Deadline(1, clock=clock).remaining_s() == 60
 
 
 @pytest.mark.phase(3)

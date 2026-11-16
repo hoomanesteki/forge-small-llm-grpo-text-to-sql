@@ -22,7 +22,10 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
   lives, so a second one might not fit beside it, and loading once saves GPU time. A dev
   job's preflight answers val questions, so dev loads once, in the job.
 - job: the job itself, its files in ``<work>/runs/<run_id>/``. On a resume, the earlier
-  attempt's files come from its kernel's output, mounted under the input folder.
+  attempt's files come from its kernel's output, mounted under the input folder. With
+  ``--timeout-s``, the push's timeout, an eval job stops between batches before Kaggle
+  would end the session (``forge.ops.timeguard.eval_deadline``, counted from the kernel's
+  start), as ``stopped_time_guard``, and its run is uploaded and resumed like any other.
 - upload: that folder to the Hub run store (``forge.ops.hub``, which tries again on
   network errors), only when there is an ``HF_TOKEN``.
 
@@ -87,6 +90,7 @@ PIP = (sys.executable, "-m", "pip", "install", "--no-input", "--progress-bar", "
 
 # Runs one command, raising CalledProcessError when it fails; tests stand in for pip.
 Runner = Callable[[Sequence[str]], None]
+Clock = Callable[[], float]  # seconds that never go back, as forge.ops.timeguard counts them
 
 
 class JobError(RuntimeError):
@@ -109,6 +113,11 @@ class Kernel:
     requirements: Path | None = None
     # The eval job's model backend and token counter, loaded once for the preflight and the job.
     model: tuple[Any, Any] | None = None
+    clock: Clock = time.monotonic
+    started: float = field(init=False)  # on clock, when the kernel's time began
+
+    def __post_init__(self) -> None:
+        self.started = self.clock()
 
     @property
     def work(self) -> Path:
@@ -132,6 +141,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--temp-dir", default="/kaggle/temp", help="discarded scratch")
     parser.add_argument("--preflight", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resume", action="store_true", help="continue the run's last attempt")
+    parser.add_argument(
+        "--timeout-s", type=int, help="the push's timeout, which the job's deadline counts to"
+    )
     return parser.parse_args(list(argv))
 
 
@@ -326,14 +338,22 @@ def eval_job(kernel: Kernel, preflight: bool) -> str:
         check_config(config)  # before a model loads for options no run takes
         kernel.model = model_backend(config)
     backend, count_tokens = kernel.model or (None, None)
+    deadline = None
+    if not preflight and kernel.args.timeout_s is not None:
+        from forge.ops.timeguard import eval_deadline
+
+        timeout_min = kernel.args.timeout_s / 60
+        deadline = eval_deadline(timeout_min, clock=kernel.clock, start=kernel.started)
     run = run_eval(
         config,
         runs_root=runs_root,
         progress=_progress,
         backend=backend,
         count_tokens=count_tokens,
+        deadline=deadline,
     )
-    if not preflight:
+    # A run the deadline stopped gets its report from the attempt that finishes it.
+    if not preflight and run.manifest.status == "finished":
         write_run_report(kernel.args.run_id, runs_root=runs_root)
     return run.manifest.status
 
@@ -368,7 +388,9 @@ STAGE_FUNCTIONS: Mapping[str, Callable[[Kernel], Any]] = {
 }
 
 
-def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None, run: Runner | None = None, clock: Clock = time.monotonic
+) -> int:
     args = parse_args(KERNEL_ARGV if argv is None else argv)
     status: dict[str, Any] = {
         "schema": STATUS_SCHEMA,
@@ -387,7 +409,7 @@ def main(argv: Sequence[str] | None = None, run: Runner | None = None) -> int:
         "session": None,
         "stages": {},
     }
-    kernel = Kernel(args, run or _run, status)
+    kernel = Kernel(args, run or _run, status, clock=clock)
     os.environ["FORGE_RUNS_DIR"] = str(kernel.work / "runs")
     os.environ["FORGE_CACHE_DIR"] = str(Path(args.temp_dir) / "cache")
     os.environ[DEV_USAGE_ENV] = str(kernel.work / DEV_USAGE_FILE)

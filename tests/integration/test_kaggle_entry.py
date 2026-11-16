@@ -7,22 +7,31 @@ commit comes from the code dataset. A vLLM job runs with vLLM faked.
 
 from __future__ import annotations
 
+import functools
 import json
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from forge.core.types import RunManifest
+from forge.core.types import RunManifest, Score
 from forge.data.splits import load_val
+from forge.eval import runner
 from forge.eval.config import EvalConfig
 from forge.ops.dev_usage import read_uses
 from forge.ops.sessions import read_sessions
-from tests.fakes import FakeVllm, gold_reply
-from tests.kernel import SHA, argv, build_inputs, kernel_folder
+from tests.fakes import FakeHub, FakeVllm, gold_reply
+from tests.kernel import SHA, argv, build_inputs, kernel_folder, mount_output
 from tests.spike import entry
 
 script = entry()
+# Built at run time, so no literal here looks like a real token.
+TOKEN = "hf_" + "".join(chr(97 + (i * 11) % 26) for i in range(30))
+
+
+def _scores(run_dir: Path, split: str = "val") -> list[Score]:
+    lines = (run_dir / "eval" / f"{split}-scores.jsonl").read_text().splitlines()
+    return [Score.model_validate_json(line) for line in lines]
 
 
 @pytest.mark.phase(3)
@@ -84,6 +93,66 @@ def test_entry_runs_a_vllm_job_on_one_engine(
     assert len(scores) == 6
     preflight = work / "preflight" / "run-1-preflight" / "manifest.json"
     assert RunManifest.model_validate_json(preflight.read_text()).status == "finished"
+
+
+@pytest.mark.phase(3)
+def test_eval_job_stops_at_its_deadline_then_uploads_and_resumes(
+    tmp_path: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [0.0]
+    gold = gold_reply(load_val(spider_mini))
+
+    def slow(text: str, sample_idx: int) -> str:
+        now[0] += 10.0  # each reply takes 10 s of the kernel's time
+        return gold(text, sample_idx)
+
+    FakeVllm(slow).install(monkeypatch)
+    hub = FakeHub()
+    monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    # Two questions a batch, so the guard has batches to stop between.
+    monkeypatch.setattr(runner, "run_eval", functools.partial(runner.run_eval, batch_size=2))
+    options = {"model": "org/model@abc123", "backend": "vllm", "limit": 6}
+    first = kernel_folder(tmp_path / "first", monkeypatch)
+    build_inputs(first, spider_mini)
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+
+    # Pushed with a two-minute timeout. The preflight's five replies take 50 s, then each
+    # batch 20 s: after two, 30 s are left, within a batch and the 12 s kept back.
+    kernel_argv = argv(first, "--timeout-s", "120", options=options)
+    assert script.main(kernel_argv, run=lambda c: None, clock=lambda: now[0]) == 0
+
+    run_dir = first / "working" / "runs" / "run-1"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert (status["status"], status["stage"], status["error"]) == (
+        "stopped_time_guard",
+        "upload",
+        None,
+    )
+    assert status["stages"]["job"]["result"] == {"status": "stopped_time_guard"}
+    assert status["stages"]["upload"]["result"] == "uploaded to forge-owner/forge-runs"
+    stopped = RunManifest.model_validate_json((run_dir / "manifest.json").read_text())
+    assert stopped.status == "stopped_time_guard"
+    assert [s.ex_official for s in _scores(run_dir)] == [None] * 4
+    # A stopped run gets its report once it finishes; the store has it, ready to resume.
+    assert not (run_dir / "eval" / "val-report.md").exists()
+    uploaded = RunManifest.model_validate_json(hub.files["runs/run-1/manifest.json"])
+    assert uploaded.status == "stopped_time_guard"
+    assert len(hub.files["runs/run-1/eval/val-scores.jsonl"].splitlines()) == 4
+
+    second = kernel_folder(tmp_path / "second", monkeypatch)
+    build_inputs(second, spider_mini)
+    mount_output(first, second, "forge-run-1")
+    resume = argv(second, "--timeout-s", "3600", "--resume", options=options)
+    assert script.main(resume, run=lambda c: None, clock=lambda: now[0]) == 0
+
+    run_dir = second / "working" / "runs" / "run-1"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert (status["status"], status["error"], status["session"]) == ("finished", None, 2)
+    scores = _scores(run_dir)
+    assert len(scores) == 6 and all(s.ex_fast and s.ex_official for s in scores)
+    assert (run_dir / "eval" / "val-report.md").is_file()
+    sessions = read_sessions(run_dir) or []
+    assert [s.status for s in sessions] == ["stopped_time_guard", "finished"]
 
 
 @pytest.mark.phase(3)

@@ -16,9 +16,10 @@ Before a push, in the plan's order (FG-303):
    GPU metadata with internet that mounts the code and data datasets and, on a resume,
    the last attempt's kernel, whose output holds the run so far.
 6. ``KaggleClient.push_kernel`` with a T4 and a timeout of the estimate and half again, at
-   most a session's 12 hours: plan section 5.3 stops a job 50% over its estimate. Each
-   push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait and
-   output read to find the run's kernel.
+   most a session's 12 hours: plan section 5.3 stops a job 50% over its estimate. The
+   entry script gets the timeout too, and its eval job stops at the time guard before
+   it. Each push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait
+   and output read to find the run's kernel.
 
 A dev eval job takes ``--reason``, as ``forge eval run --split dev`` does, and is refused
 once the six dev looks are spent (ADR-0004). The push spends its look: ``log_dev_look``
@@ -390,9 +391,11 @@ def log_dev_look(plan: JobPlan) -> int | None:
 
 
 def entry_argv(plan: JobPlan, run_store: str) -> list[str]:
-    """The arguments kaggle/entry.py runs ``plan`` with."""
+    """The arguments kaggle/entry.py runs ``plan`` with, the push's timeout among them, so
+    the job stops at its time guard before Kaggle ends the session."""
     argv = ["--job", plan.job, "--run-id", plan.run_id, "--code-sha", plan.code_sha]
     argv += ["--options", json.dumps(plan.options, sort_keys=True), "--run-store", run_store]
+    argv += ["--timeout-s", str(plan.timeout_s)]
     argv.append("--preflight" if plan.preflight else "--no-preflight")
     return [*argv, "--resume"] if plan.resume else argv
 
