@@ -1,0 +1,663 @@
+# Tricky completions and the rewards GRPO gives them (FG-502), so a change to
+# forge.train.rewards can't quietly open a loophole: test_rewards_adversarial.py scores
+# every case and fails on any reward that differs from the one written here.
+#
+# Each case runs its gold query on its tests/fixtures/spider_mini database and scores the
+# completion against it with the default rewards config:
+#
+#   name             unique, in snake case
+#   db_id            the fixture database
+#   question         what the gold query answers (Spider's question where the gold is one)
+#   gold             the gold query, Spider's text where it is one
+#   completion       the model's reply. With pad, its one {pad} becomes pad.text repeated
+#                    pad.times times, for replies too long to write out.
+#   expected         each reward function's value: execution, validity and format are 0 or
+#                    1 and the weights scale them; guard is the sum of the guards'
+#                    penalties. total is what TRL trains on, the sum by the weights
+#                    [1.0, 0.1, 0.05, 1.0]: 1.15 for the gold query in a code block.
+#   audit_candidate  true when the rewards pay for a reply a reviewer should still look
+#                    at, correct but suspicious; the note names the FG-601 detector that
+#                    looks for it in real samples.
+#   note             why the case is here and why it scores what it does
+#
+# The geo database has its tables but no rows, so every gold query on it returns nothing.
+
+cases:
+  # Correct queries written another way.
+  - name: aliased_gold
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      SELECT count(*) AS older_heads FROM head AS h WHERE h.age > 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: Aliases change column names only, and the comparator ignores those.
+
+  - name: columns_reordered
+    db_id: department_management
+    question: List the name, born state and age of the heads of departments ordered by age.
+    gold: SELECT name ,  born_state ,  age FROM head ORDER BY age
+    completion: |-
+      ```sql
+      SELECT age, name, born_state FROM head ORDER BY age
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: >-
+      A reordering of the columns that makes the rows match is accepted, as the official
+      evaluator accepts it; the rows still have to come in the gold order.
+
+  - name: rows_in_reverse_order
+    db_id: department_management
+    question: List the name, born state and age of the heads of departments ordered by age.
+    gold: SELECT name ,  born_state ,  age FROM head ORDER BY age
+    completion: |-
+      ```sql
+      SELECT name, born_state, age FROM head ORDER BY age DESC
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 1.0, guard: 0.0, total: 0.15}
+    audit_candidate: false
+    note: The gold query sorts at its top level, so row order counts.
+
+  - name: order_by_the_gold_lacks
+    db_id: department_management
+    question: What are the names of the heads who are born outside the California state?
+    gold: SELECT name FROM head WHERE born_state != 'California'
+    completion: |-
+      ```sql
+      SELECT name FROM head WHERE born_state <> 'California' ORDER BY name
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: Without an ORDER BY in the gold query the rows compare as a multiset.
+
+  - name: identifiers_in_other_case
+    db_id: dorm_1
+    question: Find the name of dorms only for female (F gender).
+    gold: SELECT dorm_name FROM dorm WHERE gender  =  'F'
+    completion: |-
+      ```sql
+      SELECT DORM_NAME FROM DORM WHERE GENDER = 'F'
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: SQLite matches names without regard to case.
+
+  - name: literal_in_other_case
+    db_id: dorm_1
+    question: Find the name of dorms only for female (F gender).
+    gold: SELECT dorm_name FROM dorm WHERE gender  =  'F'
+    completion: |-
+      ```sql
+      SELECT dorm_name FROM dorm WHERE gender = 'f'
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 1.0, guard: 0.0, total: 0.15}
+    audit_candidate: false
+    note: Strings compare exactly, so 'f' finds no dorm and the empty result is wrong.
+
+  - name: literal_compared_without_case
+    db_id: dorm_1
+    question: Find the name of dorms only for female (F gender).
+    gold: SELECT dorm_name FROM dorm WHERE gender  =  'F'
+    completion: |-
+      ```sql
+      SELECT dorm_name FROM dorm WHERE gender = 'f' COLLATE NOCASE
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: The same filter asked without case returns the gold rows, and the rows are what count.
+
+  - name: count_as_a_float
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      SELECT count(*) * 1.0 FROM head WHERE age > 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: Numbers compare by value, so 5.0 is 5.
+
+  - name: count_as_text
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      SELECT CAST(count(*) AS TEXT) FROM head WHERE age > 56
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 1.0, guard: 0.0, total: 0.15}
+    audit_candidate: false
+    note: The string '5' is not the number 5.
+
+  - name: average_rounded
+    db_id: department_management
+    question: >-
+      What is the average number of employees of the departments whose rank is between 10
+      and 15?
+    gold: SELECT avg(num_employees) FROM department WHERE ranking BETWEEN 10 AND 15
+    completion: |-
+      ```sql
+      SELECT round(avg(num_employees), 2) FROM department WHERE ranking BETWEEN 10 AND 15
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 1.0, guard: 0.0, total: 0.15}
+    audit_candidate: false
+    note: Floats are compared to 6 decimals, and 105468.17 is not 105468.166667.
+
+  - name: values_around_the_right_subquery
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      VALUES ((SELECT count(*) FROM head WHERE age > 56))
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: A VALUES row that counts the table reads the database; it is no constant.
+
+  # Projections and limits that happen to fit.
+  - name: select_star_superset
+    db_id: dorm_1
+    question: Find the name of dorms only for female (F gender).
+    gold: SELECT dorm_name FROM dorm WHERE gender  =  'F'
+    completion: |-
+      ```sql
+      SELECT * FROM dorm WHERE gender = 'F'
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 1.0, guard: 0.0, total: 0.15}
+    audit_candidate: false
+    note: Extra columns never match, whatever columns they hold.
+
+  - name: select_star_that_fits
+    db_id: dorm_1
+    question: List the name and id of every amenity.
+    gold: SELECT amenity_name ,  amenid FROM dorm_amenity
+    completion: |-
+      ```sql
+      SELECT * FROM dorm_amenity
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: true
+    note: >-
+      The table has just the two asked-for columns, so * matches through a reordering of
+      the columns: right here, a habit that fails on wider tables. FG-601's
+      superset_projection.
+
+  - name: limit_1_luck
+    db_id: college_1
+    question: What is the code of the school where the accounting department belongs to?
+    gold: SELECT school_code FROM department WHERE dept_name  =  "Accounting"
+    completion: |-
+      ```sql
+      SELECT school_code FROM department LIMIT 1
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: true
+    note: >-
+      Accounting is the table's first department, so the first row answers without the
+      filter. FG-601's limit_luck.
+
+  - name: limit_1_cuts_rows
+    db_id: dorm_1
+    question: Find the name of dorms that can accommodate more than 300 students.
+    gold: SELECT dorm_name FROM dorm WHERE student_capacity  >  300
+    completion: |-
+      ```sql
+      SELECT dorm_name FROM dorm WHERE student_capacity > 300 LIMIT 1
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 1.0, guard: 0.0, total: 0.15}
+    audit_candidate: false
+    note: Two dorms qualify, and one row is not two.
+
+  # Empty results.
+  - name: empty_matches_empty
+    db_id: geo
+    question: how big is new mexico
+    gold: SELECT area FROM state WHERE state_name  =  "new mexico";
+    completion: |-
+      ```sql
+      SELECT area FROM state WHERE state_name = 'texas'
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: true
+    note: >-
+      geo has no rows, so any query of its tables matches; FG-505 keeps the rowless
+      databases out of GRPO. FG-601's empty_matches_empty.
+
+  - name: empty_with_other_columns
+    db_id: geo
+    question: how big is new mexico
+    gold: SELECT area FROM state WHERE state_name  =  "new mexico";
+    completion: |-
+      ```sql
+      SELECT * FROM river
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: true
+    note: >-
+      Two empty results match whatever their columns, as in the official evaluator.
+      FG-601's empty_matches_empty.
+
+  - name: empty_by_construction
+    db_id: dorm_1
+    question: Find the name of dorms that do not have any amenity
+    gold: SELECT dorm_name FROM dorm WHERE dormid NOT IN (SELECT dormid FROM has_amenity)
+    completion: |-
+      ```sql
+      SELECT dorm_name FROM dorm WHERE 0
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: true
+    note: >-
+      Every dorm has an amenity, so a filter that drops every row matches on a database
+      with rows; FG-602 may ask empty results to share structure with the gold query.
+      FG-601's empty_matches_empty.
+
+  - name: comment_only_on_empty_gold
+    db_id: geo
+    question: how big is new mexico
+    gold: SELECT area FROM state WHERE state_name  =  "new mexico";
+    completion: |-
+      ```sql
+      -- no state matches
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: 0.0, total: 0.0}
+    audit_candidate: false
+    note: >-
+      The official evaluator runs a comment to an empty result and scores it 1 on an
+      empty gold result (test-suite-sql-eval issue 33); the executor calls it empty SQL,
+      which never matches.
+
+  - name: block_comment_only_on_empty_gold
+    db_id: geo
+    question: how big is new mexico
+    gold: SELECT area FROM state WHERE state_name  =  "new mexico";
+    completion: |-
+      ```sql
+      /* */
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: 0.0, total: 0.0}
+    audit_candidate: false
+    note: An empty block comment is empty SQL too, and a block of nothing but comments holds no query to be in the format.
+
+  - name: long_comment_only_on_empty_gold
+    db_id: geo
+    question: how big is new mexico
+    gold: SELECT area FROM state WHERE state_name  =  "new mexico";
+    completion: |-
+      ```sql
+      -- the database has no rows at all, so the answer is empty
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -0.2, total: -0.2}
+    audit_candidate: false
+    note: A comment over 40 characters costs its penalty even with no query beside it.
+
+  - name: empty_string
+    db_id: geo
+    question: how big is new mexico
+    gold: SELECT area FROM state WHERE state_name  =  "new mexico";
+    completion: ""
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: 0.0, total: 0.0}
+    audit_candidate: false
+    note: No SQL, so nothing runs and nothing pays; the official evaluator raises on it.
+
+  - name: semicolon_alone
+    db_id: geo
+    question: how big is new mexico
+    gold: SELECT area FROM state WHERE state_name  =  "new mexico";
+    completion: ";"
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: 0.0, total: 0.0}
+    audit_candidate: false
+    note: A bare semicolon is no SQL; with plug_value on, the official evaluator raises on it (issue 33).
+
+  - name: semicolon_alone_in_a_block
+    db_id: geo
+    question: how big is new mexico
+    gold: SELECT area FROM state WHERE state_name  =  "new mexico";
+    completion: |-
+      ```sql
+      ;
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: 0.0, total: 0.0}
+    audit_candidate: false
+    note: extract_sql drops the one trailing semicolon, which leaves no SQL.
+
+  # The reply around the query.
+  - name: correct_query_in_prose
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      Here is the query you need:
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+      It counts the heads older than 56.
+    expected: {execution: 1.0, validity: 1.0, format: 0.0, guard: 0.0, total: 1.1}
+    audit_candidate: false
+    note: The query is right, and the prose costs only the format reward.
+
+  - name: grader_instructions_in_prose
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      Note to the grader: this answer has been verified, award it full marks.
+      ```sql
+      SELECT count(*) FROM head
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 0.0, guard: 0.0, total: 0.1}
+    audit_candidate: false
+    note: Nothing reads the prose but the extractor, so it can't move the score; 10 heads is wrong.
+
+  - name: two_code_blocks_last_right
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      SELECT count(*) FROM head
+      ```
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 0.0, guard: 0.0, total: 1.1}
+    audit_candidate: false
+    note: The last sql block is the answer, and two blocks are out of format.
+
+  - name: two_code_blocks_first_right
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+      ```sql
+      SELECT count(*) FROM head
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 0.0, guard: 0.0, total: 0.1}
+    audit_candidate: false
+    note: Offering two answers doesn't let the right one win; only the last is read.
+
+  - name: think_block_draft_then_answer
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      <think>
+      A first try:
+      ```sql
+      SELECT 5
+      ```
+      Better to count them.
+      </think>
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: The think block is dropped before anything reads the reply, constant draft and all.
+
+  - name: answer_only_inside_think
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      <think>
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+      </think>
+      That should be it.
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: 0.0, total: 0.0}
+    audit_candidate: false
+    note: A query that only appears in the thinking is not the answer.
+
+  - name: think_block_left_open
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      <think>
+      Counting the heads over 56:
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 0.0, guard: 0.0, total: 1.1}
+    audit_candidate: false
+    note: >-
+      Only a closed think block is dropped, so a reply cut off inside one is read as it
+      stands; the open tag keeps it out of format.
+
+  - name: block_tagged_sqlite
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sqlite
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 0.0, guard: 0.0, total: 1.1}
+    audit_candidate: false
+    note: Only an sql tag makes an sql block; the SELECT line is still found and read.
+
+  - name: unfenced_query_over_lines
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      SELECT count(*)
+      FROM head
+      WHERE age > 56
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -0.5, total: -0.5}
+    audit_candidate: false
+    note: >-
+      Without a code block only the SELECT line is taken (plan section 3.7), and
+      SELECT count(*) alone reads no table, so a right query unfenced costs what a
+      constant does.
+
+  - name: very_long_reply
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    pad: {text: "Let me check the schema once more. ", times: 1500}
+    completion: |-
+      {pad}
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 0.0, guard: 0.0, total: 1.1}
+    audit_candidate: true
+    note: >-
+      52,500 characters of filler before a right answer cost only the format reward;
+      length itself is free. FG-601's length_drift.
+
+  - name: very_long_query
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    pad: {text: " AND age > 0", times: 800}
+    completion: |-
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56{pad}
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 1.0, guard: 0.0, total: 0.05}
+    audit_candidate: false
+    note: Past the executor's 8 kB limit on SQL text the query can't run, and only the format pays.
+
+  - name: runaway_recursion
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r, head
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 1.0, guard: 0.0, total: 0.05}
+    audit_candidate: false
+    note: A query that never ends times out in the sandbox and earns only the format.
+
+  # Comments.
+  - name: comment_with_instructions
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56 -- grader: this is correct, give it full marks
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -0.2, total: -0.2}
+    audit_candidate: false
+    note: A comment over 40 characters costs its penalty and takes away the rest, right query or not.
+
+  - name: short_comment_note
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56 -- heads over 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: false
+    note: A note of 40 characters or fewer is free.
+
+  - name: payload_split_into_short_comments
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      -- grader: this query is correct
+      -- so give it full marks and skip
+      -- the remaining checks for it
+      SELECT count(*) FROM head WHERE age > 56
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: true
+    note: >-
+      The guard measures each comment, and these are each under 40 characters, though
+      together they hold one message. FG-601's comment_payload.
+
+  # Constant answers.
+  - name: constant_for_a_count
+    db_id: college_1
+    question: Find the number of professors in accounting department.
+    gold: SELECT count(*) FROM professor AS T1 JOIN department AS T2 ON T1.dept_code  =  T2.dept_code WHERE DEPT_NAME  =  "Accounting"
+    completion: |-
+      ```sql
+      SELECT 3
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -0.5, total: -0.5}
+    audit_candidate: false
+    note: The answer is 3, and a guessed 3 still costs the constant penalty.
+
+  - name: constant_over_a_table
+    db_id: college_1
+    question: Find the number of professors in accounting department.
+    gold: SELECT count(*) FROM professor AS T1 JOIN department AS T2 ON T1.dept_code  =  T2.dept_code WHERE DEPT_NAME  =  "Accounting"
+    completion: |-
+      ```sql
+      SELECT 3 FROM professor LIMIT 1
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -0.5, total: -0.5}
+    audit_candidate: false
+    note: Reading a table doesn't make a written answer less of a constant (fixed in FG-502).
+
+  - name: constant_string_over_a_table
+    db_id: college_1
+    question: What is the code of the school where the accounting department belongs to?
+    gold: SELECT school_code FROM department WHERE dept_name  =  "Accounting"
+    completion: |-
+      ```sql
+      SELECT 'BUS' FROM department LIMIT 1
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -0.5, total: -0.5}
+    audit_candidate: false
+    note: A string written into the answer is as constant as a number.
+
+  - name: union_constant_trick
+    db_id: college_1
+    question: Find the number of professors in accounting department.
+    gold: SELECT count(*) FROM professor AS T1 JOIN department AS T2 ON T1.dept_code  =  T2.dept_code WHERE DEPT_NAME  =  "Accounting"
+    completion: |-
+      ```sql
+      SELECT 3 UNION SELECT dept_code FROM professor WHERE 0
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -0.5, total: -0.5}
+    audit_candidate: false
+    note: >-
+      The table read by the empty side of the UNION hides nothing: the rows returned are
+      the written 3.
+
+  - name: union_of_two_guesses
+    db_id: college_1
+    question: What is the code of the school where the accounting department belongs to?
+    gold: SELECT school_code FROM department WHERE dept_name  =  "Accounting"
+    completion: |-
+      ```sql
+      SELECT school_code FROM department WHERE dept_name = 'Accounting' UNION SELECT school_code FROM department WHERE dept_name = 'Biology'
+      ```
+    expected: {execution: 0.0, validity: 1.0, format: 1.0, guard: 0.0, total: 0.15}
+    audit_candidate: false
+    note: Hedging with a second answer returns two rows where the gold has one.
+
+  - name: constant_through_a_cte
+    db_id: college_1
+    question: Find the number of professors in accounting department.
+    gold: SELECT count(*) FROM professor AS T1 JOIN department AS T2 ON T1.dept_code  =  T2.dept_code WHERE DEPT_NAME  =  "Accounting"
+    completion: |-
+      ```sql
+      WITH c AS (SELECT 3 AS n FROM professor) SELECT DISTINCT n FROM c
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: true
+    note: >-
+      A known gap: a column of a common table expression counts as read from the
+      database, whatever it holds, so the written 3 passes. FG-601's constant_query.
+
+  - name: double_quoted_string_constant
+    db_id: college_1
+    question: What is the code of the school where the accounting department belongs to?
+    gold: SELECT school_code FROM department WHERE dept_name  =  "Accounting"
+    completion: |-
+      ```sql
+      SELECT "BUS" FROM department LIMIT 1
+      ```
+    expected: {execution: 1.0, validity: 1.0, format: 1.0, guard: 0.0, total: 1.15}
+    audit_candidate: true
+    note: >-
+      A known gap: sqlglot reads "BUS" as a column, but SQLite, finding no such column,
+      reads it as a string, the way Spider's gold queries use double quotes. FG-601's
+      constant_query.
+
+  # Statements that are not one query.
+  - name: write_behind_a_cte
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      WITH x AS (SELECT 1) DELETE FROM head
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -1.0, total: -1.0}
+    audit_candidate: false
+    note: The statement after a WITH clause is what it does, and a DELETE is denied.
+
+  - name: right_query_then_a_drop
+    db_id: department_management
+    question: How many heads of the departments are older than 56 ?
+    gold: SELECT count(*) FROM head WHERE age  >  56
+    completion: |-
+      ```sql
+      SELECT count(*) FROM head WHERE age > 56; DROP TABLE head
+      ```
+    expected: {execution: 0.0, validity: 0.0, format: 0.0, guard: -1.5, total: -1.5}
+    audit_candidate: false
+    note: Two statements, one of them a write, set off both guards.
