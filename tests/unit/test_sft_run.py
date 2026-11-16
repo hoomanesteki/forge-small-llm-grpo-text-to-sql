@@ -6,9 +6,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -315,6 +316,70 @@ def test_sft_run_refuses_before_any_model_loads(spider_mini: Path, tmp_path: Pat
         _train(tmp_path, backend, run_id="../elsewhere")
     assert backend.loaded == cuda.loaded == []
     assert not (tmp_path / "sft").exists()
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+    return done.stdout.strip()
+
+
+@pytest.mark.phase(4)
+def test_sft_run_checks_its_tree_once(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A clean one-commit checkout, the Forge root, that the run starts in.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("FORGE_ROOT", str(repo))
+    monkeypatch.delenv("FORGE_LEDGER", raising=False)
+    monkeypatch.delenv("FORGE_DEV_USAGE", raising=False)
+    monkeypatch.chdir(repo)
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "T"],
+    ):
+        _git(repo, *args)
+    (repo / "a.txt").write_text("one\n")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-q", "-m", "one")
+
+    class TreeChanges(FakeBackend):
+        """Changes the checkout while the model loads, as another process in it can."""
+
+        def __init__(self, change: Callable[[], None]) -> None:
+            super().__init__()
+            self.change = change
+
+        def load(
+            self, model_ref: str, lora: LoraConfig, *, load_in_4bit: bool, seed: int
+        ) -> tuple[Any, Any]:
+            self.change()
+            return super().load(model_ref, lora, load_in_4bit=load_in_4bit, seed=seed)
+
+    def train(change: Callable[[], None]) -> RunManifest:
+        checked = _git(repo, "rev-parse", "HEAD")
+        run = run_sft(
+            _config(),
+            runs_root=tmp_path / "runs",
+            sft_root=tmp_path / "sft",
+            backend=TreeChanges(change),
+            env={},
+        )
+        # The run's id and its manifest name the commit checked before the load.
+        assert run.manifest.git_sha == checked, "the manifest names a later commit"
+        assert run.manifest.run_id.endswith(checked[:7])
+        assert run.manifest.status == "finished"
+        return run.manifest
+
+    def commit() -> None:
+        (repo / "a.txt").write_text("two\n")
+        _git(repo, "commit", "-q", "-am", "two")
+
+    # A commit lands during the load, and then a new file: neither fails the run late.
+    first = train(commit)
+    second = train(lambda: (repo / "b.txt").write_text("new\n"))
+    assert first.git_sha != second.git_sha
 
 
 @pytest.mark.phase(4)

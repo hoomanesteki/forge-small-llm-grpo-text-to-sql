@@ -232,18 +232,21 @@ def build_manifest(
     repo: Path | None = None,
     now: datetime | None = None,
     data_dir: Path | None = None,
+    git_sha: str | None = None,
 ) -> RunManifest:
     """Describe a run starting now. Pass ``run_id`` only to keep an id, as a resumed run does.
 
     ``data_dir`` is the data the run reads, which its data manifest hash describes; the
-    default is ``FORGE_DATA_DIR``'s, as everywhere else. The commit is ``code_sha``'s.
+    default is ``FORGE_DATA_DIR``'s, as everywhere else. The commit is ``code_sha``'s, or
+    ``git_sha`` when the caller asked ``code_sha`` already, so a run that checks its tree
+    before a long load names the commit it checked and isn't checked again.
     """
     # Kaggle runs in UTC and laptops don't, so a naive time can't be compared. A tzinfo
     # without an offset is naive too: astimezone would read it in the machine's zone.
     if now is not None and now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     started_at = now or datetime.now(UTC)
-    sha = code_sha(repo, allow_dirty=allow_dirty)
+    sha = code_sha(repo, allow_dirty=allow_dirty) if git_sha is None else git_sha
     if run_id is None:
         run_id = make_run_id(kind, model_ref, sha, on=started_at.astimezone(UTC).date())
     # The manifest keeps the config as hashed, in a copy of its own, so editing the

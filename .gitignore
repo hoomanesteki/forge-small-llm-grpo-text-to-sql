@@ -227,6 +227,9 @@ __marimo__/
 # The lock a run folder keeps after a run or report (forge.eval.run_files.hold) is never
 # part of the run, so writing a committed run's report leaves the tree clean.
 docs/runs/**/.lock
+# W&B's local files (forge.train.callbacks.wandb_callback), in the folder training starts
+# in: a run checks the tree, so they would make the next run's dirty.
+wandb/
 *.gguf
 .env
 .env.*
