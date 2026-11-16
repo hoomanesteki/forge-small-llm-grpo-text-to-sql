@@ -13,8 +13,9 @@ from typer.testing import CliRunner
 from forge import cli
 from forge.core.types import RunManifest
 from forge.ops import kaggle_job
-from forge.ops.hub import manifest_bytes, open_store
-from tests.fakes import FakeHub, hub_error
+from forge.ops.adapters import adapter_sha256
+from forge.ops.hub import FINAL, manifest_bytes, open_store
+from tests.fakes import FakeHub, hub_error, sft_run_folder
 
 RUN = "2026-11-15-qwen3-4b-eval-abc1234"
 REPO = "owner/forge-runs"
@@ -211,3 +212,42 @@ def test_push_uploads_a_local_run(hub: FakeHub, tmp_path: Path) -> None:
     hub.fail["upload_folder"] = [hub_error(403)]
     result = _invoke("push", RUN)
     assert result.exit_code == 1 and result.stderr == "error: 403 from the Hub\n"
+
+
+@pytest.mark.phase(4)
+def test_push_uploads_an_adapter_only_with_the_digest_it_is_given(
+    hub: FakeHub, tmp_path: Path
+) -> None:
+    # An SFT run whose manifest records no digest of its adapter, as FG-491's pilot's
+    # doesn't, and the digest taken where it was trained.
+    runs = tmp_path / "runs"
+    sft = "2026-11-16-pilot-sft-abc1234"
+    sft_run_folder(runs, sft, "org/model@abc123", [FINAL], outputs={"adapter": FINAL})
+    final = runs / sft / FINAL
+    recorded = adapter_sha256(final)
+    weights = final / "adapter_model.safetensors"
+    saved = weights.read_bytes()
+
+    # Other weights under the same name, or none: refused, and nothing uploaded.
+    weights.write_text("weights from elsewhere")
+    other = _invoke("push", sft, "--adapter-sha256", recorded)
+    assert other.exit_code == 1
+    found = adapter_sha256(final)
+    assert other.stderr == (
+        f"error: {final} holds adapter files with sha256 {found}, not {recorded}\n"
+    )
+    weights.unlink()
+    gone = _invoke("push", sft, "--adapter-sha256", recorded)
+    assert gone.exit_code == 1 and "has no adapter_model.safetensors" in gone.stderr
+    # A run that names no adapter has nothing the digest could be checked against.
+    (runs / RUN).mkdir()
+    (runs / RUN / "manifest.json").write_bytes(manifest_bytes(_manifest()))
+    unnamed = _invoke("push", RUN, "--adapter-sha256", recorded)
+    assert unnamed.exit_code == 1
+    assert unnamed.stderr == f"error: run {RUN}'s manifest names no adapter to check\n"
+    assert hub.files == {}
+
+    weights.write_bytes(saved)
+    done = _invoke("push", sft, "--adapter-sha256", recorded)
+    assert done.exit_code == 0, done.output
+    assert hub.files[f"runs/{sft}/{FINAL}/adapter_model.safetensors"] == saved

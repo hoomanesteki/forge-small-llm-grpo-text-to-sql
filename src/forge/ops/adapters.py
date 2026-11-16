@@ -17,6 +17,8 @@ records the digest of each checkpoint it keeps as ``adapter_sha256:<checkpoint>`
 as ``adapter_sha256:checkpoints/final`` (``checkpoint_digests``). A val score is then
 tied to the exact weights that made it, wherever the files went in between, which a path
 alone can't show: the run store may hold other files under the same name.
+``check_adapter`` holds a folder to a digest recorded elsewhere, as ``forge runs push
+--adapter-sha256`` does for a run whose manifest records none.
 """
 
 from __future__ import annotations
@@ -90,6 +92,14 @@ def adapter_sha256(folder: Path) -> str:
         with (folder / name).open("rb") as handle:
             lines.append(f"{name} {hashlib.file_digest(handle, 'sha256').hexdigest()}\n")
     return hashlib.sha256("".join(lines).encode()).hexdigest()
+
+
+def check_adapter(folder: Path, expected: str) -> None:
+    """Raise ``ValueError`` unless the adapter in ``folder`` has the digest ``expected``, and
+    as ``adapter_sha256`` does for a folder that holds none."""
+    found = adapter_sha256(folder)
+    if found != expected:
+        raise ValueError(f"{folder} holds adapter files with sha256 {found}, not {expected}")
 
 
 def adapter_folder(adapter: str) -> Path:

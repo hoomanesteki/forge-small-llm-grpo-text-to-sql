@@ -1450,14 +1450,29 @@ def runs_pull(
 
 
 @runs_app.command("push")
-def runs_push(run_id: RunArgument) -> None:
+def runs_push(
+    run_id: RunArgument,
+    adapter_sha256: Annotated[
+        str | None,
+        typer.Option(
+            "--adapter-sha256",
+            help="Upload only if the run's adapter, the folder its manifest names, holds the "
+            "files with this digest, as forge.ops.adapters.adapter_sha256 takes it.",
+        ),
+    ] = None,
+) -> None:
     """Make the Hub run store's copy of the run what runs/<run_id>/ holds.
 
     For a run whose upload failed, or one that came back through forge kaggle output. Its
     manifest must be there. Files the store has and the folder lacks are deleted, so push
     a run only from a folder that holds all of it, such as one forge runs pull filled. A
     store whose copy holds a session the folder lacks keeps it, and the push is refused.
+
+    --adapter-sha256 holds a run whose manifest records no digest of its adapter to one
+    taken where it was trained: unless the folder the manifest names as the adapter holds
+    those files, nothing is uploaded.
     """
+    from forge.ops.adapters import check_adapter
     from forge.ops.hub import LocalRunStore, hub_store
     from forge.ops.paths import runs_dir
     from forge.ops.run_copies import put_run
@@ -1465,6 +1480,11 @@ def runs_push(run_id: RunArgument) -> None:
     try:
         hub, local = hub_store(), LocalRunStore(runs_dir())
         manifest = local.get_manifest(run_id)
+        if adapter_sha256 is not None:
+            adapter = manifest.outputs.get("adapter")
+            if adapter is None:
+                raise ValueError(f"run {run_id}'s manifest names no adapter to check")
+            check_adapter(local.root / run_id / adapter, adapter_sha256)
         path = put_run(hub, local.root / run_id, replace=True)
     except _runs_errors() as exc:
         typer.echo(f"error: {exc}", err=True)

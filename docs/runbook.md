@@ -306,6 +306,7 @@ uv run forge runs show <run_id>                 # its manifest and latest checkp
 uv run forge runs pull <run_id>                 # mirror it into runs/<run_id>/
 uv run forge runs pull <run_id> --store kaggle  # the same as forge kaggle output
 uv run forge runs push <run_id>                 # make the store's copy runs/<run_id>/
+uv run forge runs push <run_id> --adapter-sha256 <digest>  # only if its adapter has that digest
 uv run forge runs promote <run_id> --config <base val config> --eval <eval_run_id> ...  # best/
 ```
 
@@ -343,6 +344,10 @@ uv run forge runs promote <run_id> --config <base val config> --eval <eval_run_i
   `uv run forge ledger record <run_id>` writes its rows the same way, one for each session
   that has ended, from `runs/<run_id>/` (`FORGE_RUNS_DIR`), so its hours are never typed.
   A session still running gets no row yet: run the same command again once it ends.
+- `--adapter-sha256` holds a push to the digest of the run's adapter taken where it was
+  trained (`forge.ops.adapters.adapter_sha256` of the folder the manifest names as its
+  adapter), for a run whose manifest records none: if the folder holds other files, nothing
+  is uploaded.
 - The end of an eval run and a push replace the store's copy: files it has that the folder lacks
   are deleted, such as the `error.txt` of an attempt that failed. The kernel's upload stage only
   adds, since a kernel that failed early may hold part of a run. None of them uploads over a
