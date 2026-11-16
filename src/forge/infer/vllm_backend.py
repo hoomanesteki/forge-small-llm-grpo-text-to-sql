@@ -5,11 +5,12 @@
 ``LoRARequest``. vLLM schedules and batches requests itself, so ``generate`` hands it every
 prompt at once.
 
-The prompt is the chat in the model's template, assistant turn opened, as ``render_chat``
-gives the hf backend. A template that reads Qwen3's thinking flag goes through
-``LLM.chat`` with the flag off, which is how vLLM passes a template its options. Any other
-is rendered by ``render_chat`` itself and sent as token ids. Either way no tokenizer adds
-special tokens of its own: the template holds every one the model expects.
+Every prompt is rendered by ``render_chat``, the chat in the model's template with the
+assistant turn opened and Qwen3's thinking off, and sent to ``LLM.generate`` as the token
+ids the hf backend feeds its model: encoded with no special tokens added, since the
+template holds every one the model expects. So both backends give a model the same prompt.
+``LLM.chat`` would render with vLLM's own code, and a text prompt would be encoded by
+vLLM's rules, where a tokenizer that adds a BOS puts a second one before the template's.
 
 Decoding follows ``GenParams`` and nothing else (``sampling_kwargs``). vLLM applies a
 checkpoint's ``generation_config.json`` sampling defaults only to a call that passes no
@@ -36,13 +37,7 @@ from typing import Any
 from huggingface_hub import snapshot_download
 
 from forge.core.types import Generation, GenParams, Prompt
-from forge.infer.base import (
-    chat_template_kwargs,
-    check_params,
-    render_chat,
-    sample_seed,
-    split_ref,
-)
+from forge.infer.base import check_params, render_chat, sample_seed, split_ref
 from forge.sql.extract import extract_sql
 
 REQUIREMENTS = "kaggle/requirements-gpu.txt"
@@ -91,7 +86,6 @@ class VllmBackend:
             **lora,
         )
         self.tokenizer: Any = self.llm.get_tokenizer()
-        self.template_kwargs = chat_template_kwargs(self.tokenizer)
 
     def generate(self, prompts: Sequence[Prompt], params: GenParams) -> list[Generation]:
         check_params(params)
@@ -132,14 +126,6 @@ class VllmBackend:
         return generations
 
     def _request(self, prompts: Sequence[Prompt], sampling: list[Any]) -> list[Any]:
-        if self.template_kwargs:
-            return self.llm.chat(
-                [[dict(message) for message in prompt.messages] for prompt in prompts],
-                sampling_params=sampling,
-                use_tqdm=False,
-                lora_request=self.lora_request,
-                chat_template_kwargs=self.template_kwargs,
-            )
         token_prompts = [
             {
                 "prompt_token_ids": self.tokenizer.encode(
