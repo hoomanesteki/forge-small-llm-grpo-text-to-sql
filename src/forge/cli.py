@@ -1013,15 +1013,18 @@ def _kaggle_job_errors() -> tuple[type[Exception], ...]:
 def kaggle_run(
     job: Annotated[
         KaggleJobName,
-        typer.Option(help="eval runs forge eval run; spike, FG-301's throughput script."),
+        typer.Option(
+            help="eval runs forge eval run; sft, forge train sft; spike, FG-301's throughput "
+            "script."
+        ),
     ],
     config: Annotated[
         Path,
         typer.Option(
             exists=True,
             dir_okay=False,
-            help="configs/eval/*.yaml, or configs/spike/*.yaml for the spike; its "
-            "ops.est_gpu_hours is the job's estimate.",
+            help="configs/eval/*.yaml, configs/sft/*.yaml for sft, or configs/spike/*.yaml "
+            "for the spike; its ops.est_gpu_hours is the job's estimate.",
         ),
     ],
     run_id: Annotated[
@@ -1056,6 +1059,14 @@ def kaggle_run(
     reason: Annotated[
         str | None,
         typer.Option(help="Why dev is evaluated: required for a dev config, and logged."),
+    ] = None,
+    adapter: Annotated[
+        str | None,
+        typer.Option(
+            help="An eval job's LoRA adapter, for a config that names none: a training run's "
+            "checkpoint, runs/<run_id>/checkpoints/<name>, which the kernel fetches from the "
+            "run store, or a Hub repo@revision."
+        ),
     ] = None,
 ) -> None:
     """Push a GPU job to Kaggle once it passes the checks every GPU job must pass.
@@ -1094,6 +1105,7 @@ def kaggle_run(
             preflight=preflight,
             allow_over_budget=allow_over_budget,
             reason=reason,
+            adapter=adapter,
             notebook=emit_notebook is not None,
         )
         code = data = None

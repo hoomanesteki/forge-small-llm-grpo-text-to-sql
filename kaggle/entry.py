@@ -3,7 +3,7 @@
 ``forge kaggle run`` writes this script into the kernel it pushes, with the job's arguments
 in ``KERNEL_ARGV``, since Kaggle starts a script kernel with none. Until the code dataset's
 wheel is installed it needs only the standard library, and the job modules
-(``forge.eval.runner``, later ``forge.train``) are imported only when their stage runs, so
+(``forge.eval.runner``, ``forge.train.sft``) are imported only when their stage runs, so
 the script can be tested on a laptop with fakes. The stages, in order (``STAGES``):
 
 - restore: on a resume, the run's files so far, copied from the last attempt's kernel
@@ -28,12 +28,22 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
   of its own under ``preflight/``, so a broken job fails in minutes. The job then runs on
   the model the preflight loaded: a vLLM engine holds most of the GPU's memory while it
   lives, so a second one might not fit beside it, and loading once saves GPU time. A dev
-  job's preflight answers val questions, so dev loads once, in the job.
+  job's preflight answers val questions, so dev loads once, in the job. An SFT job's
+  preflight trains ``PREFLIGHT_STEPS`` steps of its config, saving and all, and frees its
+  model's GPU memory before the job loads the model again for a fresh adapter.
 - job: the job itself, its files in ``<work>/runs/<run_id>/``, where a resume carries on
   from the files the restore stage brought back. With
   ``--timeout-s``, the push's timeout, an eval job stops between batches before Kaggle
   would end the session (``forge.ops.timeguard.eval_deadline``, counted from the kernel's
   start), as ``stopped_time_guard``, and its run is uploaded and resumed like any other.
+  An SFT job's time guard (``TimeGuardCallback``) counts its config's
+  ``ops.time_guard_minutes`` from the job's start, or only up to that deadline, less the
+  share it keeps back, when that comes first. An eval job whose adapter is a training run's
+  checkpoint, ``runs/<run_id>/checkpoints/<name>`` as on a laptop, fetches that folder
+  from the Hub run store to the same path under the work folder first, which needs
+  ``HF_TOKEN``. An SFT job builds its rows in the temp folder, and keeps its checkpoints
+  in its run's folder for the upload: an SFT run can't be resumed yet, so a checkpoint in
+  the store before the end would serve nothing.
 - upload: that folder to the Hub run store (``forge.ops.hub``, which tries again on
   network errors), only when there is an ``HF_TOKEN``, and only when the store's copy
   holds no session this one lacks (``forge.ops.run_copies.put_run``).
@@ -85,6 +95,7 @@ STATUS_SCHEMA = "forge-kaggle-job/1"
 STATUS_FILE = "status.json"
 STAGES = ("restore", "env", "code", "install", "data", "secrets", "preflight", "job", "upload")
 PREFLIGHT_EXAMPLES = 5
+PREFLIGHT_STEPS = 2
 SECRET_LABELS = ("HF_TOKEN", "WANDB_API_KEY")
 # The names forge.ops.kaggle and forge.ops.manifest use; this script can't import them
 # before the wheel is installed, so a unit test keeps each copy in step.
@@ -361,6 +372,7 @@ def eval_job(kernel: Kernel, preflight: bool) -> str:
     config = EvalConfig(**options, host=kernel.args.host)
     if config.backend in MODEL_BACKENDS and kernel.model is None:
         check_config(config)  # before a model loads for options no run takes
+        _fetch_adapter(kernel, config.adapter)
         kernel.model = model_backend(config)
     backend, count_tokens = kernel.model or (None, None)
     deadline = None
@@ -383,6 +395,90 @@ def eval_job(kernel: Kernel, preflight: bool) -> str:
     return run.manifest.status
 
 
+def _fetch_adapter(kernel: Kernel, adapter: str | None) -> None:
+    """Fetch the adapter of an eval job from the run store when it names a training run's
+    checkpoint, ``runs/<run_id>/checkpoints/<name>``, that the work folder lacks."""
+    parts = (adapter or "").split("/")
+    if len(parts) != 4 or parts[0] != "runs" or parts[2] != "checkpoints":
+        return
+    target = kernel.work / str(adapter)
+    if target.is_dir():
+        return
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        raise JobError(
+            f"the adapter {adapter} is a checkpoint in the run store {kernel.args.run_store}, "
+            "and without an HF_TOKEN secret the kernel can't read it; attach one"
+        )
+    from forge.ops.hub import HubRunStore
+
+    HubRunStore(kernel.args.run_store, token=token).get_folder(
+        parts[1], "/".join(parts[2:]), target
+    )
+    print(f"[forge] adapter {adapter} fetched from {kernel.args.run_store}", flush=True)
+
+
+def sft_job(kernel: Kernel, preflight: bool) -> str:
+    """``forge train sft`` with the job's config, the run's platform the kernel's host; a
+    preflight trains ``PREFLIGHT_STEPS`` steps of it, in a run of its own. With the push's
+    timeout, the job's time guard stops it in time for the upload (``_guard_minutes``)."""
+    from forge.train.config import parse_train_config
+    from forge.train.sft import run_sft
+
+    config = parse_train_config(kernel.args.options["config"], where="the job's config")
+    if config.sft is None:
+        raise JobError(f"the job's config trains a {config.run.kind} run, not an sft one")
+    run_id, runs_root = kernel.args.run_id, kernel.work / "runs"
+    if preflight:
+        steps = config.sft.model_copy(update={"max_steps": PREFLIGHT_STEPS})
+        config = config.model_copy(update={"sft": steps})
+        run_id, runs_root = f"{run_id}-preflight", kernel.work / "preflight"
+    elif kernel.args.timeout_s is not None:
+        minutes = min(config.ops.time_guard_minutes, _guard_minutes(kernel))
+        # The ops section changes no weight, so the run's config and hash stay the same.
+        config = config.model_copy(
+            update={"ops": config.ops.model_copy(update={"time_guard_minutes": minutes})}
+        )
+    run = run_sft(
+        config,
+        run_id=run_id,
+        runs_root=runs_root,
+        sft_root=Path(kernel.args.temp_dir) / "sft",
+        host=kernel.args.host,
+        clock=kernel.clock,
+    )
+    if preflight:
+        _free_gpu()
+    return run.manifest.status
+
+
+def _guard_minutes(kernel: Kernel) -> float:
+    """The minutes a training job's time guard may count from now: up to an eval job's
+    deadline for the push's timeout, counted from the kernel's start, less the share that
+    deadline keeps back, which leaves the guard's last save and the upload their time."""
+    from forge.ops.timeguard import eval_deadline
+
+    deadline = eval_deadline(kernel.args.timeout_s / 60, clock=kernel.clock, start=kernel.started)
+    minutes = (deadline.remaining_s() - deadline.margin_s) / 60
+    if minutes <= 0:
+        raise JobError(
+            f"the push's {kernel.args.timeout_s} s timeout leaves the job no time to train "
+            "after the kernel's setup and preflight; push it with a larger ops.est_gpu_hours"
+        )
+    return minutes
+
+
+def _free_gpu() -> None:
+    """Give back the GPU memory of a model nothing holds any more, cycles and all."""
+    import gc
+
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def upload_stage(kernel: Kernel) -> str:
     token = os.environ.get("HF_TOKEN")
     if not token:
@@ -403,7 +499,7 @@ def upload_stage(kernel: Kernel) -> str:
     return f"uploaded to {repo}"
 
 
-JOBS: Mapping[str, Callable[[Kernel, bool], str]] = {"eval": eval_job}
+JOBS: Mapping[str, Callable[[Kernel, bool], str]] = {"eval": eval_job, "sft": sft_job}
 STAGE_FUNCTIONS: Mapping[str, Callable[[Kernel], Any]] = {
     "restore": restore_stage,
     "env": env_stage,

@@ -305,6 +305,14 @@ def test_sft_run_refuses_before_any_model_loads(spider_mini: Path, tmp_path: Pat
 
 
 @pytest.mark.phase(4)
+def test_a_kernel_run_takes_its_hosts_platform(spider_mini: Path, tmp_path: Path) -> None:
+    # On a T4 in a kernel job, the run is the host's, which kaggle/entry.py names.
+    run = _train(tmp_path, FakeBackend(device="cuda"), host="kaggle")
+    assert (run.manifest.platform, run.manifest.status) == ("kaggle", "finished")
+    assert run.manifest.config["trainer"]["device"] == "cuda"
+
+
+@pytest.mark.phase(4)
 def test_local_platforms() -> None:
     assert platform_for("cpu") == "local-cpu"
     assert platform_for("mps") == "local-mps"

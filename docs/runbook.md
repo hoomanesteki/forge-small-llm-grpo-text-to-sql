@@ -94,11 +94,13 @@ holds HEAD, so the next push from the same commit mounts it.
 1. `.smoke-ok-<HEAD sha>` must be at the repo root, and the tree clean.
 2. The job's config is checked as the kernel will check it. An eval config is a
    `configs/eval/*.yaml` file whose `backend` is `vllm` (FG-306; `hf` runs on the CPU, so it
-   is refused on a T4), with an `ops` section giving `est_gpu_hours`. `--job sft` and
-   `--job grpo` come with FG-403 and FG-504. The run id must make a kernel slug Kaggle
-   takes (`forge-<run_id>`, and `-<n>` on a resume: lowercase letters and digits with
-   single hyphens between them, so not `a--b` or `run-`), the run must not clash with an
-   earlier push, and a dev job needs a dev look left (see Dev).
+   is refused on a T4), with an `ops` section giving `est_gpu_hours`. An SFT config
+   (`--job sft`) is a `configs/sft/*.yaml` training config whose `run.device` is `auto` or
+   `cuda`, with its `ops.est_gpu_hours`; it takes no `--reason` and no `--resume`, since an
+   SFT run can't be resumed yet. `--job grpo` comes with FG-504. The run id must make a
+   kernel slug Kaggle takes (`forge-<run_id>`, and `-<n>` on a resume: lowercase letters and
+   digits with single hyphens between them, so not `a--b` or `run-`), the run must not clash
+   with an earlier push, and a dev job needs a dev look left (see Dev).
 3. The current version of `<owner>/forge-code` must hold HEAD's wheel (its `GIT_SHA`), or
    HEAD is published as a new version, which is waited for until Kaggle says `ready`. The
    kernel mounts that version by number, with `<owner>/forge-spider`, which must exist
@@ -157,6 +159,24 @@ upload stage first stretches the session up to the upload, so the Hub's copy mis
 the upload's own minutes; `forge kaggle wait` logs the whole session first. A resumed run's
 output holds every session so far, so a session that was never waited for still gets its
 row.
+
+SFT. An SFT job trains as `forge train sft` does, with the config as `forge kaggle run`
+checked it, defaults filled in, and its manifest's platform is the kernel's host. Its
+preflight trains 2 steps of the same config in `preflight/`, saving the adapter as the job
+will, then frees the GPU for the job, which loads the model again. The rows are built in
+the temp folder; the checkpoints stay in the run's folder, which the upload stage puts in
+the run store when the job ends. The job's time guard counts `ops.time_guard_minutes`
+from the job's start, or less when the push's timeout comes first: counted from the
+kernel's start, as an eval job's deadline is, with the same tenth of it kept back, here
+for the guard's last save and the upload. A training run writes no `sessions.json` of its
+own, so the kernel's session is added to the run with the run's status.
+
+`--adapter` gives an eval job its adapter when the config names none, so a checkpoint is
+scored with its base model's config (`configs/eval/<name>-val.yaml`) and the two runs
+differ in the adapter alone. An adapter that is a training run's checkpoint,
+`runs/<run_id>/checkpoints/<name>` as on the laptop, is fetched from the run store to the
+same path in the kernel before the model loads, so it needs the `HF_TOKEN` secret; the
+manifest names the adapter by that path, which `forge runs promote` reads.
 
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the

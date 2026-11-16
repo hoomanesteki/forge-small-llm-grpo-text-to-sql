@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 
 from forge import cli
 from forge.core.types import RunManifest
-from forge.eval.config import EvalConfig
+from forge.eval.config import EvalConfig, read_config_file
 from forge.ops import clock, kaggle, kaggle_job
 from forge.ops.dev_usage import log_dev_use, read_uses
 from forge.ops.hub import manifest_bytes
@@ -38,6 +38,7 @@ from forge.ops.kaggle_job import (
 )
 from forge.ops.ledger import read_rows, summary
 from forge.ops.sessions import Session
+from forge.train.config import load_train_config, parse_train_config
 from tests.kernel import WHEEL
 from tests.spike import entry, load_script
 
@@ -461,8 +462,8 @@ def test_jobs_a_later_story_builds_and_bad_options_are_refused_before_any_upload
 ) -> None:
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
     config = str(repo / "configs/eval/job.yaml")
-    result = _run("--job", "sft", "--config", config, "--yes")
-    assert result.exit_code == 1 and "error: --job sft comes with FG-404" in result.stderr
+    result = _run("--job", "grpo", "--config", config, "--yes")
+    assert result.exit_code == 1 and "error: --job grpo comes with FG-504" in result.stderr
 
     for text, message in (
         ("model: org/m\nbackend: llamacpp\nops: {est_gpu_hours: 1}\n", "comes with FG-702"),
@@ -473,6 +474,90 @@ def test_jobs_a_later_story_builds_and_bad_options_are_refused_before_any_upload
         path = repo.parent / "job.yaml"
         path.write_text(text, encoding="utf-8")
         result = _run("--job", "eval", "--config", str(path), "--yes")
+        assert result.exit_code == 1 and message in result.stderr, result.stderr
+    assert fake.commands == []
+
+
+@pytest.mark.phase(4)
+def test_sft_job_pushes_the_config_it_checked(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    config = ROOT / "configs" / "sft" / "qwen3-4b-main.yaml"
+
+    result = _run("--job", "sft", "--config", str(config), "--yes")
+
+    assert result.exit_code == 0, result.output
+    run_id = f"{_today():%Y-%m-%d}-qwen3-4b-sft-{head[:7]}"
+    assert f"run {run_id}: kernel {OWNER}/forge-{run_id}, version 1" in result.stdout
+    assert "estimate 2.50 GPU h" in result.stdout
+    # The code and data datasets mounted, a T4, and the plan's 2.5 h and half again.
+    meta = json.loads(fake.pushed[0]["kernel-metadata.json"])
+    assert meta["dataset_sources"] == [f"{OWNER}/forge-code/1", f"{OWNER}/forge-spider"]
+    assert fake.ran("kernels", "push")[0][-4:] == ["--accelerator", "NvidiaTeslaT4", "-t", "13500"]
+    args = script.parse_args(_baked_argv(fake.pushed[0]["entry.py"]))
+    assert (args.job, args.run_id, args.code_sha, args.preflight) == ("sft", run_id, head, True)
+    # The kernel's time guard counts to the same timeout.
+    assert args.timeout_s == 13500
+    # The whole config as it was checked here, defaults filled in, which the kernel reads
+    # back as the same config.
+    checked = load_train_config(config)
+    assert args.options == {"config": checked.model_dump(mode="json")}
+    assert parse_train_config(args.options["config"]) == checked
+    assert _record(repo, run_id)["job"] == "sft"
+
+
+@pytest.mark.phase(4)
+def test_eval_job_scores_a_checkpoint_with_its_base_models_config(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    base = ROOT / "configs" / "eval" / "qwen3-4b-val.yaml"
+    checkpoint = "runs/2026-11-20-qwen3-4b-sft-abc1234/checkpoints/step-000242"
+
+    result = _run("--job", "eval", "--config", str(base), "--adapter", checkpoint, "--yes")
+
+    assert result.exit_code == 0, result.output
+    args = script.parse_args(_baked_argv(fake.pushed[0]["entry.py"]))
+    # The base run's options and the adapter alone, so the two runs differ in it alone.
+    assert args.options == {**read_config_file(base), "adapter": checkpoint}
+    assert EvalConfig(**args.options, host="kaggle").manifest_config()["adapter"] == checkpoint
+
+    named = repo.parent / "named.yaml"
+    named.write_text(CONFIG + f"adapter: {checkpoint}\n", encoding="utf-8")
+    for job, config, message in (
+        ("eval", named, "names an adapter already; leave out --adapter"),
+        ("sft", ROOT / "configs" / "sft" / "qwen3-4b-main.yaml", "--adapter is an eval job's"),
+    ):
+        refused = _run("--job", job, "--config", str(config), "--adapter", checkpoint, "--yes")
+        assert refused.exit_code == 1 and message in refused.stderr, refused.stderr
+    assert len(fake.pushed) == 1
+
+
+@pytest.mark.phase(4)
+def test_sft_job_refuses_what_a_kernel_cant_train(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
+    main = str(ROOT / "configs" / "sft" / "qwen3-4b-main.yaml")
+    configs = {
+        "grpo": "run: {kind: grpo, model_ref: org/m}\ngrpo: {}\nops: {est_gpu_hours: 1}\n",
+        "unbudgeted": "run: {kind: sft, model_ref: org/m}\nsft: {}\n",
+        "eval": CONFIG,
+    }
+    for name, text in configs.items():
+        (repo.parent / f"{name}.yaml").write_text(text, encoding="utf-8")
+    refused = [
+        ((main, "--reason", "baseline"), "an SFT job trains on the train split only"),
+        ((main, "--resume"), "an SFT run can't be resumed yet"),
+        ((str(ROOT / "configs/sft/tiny-smoke.yaml"),), "trains on cpu, and a kernel on its GPU"),
+        ((str(ROOT / "configs/sft/pilot-qwen25coder05b-mps.yaml"),), "trains on mps, and a"),
+        ((str(repo.parent / "grpo.yaml"),), "trains a grpo run, and --job sft an sft one"),
+        ((str(repo.parent / "unbudgeted.yaml"),), "sets no ops.est_gpu_hours"),
+        ((str(repo.parent / "eval.yaml"),), "model: Extra inputs are not permitted"),
+    ]
+    for args, message in refused:
+        result = _run("--job", "sft", "--config", *args, "--yes")
         assert result.exit_code == 1 and message in result.stderr, result.stderr
     assert fake.commands == []
 
