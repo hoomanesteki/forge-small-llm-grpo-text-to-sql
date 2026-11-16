@@ -121,10 +121,11 @@ holds HEAD, so the next push from the same commit mounts it.
    in `KERNEL_ARGV`, and private GPU metadata with internet. It pushes with
    `--accelerator NvidiaTeslaT4` and a timeout of the estimate and half again (at most 12
    hours: plan section 5.3 stops a job 50% over its estimate), and reads the CLI's output:
-   a push error fails the command although kaggle exits 0. A source the CLI says it could
-   not add is a warning instead, since Kaggle has saved and started that version without
-   it. Either way a version Kaggle started is added to `runs/<run_id>/kernels.json`, which
-   `status`, `logs`, `wait` and `output` read.
+   a push error fails the command although kaggle exits 0, and a CLI that fails before it
+   says the kernel was pushed is checked against Kaggle's own status (see Dev). A source
+   the CLI says it could not add is a warning instead, since Kaggle has saved and started
+   that version without it. Either way a version Kaggle started is added to
+   `runs/<run_id>/kernels.json`, which `status`, `logs`, `wait` and `output` read.
 
 The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the kernel
 `<owner>/forge-<run_id>`, titled `Forge <run_id>`. A run id that was pushed before is
@@ -193,12 +194,29 @@ Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
 `forge kaggle run` writes its row, with the run id and the reason, as soon as Kaggle
 accepts the push, and records the kernel whether or not that write worked: if either step
-fails, the error names it and says not to push again, since the kernel runs. A push fails
-only when Kaggle refuses it ("Kernel push error") or the kaggle CLI exits with an error
-before it says the kernel was pushed; any other answer, one that names no version among
-them, is a kernel that runs, and its look is spent. So a kernel that may read dev has its
-row unless the error says it hasn't, and a push that fails spends nothing. A
-`--resume` carries on the same run, from the same commit with the same options, so it is
+fails, the error names it and says not to push again, since the kernel runs. A push that
+Kaggle refuses ("Kernel push error") fails and spends nothing. A kaggle CLI that exits with
+an error before it says the kernel was pushed may only have lost Kaggle's answer, a
+timeout among them, after Kaggle saved the kernel, so `forge kaggle run` then asks Kaggle
+with `kaggle kernels status` whether it has the attempt's kernel, which no earlier push
+made:
+
+- Kaggle has it: the push was made. It is recorded in `kernels.json`, with no version, so
+  the kernel's latest is followed, its look is logged, and a warning says the answer was
+  lost.
+- Kaggle has no such kernel: the push never started, so it fails and spends nothing.
+- Kaggle can't be asked either: the push fails and records nothing, and the error says
+  whether Kaggle saved the kernel is unknown. Check with `kaggle kernels status
+  <owner>/<slug>` before pushing again: a kernel Kaggle has runs, and a dev job's then
+  reads dev without its row in `docs/dev-usage.md`.
+
+Any other answer from the CLI, one that names no version among them, is a kernel that runs,
+and its look is spent. So a kernel that may read dev has its row unless the error says it
+hasn't. The spike, which reads no dev, isn't checked: its push makes a new version of the
+one kernel earlier pushes made, and the status names no version, so it can't tell this
+push's from the one before. When its CLI fails, the spike's push fails as before.
+
+A `--resume` carries on the same run, from the same commit with the same options, so it is
 the same look: it adds no row, and it goes even once the six are spent. In the kernel the
 preflight answers 5 val questions instead, so dev loads once, in the job, whose own row
 goes to `dev-usage.md` in the kernel's output. A dev job has no `--emit-notebook`, since a

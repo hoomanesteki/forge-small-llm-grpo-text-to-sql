@@ -18,7 +18,9 @@ Before a push, in the plan's order (FG-303):
 6. ``KaggleClient.push_kernel`` with a T4 and a timeout of the estimate and half again, at
    most a session's 12 hours: plan section 5.3 stops a job 50% over its estimate. The
    entry script gets the timeout too, and its eval job stops at the time guard before
-   it. Each push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait
+   it. A push whose CLI failed without saying it pushed is a push made when Kaggle has
+   the attempt's new kernel all the same (``JobPlan.new_kernel``): only its answer was
+   lost. Each push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait
    and output read to find the run's kernel. A resume mounts the last attempt whose
    output holds the run: not one whose own kernel source Kaggle dropped, since that one
    failed to restore it.
@@ -26,9 +28,10 @@ Before a push, in the plan's order (FG-303):
 A dev eval job takes ``--reason``, as ``forge eval run --split dev`` does, and is refused
 once the six dev looks are spent (ADR-0004). The push spends its look: ``log_dev_look``
 writes the row in ``docs/dev-usage.md`` here, where the repo is, since the kernel's own
-log stays in its output, as soon as Kaggle has accepted the push. ``settle_push`` logs it
-and records the push each whatever the other raises, as Kaggle runs the kernel either
-way. A ``--resume`` of the same run is the same look, so it adds no row and goes even
+log stays in its output, as soon as Kaggle has accepted the push, a push whose answer was
+lost among them. ``settle_push`` logs it and records the push each whatever the other
+raises, as Kaggle runs the kernel either way. A ``--resume`` of the same run is the same
+look, so it adds no row and goes even
 once the looks are spent. A notebook can run any number of times, so a dev job has none,
 and it can't fetch a kernel's output, so it resumes nothing.
 
@@ -150,6 +153,12 @@ class JobPlan:
 
     @property
     def mounts_datasets(self) -> bool:
+        return self.job != "spike"
+
+    @property
+    def new_kernel(self) -> bool:
+        """Whether the push makes a kernel no earlier push made: each attempt of an entry
+        job has its own, while the spike's one kernel gets a new version every push."""
         return self.job != "spike"
 
     @property
