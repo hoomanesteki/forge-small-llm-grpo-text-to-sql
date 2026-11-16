@@ -23,12 +23,16 @@
 - ``CheckpointCallback`` has the trainer save every ``checkpoint_every`` steps and pushes
   each checkpoint to the same folders, pruning as the guard does; a stop of the guard's
   is the guard's to push. A push that still fails on the network after the store's
-  retries is logged and training goes on, since the checkpoint stays in the output
-  folder and the next one tries again. Any other failure, such as a refused token,
-  stops the job: no later push would work either.
+  retries is logged and training goes on: the next checkpoint supersedes that one. Any
+  other failure, such as a refused token, stops the job: no later push would work either.
 - Both keep the checkpoints of ``keep_checkpoints_at``, shares of the run's steps
   (``kept_steps``), which ``CheckpointCallback`` also saves, from retention: val chooses
-  among them and ``checkpoints/final`` once the run ends (FG-404).
+  among them and ``checkpoints/final`` once the run ends (FG-404). No later checkpoint
+  supersedes a kept one, so when its push fails on the network ``CheckpointCallback``
+  moves it out of the trainer's own rotation (``save_total_limit``, which would delete it
+  two saves on), to ``unpushed-checkpoint-<step>`` in the output folder, and pushes it
+  again after the next push the store takes and at the end of training. One the store
+  still hasn't taken then stays there, named in an error, for the job to keep.
 - ``MetricsCallback`` appends each log the trainer writes to ``metrics.jsonl`` as one
   JSON line, and pushes the file to the run at every save and at the end, failing as
   ``CheckpointCallback`` does.
@@ -42,6 +46,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -60,6 +65,9 @@ from forge.train.config import OpsConfig
 log = logging.getLogger(__name__)
 
 WANDB_KEY = "WANDB_API_KEY"
+# What a kept checkpoint the store hasn't taken is called in the output folder: a name the
+# trainer's rotation, which matches checkpoint-*, leaves alone.
+UNPUSHED_PREFIX = "unpushed-"
 
 
 def kept_steps(shares: Sequence[float], max_steps: int) -> dict[float, int]:
@@ -174,7 +182,8 @@ class CheckpointCallback(TrainerCallback):
     ``keep_at`` ones.
 
     A step ``guard`` stops at is the guard's to push, since it marks the manifest once
-    the checkpoint is stored.
+    the checkpoint is stored. A ``keep_at`` checkpoint whose push fails on the network
+    waits out of the trainer's rotation, in ``unpushed``, as the module docstring says.
     """
 
     def __init__(
@@ -195,6 +204,7 @@ class CheckpointCallback(TrainerCallback):
         self.keep_at = tuple(keep_at)
         self.kept: dict[float, int] = {}  # share: step, once training begins
         self.pushed: dict[int, str] = {}  # step: where the store holds its checkpoint
+        self.unpushed: dict[int, Path] = {}  # kept step: its folder, until the store takes it
 
     def on_train_begin(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
@@ -220,21 +230,59 @@ class CheckpointCallback(TrainerCallback):
             return
         if args.output_dir is None:  # the trainer fills it in before it saves anything
             raise ValueError("the trainer saved a checkpoint, but its args name no output_dir")
-        folder = Path(args.output_dir) / f"{PREFIX_CHECKPOINT_DIR}-{step}"
-        dest = checkpoint_dir(step)
-        try:
-            self.pushed[step] = self.store.put_folder(self.run_id, folder, dest)
-        except StoreUnavailable as exc:
+        out = Path(args.output_dir)
+        folder = out / f"{PREFIX_CHECKPOINT_DIR}-{step}"
+        failure = self._put(step, folder)
+        if failure is None:
+            # The store takes pushes again, so the kept ones it refused go now.
+            self._put_unpushed()
+            return
+        if step not in self.kept.values():
             log.warning(
                 "checkpoint: step %d of run %s is only in %s, since pushing it to %s failed: "
                 "%s; training goes on, and the next checkpoint is pushed as usual",
                 step,
                 self.run_id,
                 folder,
-                dest,
-                exc,
+                checkpoint_dir(step),
+                failure,
             )
             return
+        aside = out / f"{UNPUSHED_PREFIX}{folder.name}"
+        folder.rename(aside)
+        self.unpushed[step] = aside
+        log.warning(
+            "checkpoint: step %d of run %s, kept for a share of the run, is only in %s, out "
+            "of the trainer's rotation, since pushing it to %s failed: %s; it is pushed again "
+            "after the next push that goes through, and at the end",
+            step,
+            self.run_id,
+            aside,
+            checkpoint_dir(step),
+            failure,
+        )
+
+    def on_train_end(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
+    ) -> None:
+        self._put_unpushed()
+        if self.unpushed:
+            log.error(
+                "checkpoint: run %s ends with kept steps %s that the store never took, only "
+                "in %s; keep them, and push each to its checkpoints/step-NNNNNN in the run",
+                self.run_id,
+                ", ".join(str(step) for step in sorted(self.unpushed)),
+                ", ".join(str(folder) for _, folder in sorted(self.unpushed.items())),
+            )
+
+    def _put(self, step: int, folder: Path) -> StoreUnavailable | None:
+        """Push ``folder`` as the checkpoint of ``step`` and prune, or return the network
+        failure that stopped the push. Raises ``OSError`` for any other failure."""
+        dest = checkpoint_dir(step)
+        try:
+            self.pushed[step] = self.store.put_folder(self.run_id, folder, dest)
+        except StoreUnavailable as exc:
+            return exc
         except OSError as exc:
             raise OSError(
                 f"checkpoint {folder} could not go to {dest} of run {self.run_id} in "
@@ -246,6 +294,24 @@ class CheckpointCallback(TrainerCallback):
         # Logged, not raised: the checkpoint is stored, and the next push prunes again.
         except OSError as exc:
             log.warning("checkpoint: run %s keeps its older checkpoints: %s", self.run_id, exc)
+        return None
+
+    def _put_unpushed(self) -> None:
+        """Push the kept checkpoints the store refused, oldest first, until one fails."""
+        for step, folder in sorted(self.unpushed.items()):
+            failure = self._put(step, folder)
+            if failure is not None:
+                log.warning(
+                    "checkpoint: step %d of run %s is still only in %s: %s",
+                    step,
+                    self.run_id,
+                    folder,
+                    failure,
+                )
+                return
+            del self.unpushed[step]
+            # The store holds it now, as it holds those the trainer's rotation deleted.
+            shutil.rmtree(folder)
 
 
 class MetricsCallback(TrainerCallback):

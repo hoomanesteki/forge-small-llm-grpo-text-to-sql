@@ -368,6 +368,49 @@ def test_checkpoint_push_failures(
 
 
 @pytest.mark.phase(4)
+def test_a_kept_checkpoint_waits_out_of_rotation_until_the_store_takes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = LocalRunStore(tmp_path / "store")
+    put_folder = store.put_folder
+    down = [True]
+
+    def flaky(run_id: str, local_dir: str | Path, dest: str = "", *, replace: bool = False) -> str:
+        if down[0]:
+            raise StoreUnavailable(f"uploading {dest} failed 4 times")
+        return put_folder(run_id, local_dir, dest, replace=replace)
+
+    monkeypatch.setattr(store, "put_folder", flaky)
+    out = tmp_path / "out"
+    checkpoints = CheckpointCallback(store, RUN, every=4, keep_at=[0.25])
+    with caplog.at_level(logging.WARNING, logger="forge.train.callbacks"):
+        _train([checkpoints], out, 8, max_steps=8)
+    # Step 2, kept for val, left the trainer's checkpoint-* folders, which its rotation
+    # prunes, for a name it leaves alone; step 4 and 8 stay where the next push supersedes.
+    aside = out / "unpushed-checkpoint-2"
+    assert checkpoints.unpushed == {2: aside} and checkpoints.pushed == {}
+    assert (aside / "adapter_model.safetensors").read_text() == "step 2"
+    assert sorted(p.name for p in out.glob("checkpoint-*")) == ["checkpoint-4", "checkpoint-8"]
+    assert "out of the trainer's rotation, since pushing it to checkpoints/step-000002" in (
+        caplog.text
+    )
+
+    # Still down at the end: an error names the folder, which stays for the job to keep.
+    args: Any = SimpleNamespace(output_dir=str(out))
+    state, control = TrainerState(max_steps=8, global_step=8), TrainerControl()
+    with caplog.at_level(logging.ERROR, logger="forge.train.callbacks"):
+        checkpoints.on_train_end(args, state, control)
+    assert f"ends with kept steps 2 that the store never took, only in {aside}" in caplog.text
+    assert aside.is_dir()
+    # Back at the end: the store takes it, beside the latest checkpoints it holds.
+    down[0] = False
+    checkpoints.on_train_end(args, state, control)
+    assert checkpoints.unpushed == {} and not aside.exists()
+    stored = store.root / RUN / "checkpoints" / "step-000002" / "adapter_model.safetensors"
+    assert stored.read_text() == "step 2"
+
+
+@pytest.mark.phase(4)
 def test_metrics_go_to_jsonl_and_the_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
