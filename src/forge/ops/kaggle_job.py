@@ -71,8 +71,8 @@ from forge.ops.ledger import Summary
 from forge.ops.manifest import DirtyTreeError, git_sha
 
 JOBS = ("eval", "sft", "grpo", "spike")
-# Jobs whose trainers later stories build, with the story that brings each.
-LATER_JOBS: Mapping[str, str] = {"sft": "FG-403", "grpo": "FG-504"}
+# Jobs the kernel's entry script can't run yet, with the story that brings each.
+LATER_JOBS: Mapping[str, str] = {"sft": "FG-404", "grpo": "FG-504"}
 ENTRY = Path("kaggle") / "entry.py"  # relative to the repo root, like the spike
 SPIKE = Path("kaggle") / "spike" / "throughput.py"
 # The FG-301 GPU kernel's name, the one scripts/kaggle_spike.py bundles.
