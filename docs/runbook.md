@@ -236,13 +236,20 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 - Invariant I7 (`tests/integration/test_invariants.py`) checks that every session of every
   `kaggle`, `colab` or `modal` run under `docs/runs/` and `runs/` has a row, that a run's
   rows name its platform, and that the ledger's cash stays within $50.
-- `forge eval run --store hub` fetches the run from the store when `runs/<run_id>/` has no
-  manifest, so a run another machine started resumes here, and puts the folder in the store
-  when the run ends, finished or failed. If that upload fails after the run finished, the
-  command exits 1 and says so; `forge runs push <run_id>` tries again.
+- `forge eval run --store hub` first compares `runs/<run_id>/` with the store's copy, and fetches
+  the store's when it is newer or the folder has none, so a run another machine carried on
+  resumes from where that machine left it, and a finished run is never run again. It puts the
+  folder in the store when the run ends, finished or failed. If that upload fails after the run
+  finished, the command exits 1 and says so; `forge runs push <run_id>` tries again.
+- Which copy is newer comes from the run's `sessions.json`, one session an attempt
+  (`forge.ops.run_copies`): a copy whose sessions begin with all of the other's is the newer.
+  When neither's do, two machines carried the run on from one point and each holds work the
+  other lacks, so `forge eval run` refuses to resume it and no upload replaces either. Keep the
+  store's with `forge runs pull <run_id>`, or evaluate again under a new `--run-id`.
 - The end of an eval run and a push replace the store's copy: files it has that the folder lacks
   are deleted, such as the `error.txt` of an attempt that failed. The kernel's upload stage only
-  adds, since a kernel that failed early may hold part of a run.
+  adds, since a kernel that failed early may hold part of a run. None of them uploads over a
+  store whose copy holds a session the folder lacks: the command says so and uploads nothing.
 - A Hub call that fails on the network (a dropped or refused connection, a timeout, 408, 429
   or 5xx, downloads included) is tried again by one layer only. huggingface_hub 2.4 tries most
   of its requests 5 more times itself, 1, 2, 4, 8 and 8 seconds apart; the two it sends once,
