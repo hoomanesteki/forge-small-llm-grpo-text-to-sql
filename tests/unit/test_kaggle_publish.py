@@ -3,6 +3,7 @@ uv and kaggle commands that build and upload it, with both programs stood in for
 
 from __future__ import annotations
 
+import functools
 import json
 import shutil
 import subprocess
@@ -55,6 +56,7 @@ class FakeCli:
 
     def __init__(self, *exists: str) -> None:
         self.exists = set(exists)
+        self.status: dict[str, str] = {}  # what datasets status prints, if not ready
         self.commands: list[list[str]] = []
         self.uploaded: list[list[str]] = []  # the files of each uploaded folder
 
@@ -67,7 +69,7 @@ class FakeCli:
             return _done(command, stdout=f"Successfully built {out / WHEEL}\n")
         if command[1:3] == ["datasets", "status"]:
             if command[3] in self.exists:
-                return _done(command, stdout="ready\n")
+                return _done(command, stdout=f"{self.status.get(command[3], 'ready')}\n")
             return _done(command, 1, stderr=NOT_FOUND)
         if command[1:3] in (["datasets", "create"], ["datasets", "version"]):
             folder = Path(command[command.index("-p") + 1])
@@ -209,6 +211,8 @@ def test_publish_commands(repo: Path, spider_mini: Path, checksums: Path) -> Non
     assert publish_data(repo, OWNER, client, spider_mini, checksums) == Published(
         "forge-owner/forge-spider", True, CREATED.strip()
     )
+    # A whole copy of Spider, gone once it is uploaded.
+    assert not (repo / DATA_BUNDLE).exists()
     assert fake.commands == [
         uv_build,
         ["kaggle", "datasets", "status", "forge-owner/forge-code"],
@@ -235,6 +239,46 @@ def test_publish_commands(repo: Path, spider_mini: Path, checksums: Path) -> Non
         == sorted(["GIT_SHA", "dataset-metadata.json", WHEEL, "requirements-gpu.txt"])
     )
     assert "spider.sha256" in fake.uploaded[1]
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize("status", ["failed", "deleted"])
+def test_publish_data_counts_only_a_ready_dataset_as_there(
+    repo: Path, spider_mini: Path, checksums: Path, status: str
+) -> None:
+    fake = FakeCli("forge-owner/forge-spider")
+    fake.status["forge-owner/forge-spider"] = status
+
+    published = publish_data(repo, OWNER, _client(fake), spider_mini, checksums)
+
+    # Kaggle never made that version ready, so the data goes up again as a new one.
+    assert published == Published("forge-owner/forge-spider", False, CREATED.strip())
+    note = f"The verified Spider files again, after a {status} version"
+    data = str(repo / DATA_BUNDLE)
+    assert fake.commands == [
+        ["kaggle", "datasets", "status", "forge-owner/forge-spider"],
+        ["kaggle", "datasets", "version", "-p", data, "-m", note, "-r", "zip"],
+    ]
+    assert "spider.sha256" in fake.uploaded[0]
+    assert not (repo / DATA_BUNDLE).exists()
+
+
+@pytest.mark.phase(3)
+def test_publish_data_never_uploads_over_a_version_being_processed(
+    repo: Path, spider_mini: Path, checksums: Path
+) -> None:
+    fake = FakeCli("forge-owner/forge-spider")
+    fake.status["forge-owner/forge-spider"] = "blobs_received"
+
+    with pytest.raises(KaggleError, match=r"still being processed \(blobs_received\)"):
+        publish_data(repo, OWNER, _client(fake), spider_mini, checksums)
+    assert [c[2] for c in fake.commands] == ["status"]
+    assert not (repo / DATA_BUNDLE).exists()
+
+    # A status kagglesdk doesn't name is no answer at all.
+    fake.status["forge-owner/forge-spider"] = "Something went wrong"
+    with pytest.raises(KaggleError, match="printed 'Something went wrong'"):
+        publish_data(repo, OWNER, _client(fake), spider_mini, checksums)
 
 
 @pytest.mark.phase(3)
@@ -414,8 +458,42 @@ def test_publish_data_cli_leaves_a_published_dataset(
     result = CliRunner().invoke(cli.app, ["kaggle", "publish-data"])
 
     assert result.exit_code == 0, result.output
-    assert "forge-owner/forge-spider exists already" in result.stdout
+    assert "forge-owner/forge-spider is ready already" in result.stdout
     assert fake.commands == [["kaggle", "datasets", "status", "forge-owner/forge-spider"]]
+
+
+@pytest.mark.phase(3)
+def test_publish_data_cli_removes_its_bundle_unless_kept(
+    repo: Path,
+    cli_env: Path,
+    spider_mini: Path,
+    checksums: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FORGE_KAGGLE_USER", OWNER)
+    monkeypatch.setenv("FORGE_ROOT", str(repo))
+    # The fixture is a subset of Spider, so its own checksum list stands in for the pinned.
+    monkeypatch.setattr(
+        kaggle, "publish_data", functools.partial(publish_data, checksums=checksums)
+    )
+    fake = FakeCli()
+    monkeypatch.setattr(kaggle, "KaggleClient", lambda: _client(fake))
+
+    kept = CliRunner().invoke(cli.app, ["kaggle", "publish-data", "--keep-build"])
+
+    assert kept.exit_code == 0, kept.output
+    assert f"bundle {repo / DATA_BUNDLE} (kept)" in kept.stdout
+    assert "created forge-owner/forge-spider" in kept.stdout
+    assert (repo / DATA_BUNDLE / "spider.sha256").is_file()
+
+    fake.exists.add("forge-owner/forge-spider")
+    fake.status["forge-owner/forge-spider"] = "failed"
+    again = CliRunner().invoke(cli.app, ["kaggle", "publish-data"])
+
+    assert again.exit_code == 0, again.output
+    assert f"bundle {repo / DATA_BUNDLE} (removed after the upload)" in again.stdout
+    assert "uploaded a new version of forge-owner/forge-spider" in again.stdout
+    assert not (repo / DATA_BUNDLE).exists()
 
 
 @pytest.mark.phase(3)

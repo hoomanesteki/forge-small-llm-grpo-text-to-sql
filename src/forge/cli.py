@@ -851,13 +851,22 @@ def kaggle_publish_code() -> None:
 
 
 @kaggle_app.command("publish-data")
-def kaggle_publish_data() -> None:
+def kaggle_publish_data(
+    keep_build: Annotated[
+        bool,
+        typer.Option(
+            "--keep-build", help="Keep build/kaggle-data after the upload, a copy of Spider."
+        ),
+    ] = False,
+) -> None:
     """Upload the verified Spider files once, as the private dataset <owner>/forge-spider.
 
     Every file spider.sha256 lists must be in FORGE_DATA_DIR (default data/spider) and
     match it. build/kaggle-data gets them and spider.sha256, and the description carries
-    Spider's CC BY-SA 4.0 attribution and citation. A dataset that exists is left as it
-    is: the checksums pin Spider, so one upload serves every job.
+    Spider's CC BY-SA 4.0 attribution and citation; the folder goes once the upload is
+    done. A dataset whose status says ready is left as it is: the checksums pin Spider,
+    so one upload serves every job. One whose last version failed or was deleted gets a
+    new version, and one Kaggle is still processing is an error until it is ready.
     """
     from forge.data.spider import ChecksumMismatch, resolve_data_dir
     from forge.ops.kaggle import DATA_BUNDLE, DATA_SLUG, KaggleClient, KaggleError, publish_data
@@ -867,7 +876,7 @@ def kaggle_publish_data() -> None:
         root = repo_root()
         owner = _kaggle_owner()
         data_dir = resolve_data_dir()
-        published = publish_data(root, owner, KaggleClient(), data_dir)
+        published = publish_data(root, owner, KaggleClient(), data_dir, keep_build=keep_build)
     except ChecksumMismatch as exc:
         typer.echo(
             f"error: {len(exc.files)} file(s) in {data_dir} are missing or differ from "
@@ -880,10 +889,15 @@ def kaggle_publish_data() -> None:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     if published is None:
-        typer.echo(f"{owner}/{DATA_SLUG} exists already; nothing to upload")
+        typer.echo(f"{owner}/{DATA_SLUG} is ready already; nothing to upload")
         return
-    typer.echo(f"bundle {root / DATA_BUNDLE}: the files of {data_dir}, each matching spider.sha256")
-    typer.echo(f"created {published.ref}")
+    kept = "kept" if keep_build else "removed after the upload"
+    typer.echo(
+        f"bundle {root / DATA_BUNDLE} ({kept}): the files of {data_dir}, each matching "
+        "spider.sha256"
+    )
+    action = "created" if published.created else "uploaded a new version of"
+    typer.echo(f"{action} {published.ref}")
     typer.echo(published.output)
 
 
