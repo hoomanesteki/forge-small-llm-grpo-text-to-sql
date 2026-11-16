@@ -162,8 +162,9 @@ a Hub repo fetched at its `@revision`. Every prompt is rendered by `render_chat`
 with thinking off, and sent as the token ids the hf backend gives its model on the laptop,
 never through vLLM's own `LLM.chat`. Decoding takes only the config's settings, never a
 checkpoint's `generation_config.json` defaults, and each question has a seed of its own.
-The preflight and the job share one engine, loaded once, since a second might not fit
-beside the first. `forge eval run --backend vllm` on the laptop is refused: its manifest
+A temperature between 0 and 0.01 is refused, on every backend, since vLLM would decode it
+at 0.01. The preflight and the job share one engine, loaded once, since a second might not
+fit beside the first. `forge eval run --backend vllm` on the laptop is refused: its manifest
 would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: bitsandbytes`
 loads the weights in 4-bit, for a reference model too big for the T4 in fp16; the
 manifest's config then records it.

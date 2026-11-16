@@ -17,7 +17,13 @@ from forge.core.types import GenParams, Prompt
 from forge.eval.config import EvalConfig
 from forge.eval.runner import model_backend
 from forge.infer import vllm_backend
-from forge.infer.base import THINKING_FLAG, InferenceBackend, render_chat, sample_seed
+from forge.infer.base import (
+    MIN_TEMPERATURE,
+    THINKING_FLAG,
+    InferenceBackend,
+    render_chat,
+    sample_seed,
+)
 from forge.infer.vllm_backend import REQUIREMENTS, VllmBackend, sampling_kwargs
 from tests.fakes import FakeLoRARequest, FakeVllm, VocabTokenizer
 
@@ -76,6 +82,14 @@ def test_sampling_params_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [sp.kwargs for sp in call["sampling_params"]] == [
         sampling_kwargs(params, prompt.example_id) for prompt in PROMPTS
     ]
+
+    # vLLM decodes a temperature between 0 and 0.01 at 0.01, so the backend sends none.
+    backend = VllmBackend("org/model")
+    with pytest.raises(ValueError, match=r"temperature must be 0 or at least 0\.01, got 0\.005"):
+        backend.generate(PROMPTS, GenParams(temperature=0.005))
+    assert len(vllm.calls) == 1
+    backend.generate(PROMPTS, GenParams(temperature=MIN_TEMPERATURE))
+    assert vllm.calls[-1][1]["sampling_params"][0].kwargs["temperature"] == 0.01
 
 
 @pytest.mark.phase(3)

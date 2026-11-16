@@ -181,6 +181,16 @@ def test_quantization_loads_a_vllm_model_in_4bit_and_is_recorded(
     assert [config.quantization for config in configs] == ["bitsandbytes"]
 
 
+@pytest.mark.phase(3)
+def test_a_temperature_vllm_would_raise_is_refused_up_front() -> None:
+    # vLLM would decode it at 0.01 while the manifest's generation said 0.005.
+    kernel = EvalConfig(model="org/model", backend="vllm", host="kaggle")
+    for config in (BASE, kernel):
+        with pytest.raises(ValueError, match=re.escape("temperature must be 0 or at least 0.01")):
+            check_config(dataclasses.replace(config, temperature=0.005))
+        check_config(dataclasses.replace(config, temperature=0.01))
+
+
 @pytest.mark.phase(2)
 def test_platform_follows_the_device() -> None:
     # A run on Apple silicon's GPU is a local-mps pilot; every other local run is local-cpu.

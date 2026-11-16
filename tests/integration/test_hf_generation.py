@@ -20,7 +20,7 @@ from transformers import (
 from forge.core.types import ExecResult, Generation, GenParams, Prompt
 from forge.eval.retry import ask_again, retry_prompt
 from forge.infer import hf_backend
-from forge.infer.base import render_chat
+from forge.infer.base import MIN_TEMPERATURE, render_chat
 from forge.infer.hf_backend import HfBackend
 from forge.sql.extract import extract_sql
 from tests.tiny_hf import byte_tokenizer, save_random_model
@@ -204,10 +204,10 @@ def test_temperature_and_top_p_shape_the_draws(model_dir: Path) -> None:
         return _texts(backend.generate(PROMPTS, GenParams(max_new_tokens=16, **settings)))
 
     greedy = replies()
-    # A top_p this small leaves only the likeliest token, and at a temperature this low
-    # it wins every draw: both sample the greedy reply.
+    # A top_p this small leaves only the likeliest token, and at the lowest temperature a
+    # run takes it wins every draw: both sample the greedy reply.
     assert replies(temperature=1.0, top_p=1e-6) == greedy
-    assert replies(temperature=1e-4) == greedy
+    assert replies(temperature=MIN_TEMPERATURE) == greedy
     assert replies(temperature=1.0) != greedy
 
 
