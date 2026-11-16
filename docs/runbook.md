@@ -233,8 +233,9 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 
 - A pull makes `runs/<run_id>/` the store's copy of the run, as `forge kaggle output` does with
   a kernel's: a file the copy lacks goes, such as an earlier attempt's `error.txt` or a report
-  made here (`forge report run` makes it again), and only `kernels.json` and `kernel/`, which
-  this machine alone keeps, stay. Other runs' folders are not touched.
+  made here (`forge report run` makes it again). `kernels.json` and `kernel/` stay as they
+  are unless the copy's `kernels.json` lists more pushes than this machine's, since `forge
+  runs push` uploads them and the store's may be older. Other runs' folders are not touched.
 - A pull, from either store, also writes a row in `docs/compute-ledger.md` for each of the
   run's sessions that has ended, once a session, as `forge kaggle wait` and `output` do:
   the UTC date the session started, the run's platform and GPU, the session's wall-clock
@@ -266,11 +267,14 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
   store whose copy holds a session the folder lacks: the command says so and uploads nothing.
 - A Hub call that fails on the network (a dropped or refused connection, a timeout, 408, 429
   or 5xx, downloads included) is tried again by one layer only. huggingface_hub 2.4 tries most
-  of its requests 5 more times itself, 1, 2, 4, 8 and 8 seconds apart; the two it sends once,
-  a commit and the repo lookup that starts a pull, the store tries 3 more times, 2, 4 and 8
-  seconds apart. No failure is retried by both, so a call that keeps failing waits at most
-  14 s between the store's tries and 23 s inside the client's, then says the store is
-  unavailable. A missing run is reported as missing, and a missing
+  such failures 5 more times itself, 1, 2, 4, 8 and 8 seconds apart; what it doesn't retry,
+  the store tries 3 more times, 2, 4 and 8 seconds apart: a commit, the repo lookup that
+  starts a pull, a connection dropped on a download, and a 5xx other than 500, 502, 503 and
+  504. No failure is retried by both, so a call that keeps failing waits at most 14 s between
+  the store's tries and 23 s inside the client's, then says the store is unavailable; when
+  the Hub's answer says how long to wait (`Retry-After`, or a 429's `RateLimit` header), the
+  client waits that long and 1 s more before each of its 5 tries, so a `Retry-After: 60`
+  costs 305 s. A missing run is reported as missing, and a missing
   repo, a refused token or a refused upload fails at once.
 - The token is `HF_TOKEN` from the environment or `.env`; without one, huggingface_hub uses a
   saved login. Nothing creates the repo: make it private by hand (Accounts, step 2), and

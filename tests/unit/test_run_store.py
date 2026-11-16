@@ -3,6 +3,8 @@ for by ``FakeHub``, so no test needs a token or the network."""
 
 from __future__ import annotations
 
+import json
+import shutil
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +23,7 @@ from huggingface_hub.errors import (
 from huggingface_hub.utils import _http
 
 from forge.core.types import RunManifest
+from forge.eval.run_files import RunCorrupt
 from forge.ops.hub import (
     BEST,
     HubRunStore,
@@ -31,7 +34,15 @@ from forge.ops.hub import (
     checkpoint_dir,
     manifest_bytes,
 )
-from tests.fakes import REPO_URL, TREE_URL, FakeHub, connect_error, hub_error
+from tests.fakes import (
+    REPO_URL,
+    RESOLVE_URL,
+    TREE_URL,
+    FakeHub,
+    connect_error,
+    dropped_error,
+    hub_error,
+)
 
 RUN = "2026-11-15-tiny-grpo-abc1234"
 OTHER = "2026-11-16-tiny-grpo-abc1234"
@@ -281,6 +292,13 @@ def _lfs_failure(cause: BaseException) -> RuntimeError:
     return error
 
 
+def _not_located(cause: BaseException) -> LocalEntryNotFoundError:
+    """A download whose metadata request failed, as huggingface_hub reports it."""
+    error = LocalEntryNotFoundError("An error happened while trying to locate the file.")
+    error.__cause__ = cause
+    return error
+
+
 def _chain(error: BaseException | None) -> list[BaseException]:
     found = []
     while error is not None:
@@ -352,8 +370,17 @@ def test_hub_store_retries_network_errors_with_backoff(
     [
         connect_error(TREE_URL),
         hub_error(503, url=TREE_URL),
+        dropped_error(TREE_URL),
         hub_error(429, url=f"{REPO_URL}/preupload/main"),
-        _lfs_failure(connect_error("https://lfs.huggingface.co/upload/part-1")),
+        _lfs_failure(connect_error("https://lfs.huggingface.co/upload/part-1", "PUT")),
+        _lfs_failure(dropped_error("https://lfs.huggingface.co/upload/part-1", "PUT")),
+        # A download's metadata request, which the client sends again with retries after
+        # a refused connection, a timeout or one of its statuses.
+        _not_located(connect_error(RESOLVE_URL, "HEAD")),
+        _not_located(hub_error(503, url=RESOLVE_URL, method="HEAD")),
+        # The download itself, which it retries on its own terms.
+        connect_error(RESOLVE_URL),
+        hub_error(429, url=RESOLVE_URL, method="GET"),
     ],
 )
 def test_hub_store_leaves_to_the_client_what_it_retried(error: BaseException) -> None:
@@ -371,6 +398,46 @@ def test_hub_store_leaves_to_the_client_what_it_retried(error: BaseException) ->
     fake.fail["list_repo_files"] = [connect_error(f"{REPO_URL}/commit/main")] * 2
     assert store.runs() == []
     assert waits == [2.0, 4.0]
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    "error",
+    [
+        # A dropped connection on a download's metadata request, which goes once.
+        dropped_error(RESOLVE_URL, "HEAD"),
+        httpx2.RemoteProtocolError(
+            "server disconnected", request=httpx2.Request("HEAD", RESOLVE_URL)
+        ),
+        # A 5xx the client never retries, on the metadata request or any other.
+        _not_located(hub_error(501, url=RESOLVE_URL, method="HEAD")),
+        _not_located(hub_error(520, url=RESOLVE_URL, method="HEAD")),
+        # The download itself, whose GET the client retries only on 408 and 429.
+        dropped_error(RESOLVE_URL),
+        hub_error(503, url=RESOLVE_URL, method="GET"),
+    ],
+)
+def test_hub_store_retries_what_the_client_sent_once(error: BaseException) -> None:
+    fake = FakeHub()
+    waits: list[float] = []
+    store = HubRunStore(REPO, api=fake, sleep=waits.append)
+    manifest = _manifest()
+    store.put_manifest(manifest)
+
+    fake.fail["hf_hub_download"] = [error, error]
+    assert store.get_manifest(RUN) == manifest
+    assert waits == [2.0, 4.0]
+
+    waits.clear()
+    fake.fail["hf_hub_download"] = [error] * 4
+    with pytest.raises(StoreUnavailable, match="failed 4 times") as raised:
+        store.get_manifest(RUN)
+    assert error in _chain(raised.value) and waits == [2.0, 4.0, 8.0]
+
+    # Any other call's 5xx outside the client's list, too.
+    waits.clear()
+    fake.fail["list_repo_files"] = [hub_error(501, url=TREE_URL, method="GET")] * 2
+    assert store.runs() == [RUN] and waits == [2.0, 4.0]
 
 
 @pytest.mark.phase(3)
@@ -456,6 +523,26 @@ def _unavailable(request: httpx2.Request) -> httpx2.Response:
     return httpx2.Response(503, request=request)
 
 
+def _dropped(request: httpx2.Request) -> httpx2.Response:
+    raise httpx2.ReadError("connection reset by peer", request=request)
+
+
+def _disconnected(request: httpx2.Request) -> httpx2.Response:
+    raise httpx2.RemoteProtocolError("server disconnected", request=request)
+
+
+def _not_implemented(request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(501, request=request)
+
+
+def _rate_limited(request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(429, headers={"Retry-After": "60"}, request=request)
+
+
+def _busy(request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(503, headers={"Retry-After": "30"}, request=request)
+
+
 def _commit_refused(request: httpx2.Request) -> httpx2.Response:
     """A Hub that takes the upload's preupload request and drops its commit."""
     if "/preupload/" in request.url.path:
@@ -480,6 +567,16 @@ STORE_WAITS = [2.0, 4.0, 8.0]  # the store's, between its 4
         ("put_file", _commit_refused, [], STORE_WAITS),
         ("pull", _refused, [], STORE_WAITS),
         ("pull", _unavailable, [], STORE_WAITS),
+        # The listing retries a dropped connection; a download's metadata request doesn't.
+        ("runs", _dropped, CLIENT_WAITS, []),
+        ("get_manifest", _dropped, [], STORE_WAITS),
+        ("get_manifest", _disconnected, [], STORE_WAITS),
+        # A 5xx outside the client's 500, 502, 503 and 504.
+        ("runs", _not_implemented, [], STORE_WAITS),
+        ("get_manifest", _not_implemented, [], STORE_WAITS),
+        # The Hub says how long to wait, and the client waits that and 1 s more each time.
+        ("runs", _rate_limited, [61.0] * 5, []),
+        ("get_manifest", _busy, [31.0] * 5, []),
     ],
 )
 def test_store_and_client_retries_never_stack(
@@ -506,8 +603,9 @@ def test_store_and_client_retries_never_stack(
     with pytest.raises(StoreUnavailable):
         calls[call]()
 
-    # Each failure is retried by one of the two, so a call waits 23 s at most inside the
-    # client or 14 s between the store's tries, as the module docstring says.
+    # Each failure is retried by one of the two, so a call waits 14 s at most between the
+    # store's tries, or 23 s inside the client's unless the Hub's answer names a wait, as
+    # the module docstring says.
     assert (client, waits) == (client_waits, store_waits)
 
 
@@ -594,7 +692,8 @@ def test_a_pull_leaves_no_file_the_store_lacks(store: RunStore, tmp_path: Path) 
     (local / "error.txt").write_text("Traceback: the first attempt failed\n")
     (local / "eval" / "val-scores.jsonl").write_text("{}\n")
     (local / "eval" / "val-report.md").write_text("a report of the first attempt\n")
-    # What only this machine keeps: the kernels it pushed, their output, and its lock.
+    # What the store's copy lacks and only this machine has: the kernels it pushed, their
+    # output, and its lock.
     (local / "kernels.json").write_text('{"kernels": []}\n')
     (local / "kernel").mkdir()
     (local / "kernel" / "forge-run.log").write_text("log\n")
@@ -613,3 +712,51 @@ def test_a_pull_leaves_no_file_the_store_lacks(store: RunStore, tmp_path: Path) 
         "manifest.json": manifest_bytes(_manifest()),
     }
     assert _files(beside) == {"error.txt": b"another run's\n"}
+
+
+def _kernels(*names: str) -> str:
+    """A kernels.json as forge kaggle run writes it, with a push for each kernel named."""
+    pushes = [{"kernel": f"owner/{name}", "version": 1} for name in names]
+    return json.dumps({"run_id": RUN, "job": "eval", "kernels": pushes}) + "\n"
+
+
+@pytest.mark.phase(3)
+def test_a_pull_never_puts_back_an_older_record_of_kernels(store: RunStore, tmp_path: Path) -> None:
+    # forge runs push uploads the record of kernels and their output with the run.
+    local = tmp_path / "runs" / RUN
+    (local / "kernel").mkdir(parents=True)
+    (local / "manifest.json").write_bytes(manifest_bytes(_manifest()))
+    (local / "kernels.json").write_text(_kernels("forge-k1"))
+    (local / "kernel" / "forge-k1.log").write_text("k1\n")
+    store.put_folder(RUN, local, replace=True)
+    # Then a resume pushes a second kernel from here, and forge kaggle output fetches it.
+    (local / "kernels.json").write_text(_kernels("forge-k1", "forge-k2"))
+    shutil.rmtree(local / "kernel")
+    (local / "kernel").mkdir()
+    (local / "kernel" / "forge-k2.log").write_text("k2\n")
+
+    store.pull(RUN, local)
+
+    assert _files(local) == {
+        "kernel/forge-k2.log": b"k2\n",
+        "kernels.json": _kernels("forge-k1", "forge-k2").encode(),
+        "manifest.json": manifest_bytes(_manifest()),
+    }
+    # A machine with an older record, or none, takes the store's.
+    for name, record in (("older", _kernels()), ("fresh", None)):
+        other = tmp_path / name / RUN
+        other.mkdir(parents=True)
+        if record is not None:
+            (other / "kernels.json").write_text(record)
+        store.pull(RUN, other)
+        assert _files(other) == {
+            "kernel/forge-k1.log": b"k1\n",
+            "kernels.json": _kernels("forge-k1").encode(),
+            "manifest.json": manifest_bytes(_manifest()),
+        }, name
+    # A record that is no record is named, not taken as either.
+    broken = tmp_path / "broken" / RUN
+    broken.mkdir(parents=True)
+    (broken / "kernels.json").write_text("[]\n")
+    with pytest.raises(RunCorrupt, match="is not forge kaggle run's record of kernels"):
+        store.pull(RUN, broken)

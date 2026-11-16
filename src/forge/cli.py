@@ -1310,7 +1310,8 @@ def runs_pull(
     """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR), and add its ledger rows.
 
     The folder then holds the store's copy and no file it lacks, such as an earlier
-    attempt's error.txt, but for kernels.json and kernel/, which only this machine keeps.
+    attempt's error.txt, but for kernels.json and kernel/, which stay unless the copy's
+    kernels.json lists more pushes than this machine's.
     A run that held a GPU gets a row in docs/compute-ledger.md for each of its sessions
     that has ended, once.
     --store kaggle is forge kaggle output.
