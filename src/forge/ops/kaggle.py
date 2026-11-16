@@ -3,9 +3,11 @@
 ``kaggle kernels push -p DIR`` reads ``DIR/kernel-metadata.json`` and uploads the one
 script it names. The CLI (kaggle 2.2.5) lets some mistakes through quietly: it ignores a
 misspelt key, a missing ``enable_internet`` means internet on although its docs say off,
-and a retired accelerator such as the P100 is swapped for a T4 with only a warning.
-``check_kernel_metadata`` makes each of those an error here, so a bad push fails on the
-laptop instead of in a queued GPU session.
+and a retired accelerator such as the P100 is swapped for a T4 with only a warning. Kaggle
+itself refuses a title over 50 characters with a bare ``400 Client Error: Bad Request``,
+which the CLI passes on only after the code dataset is checked. ``check_kernel_metadata``
+makes each of those an error here, so a bad push fails on the laptop instead of in a
+queued GPU session.
 
 Every Forge kernel is a private Python script. The template in
 ``kaggle/kernel-metadata.template.json`` asks for a T4 with internet; a CPU kernel drops
@@ -47,6 +49,9 @@ from forge.ops.manifest import DirtyTreeError, git_sha
 TEMPLATE = Path("kaggle") / "kernel-metadata.template.json"  # relative to the repo root
 METADATA_FILE = "kernel-metadata.json"
 GPU_MACHINE_SHAPE = "NvidiaTeslaT4"
+# The longest kernel title Kaggle saves: FG-301 saved 50 characters and got the 400 at 51,
+# with nothing else in the metadata changed. A slug is its title's, so it has the same bound.
+MAX_KERNEL_NAME = 50
 
 # Every key kaggle 2.2.5's kernels_push reads. Any other key is a typo the CLI would drop.
 KNOWN_KEYS = frozenset(
@@ -131,9 +136,13 @@ def check_kernel_metadata(meta: Mapping[str, Any]) -> list[str]:
             problems.append(f"id has a bad owner {owner!r}")
         if not valid_slug(slug):
             problems.append(f"id has a bad slug {slug!r}: lowercase letters, digits, hyphens")
+        if len(slug) > MAX_KERNEL_NAME:
+            problems.append(_too_long("slug", slug))
         title = meta.get("title")
         if not isinstance(title, str) or len(title) < 5:
             problems.append(f"title must be at least 5 characters, got {title!r}")
+        elif len(title) > MAX_KERNEL_NAME:
+            problems.append(_too_long("title", title))
         elif title_slug(title) != slug:
             problems.append(f"title {title!r} slugifies to {title_slug(title)!r}, not {slug!r}")
 
@@ -171,6 +180,13 @@ def check_kernel_metadata(meta: Mapping[str, Any]) -> list[str]:
             problem for source in sources if (problem := _source_problem(key, count, source))
         ]
     return problems
+
+
+def _too_long(what: str, name: str) -> str:
+    return (
+        f"{what} {name!r} has {len(name)} characters, and Kaggle refuses a kernel's over "
+        f"{MAX_KERNEL_NAME}"
+    )
 
 
 def _source_problem(key: str, count: int, source: str) -> str | None:

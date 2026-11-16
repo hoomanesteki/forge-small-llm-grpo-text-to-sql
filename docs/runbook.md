@@ -103,13 +103,11 @@ holds HEAD, so the next push from the same commit mounts it.
    `configs/eval/*.yaml` file whose `backend` is `vllm` (FG-306; `hf` runs on the CPU, so it
    is refused on a T4), with an `ops` section giving `est_gpu_hours`. `--job sft` and
    `--job grpo` come with FG-403 and FG-504. The run id must make a kernel slug Kaggle
-   takes (`forge-<run_id>`, and `-<n>` on a resume: lowercase letters and digits with
-   single hyphens between them, so not `a--b` or `run-`), the run must not clash with an
-   earlier push, and a dev job needs a dev look left (see Dev). Kaggle also refuses a
-   kernel title over 50 characters, and the title is `Forge <run_id>` (with ` <n>` on a
-   resume), so a run id may have 44 characters at most, 42 for a resume: a longer one gets
-   `400 Client Error: Bad Request` from the push after the code dataset step (FG-301).
-   Until FG-398 checks it and shortens such a kernel's name, pick a shorter `--run-id`.
+   takes (`forge-<run_id>`: lowercase letters and digits with single hyphens between
+   them, so not `a--b` or `run-`), the run must not clash with an earlier push, and a dev
+   job needs a dev look left (see Dev). Kaggle refuses a kernel title or slug over 50
+   characters with a bare `400 Client Error: Bad Request` (FG-301), so the metadata check
+   refuses one before any push, and a run's kernel name is kept within it (below).
 3. The current version of `<owner>/forge-code` must hold HEAD's wheel (its `GIT_SHA`), or
    HEAD is published as a new version, which is waited for until Kaggle says `ready`. The
    kernel mounts that version by number, with `<owner>/forge-spider`, which must exist
@@ -129,9 +127,15 @@ holds HEAD, so the next push from the same commit mounts it.
    `status`, `logs`, `wait` and `output` read.
 
 The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the kernel
-`<owner>/forge-<run_id>`. A run id that was pushed before is refused. `--resume` pushes the
-run again from the same commit with the same options, as `<owner>/forge-<run_id>-<n>`,
-mounting the last attempt's kernel so the eval carries on from its stored files. An attempt
+`<owner>/forge-<run_id>`, titled `Forge <run_id>`. A run id that was pushed before is
+refused. `--resume` pushes the run again from the same commit with the same options, as
+`<owner>/forge-<run_id>-<n>` (` <n>` in the title), mounting the last attempt's kernel so
+the eval carries on from its stored files. A name that would pass Kaggle's 50 characters,
+such as the 57 of `Forge 2026-11-16-qwen2-5-coder-1-5b-instruct-eval-c8f4b41`, keeps the run
+id up to a dash and adds 8 hex digits of its sha256 (`forge-2026-11-16-qwen2-5-coder-1-5b-`
+and the digits, with `-<n>` on a resume), the same on every machine. The run id itself
+stays as it is, in the kernel's arguments and everywhere else: `kernels.json` maps it to
+its kernels, so `status`, `logs`, `wait`, `output` and `--resume` take the run id. An attempt
 whose own kernel source Kaggle dropped failed to restore the run, so `kernels.json` marks it
 (`kernel_source_dropped`) and the next resume mounts the attempt before it.
 
@@ -362,10 +366,8 @@ Push them in this order, from one clean commit that passed `make smoke`:
    `<name>-dev` and `qwen3-8b-dev`, with `--reason baseline`. These are dev looks 1 and 2.
 
 The same model's runs from one commit on one day would share a default run id, so name each:
-`--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Until
-FG-398 lands the id may have 44 characters at most (Kaggle jobs, step 2), and of that
-pattern's ids only the I6 repeat's is longer, at 45: shorten it, for example to
-`<date>-qwen2-5-coder-1-5b-val100-<sha7>`. Kaggle runs at most two GPU sessions at once and
+`--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Kaggle
+runs at most two GPU sessions at once and
 refuses a third push ("Maximum batch GPU session count of 2 reached."), so push two and wait
 for one to end before the next. For each run, `forge kaggle wait <run_id>`, which adds its
 ledger row, then `forge runs pull <run_id> --store kaggle` (the kernel has no `HF_TOKEN`, so
