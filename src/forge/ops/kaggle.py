@@ -377,8 +377,12 @@ class KaggleClient:
             if status not in DATASET_STATUSES:
                 raise KaggleError(f"{_display(command)} printed {_tail(result.stdout)!r}")
             return status
-        # A missing dataset is a 404, which kaggle 2.2.5 reports as "... was not found."
-        if "not found" in _output(result).lower():
+        # A missing dataset is a 404, "... was not found.", or, as the live API answers for
+        # a slug in the owner's own namespace that holds none, a 403, "You don't have access
+        # to this resource.": Kaggle tells no one which datasets exist. Either way the first
+        # publish creates it, and a create that still can't is refused with its reason.
+        text = _output(result).lower()
+        if "not found" in text or "don't have access to this resource" in text:
             return None
         raise _failed(command, result)
 
