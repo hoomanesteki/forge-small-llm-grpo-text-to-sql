@@ -25,7 +25,7 @@ import yaml
 
 from forge.data import prompts as forge_prompts
 from forge.ops.kaggle import METADATA_FILE, bake_argv, check_kernel_metadata
-from tests.spike import THROUGHPUT, throughput
+from tests.spike import THROUGHPUT, load_script, throughput
 from tests.tiny_hf import CHATML, QWEN3, byte_tokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -684,6 +684,41 @@ def test_secrets_stage_records_whether_a_read_worked_only(
 
 
 @pytest.mark.phase(3)
+def test_secret_probe_never_writes_a_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Shaped like a Hugging Face token, so the probe's scrub has to catch it in error text.
+    canary = "hf_" + os.urandom(12).hex()
+
+    class UserSecretsClient:
+        def get_secret(self, label: str) -> str:
+            if label == "HF_TOKEN":
+                return canary
+            raise ConnectionError(f"service said no, {canary}") from OSError(canary)
+
+    fake = types.ModuleType("kaggle_secrets")
+    fake.UserSecretsClient = UserSecretsClient  # type: ignore[attr-defined]
+    fake.__file__ = "kaggle_secrets.py"
+    monkeypatch.setitem(sys.modules, "kaggle_secrets", fake)
+    monkeypatch.setenv("KAGGLE_USER_SECRETS_TOKEN", canary)
+    # Loading it runs nothing: off Kaggle its output folder doesn't exist.
+    secret_probe = load_script(ROOT / "kaggle" / "spike" / "secret_probe.py", "secret_probe")
+    out = tmp_path / "secret-probe.json"
+    secret_probe.main(out)
+
+    written = out.read_text()
+    assert canary not in written and canary not in capsys.readouterr().out
+    found = json.loads(written)
+    assert found["has_user_secrets_token"] is True
+    assert "KAGGLE_USER_SECRETS_TOKEN" in found["kaggle_env_names"]
+    assert found["HF_TOKEN"] == {"readable": True, "length": len(canary)}
+    refused = found["FORGE_NO_SUCH_LABEL"]
+    assert (refused["error"], refused["module"]) == ("ConnectionError", "builtins")
+    assert refused["message"] == "service said no, hf_<redacted>"
+    assert "hf_<redacted>" in refused["cause"]
+
+
+@pytest.mark.phase(3)
 def test_env_stage_reports_off_kaggle_too(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(spike, "_internet", lambda: {"url": "offline in tests", "status": 0})
     info = spike.env_stage(Namespace())
@@ -943,13 +978,27 @@ def test_spike_doc_keeps_research_apart_from_measurements() -> None:
     questions = [part for part in doc.split("\n## ") if part[:1].isdigit()]
     assert [part.split(".", 1)[0] for part in questions] == ["1", "2", "3", "4", "5", "6"]
     for part in questions:
-        research, found, measured = part.partition("**To be measured on the first GPU session.**")
+        research, found, measured = part.partition("**Measured on 2026-11-16.**")
         title = part.splitlines()[0]
         assert found, f"{title}: no measurements section"
         assert "**What research says today.**" in research, title
         assert "](https://" in research, f"{title}: research without a source"
         # Each measurement names the report field it comes from.
         assert re.search(r"`[a-z_-]+[.:]", measured), f"{title}: no report field named"
+    assert "Not measured yet" not in doc and "To be measured" not in doc
+
+    # The reports it quotes are committed as the kernels wrote them, each in the README.
+    reports = ROOT / "docs" / "spikes" / "kaggle-gpu"
+    readme = (reports / "README.md").read_text(encoding="utf-8")
+    listed = re.findall(r"^\| `([a-z-]+\.json)` \|", readme, flags=re.MULTILINE)
+    assert sorted(listed) == sorted(path.name for path in reports.glob("*.json"))
+    for name in ("spike-report.json", "limit-probe.json", "secret-probe.json"):
+        assert f"`{name}`" in doc, name
+    report = json.loads((reports / "spike-report.json").read_text(encoding="utf-8"))
+    assert (report["schema"], report["story"]) == (spike.REPORT_SCHEMA, "FG-301")
+    assert report["finished_at"] is not None
+    run = json.loads((reports / "kernels.json").read_text(encoding="utf-8"))
+    assert run["job"] == "spike" and run["kernels"][0]["kernel"].endswith("/forge-throughput-spike")
     for name, status in (("0005-kaggle-compute", "accepted"), ("0006-train-backend", "proposed")):
         assert f"(../adr/{name}.md)" in doc
         adr = (ROOT / "docs" / "adr" / f"{name}.md").read_text(encoding="utf-8")

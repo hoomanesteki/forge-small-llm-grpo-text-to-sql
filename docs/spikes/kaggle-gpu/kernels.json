@@ -1,0 +1,23 @@
+{
+  "run_id": "2026-11-16-throughput-spike-c8f4b41",
+  "job": "spike",
+  "code_sha": "c8f4b419f1f2666984a48c49eeb7827fc0b7d1e4",
+  "options": {
+    "argv": [
+      "run"
+    ]
+  },
+  "kernels": [
+    {
+      "kernel": "hoomanesteki/forge-throughput-spike",
+      "version": 2,
+      "pushed_at": "2026-11-16T15:55:51+00:00",
+      "code": null,
+      "est_gpu_hours": 1.5,
+      "timeout_s": 8100,
+      "allow_over_budget": false,
+      "over_budget": false,
+      "kaggle_gpu_hours_left": 30.0
+    }
+  ]
+}

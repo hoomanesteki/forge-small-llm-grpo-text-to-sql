@@ -1,0 +1,18 @@
+# FG-301 reports
+
+What the first Kaggle sessions measured on 2026-11-16 (UTC), each file as the kernel wrote
+it, byte for byte. [`../kaggle-gpu.md`](../kaggle-gpu.md) quotes them, question by
+question, with the field each number comes from. None of them holds a secret: the
+`secrets` stage and the secret probe record names, error text and whether a read worked,
+never a value.
+
+| File | What it is | Kernel and version | Code | Fetched with |
+|---|---|---|---|---|
+| `spike-report.json` | The GPU spike's report: every stage of `kaggle/spike/throughput.py run`, schema `forge-kaggle-spike/1` | `hoomanesteki/forge-throughput-spike` version 2, a T4 x2 session, 17:54 to 18:29 | `c8f4b41`, pushed by `forge kaggle run --job spike --config configs/spike/throughput.yaml` as run `2026-11-16-throughput-spike-c8f4b41` | `forge kaggle output 2026-11-16-throughput-spike-c8f4b41`, into `runs/<run_id>/kernel/` |
+| `kernels.json` | The push's record, which `forge kaggle run` wrote beside the run: version, push time, estimate and timeout | the same | the same | written on the laptop at the push |
+| `limit-probe.json` | The session-limit probe's heartbeat, rewritten every 30 s until the kill | `hoomanesteki/forge-session-limit-probe`, a CPU session pushed with `kaggle kernels push -p build/kaggle-spike/limit -t 900`, 15:56 to 16:11 | `kaggle/spike/throughput.py limit-probe`, bundled by `scripts/kaggle_spike.py` | `kaggle kernels output hoomanesteki/forge-session-limit-probe` |
+| `limit-spike-report.json` | That kernel's `spike-report.json`, renamed here: the `launch` record only, as every launch writes one | the same | the same | the same |
+| `secret-probe.json` | Why `HF_TOKEN` couldn't be read: the names of the Kaggle variables in a pushed run and the error each label gave | `hoomanesteki/forge-throughput-spike` version 3, a CPU session, after version 2 | `kaggle/spike/secret_probe.py` (its docstring says how it was pushed) | `kaggle kernels output hoomanesteki/forge-throughput-spike` |
+
+The kernels' logs stay out of git (`*.log` is ignored): the GPU spike's is 540 KB, mostly
+install and download progress. The spike doc quotes the lines it needs from it.

@@ -1,0 +1,8 @@
+{
+  "schema": "forge-kaggle-spike/1",
+  "started_at": "2026-11-16T15:56:12+00:00",
+  "last_beat_at": "2026-11-16T16:11:12+00:00",
+  "beats": 31,
+  "interval_seconds": 30.0,
+  "run_type": "Batch"
+}

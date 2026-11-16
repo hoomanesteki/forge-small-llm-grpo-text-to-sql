@@ -1,19 +1,22 @@
 # Spike FG-301: Kaggle, Unsloth and vLLM on a T4
 
-Blocked: the spike needs a phone-verified Kaggle account and its API token, which don't
-exist yet. Everything that runs without them is built and tested on CPU. This page keeps
-two things apart: what research says today, with sources, and what the first GPU session
-has to measure. No number under "To be measured" has been measured; each one says so
-until a run fills it in from its report.
+Measured on 2026-11-16 (UTC), in one GPU session and two CPU sessions on Kaggle. This page
+keeps two things apart: what research said before them, with sources, and what they
+measured, each number with the report and field it comes from. The reports are committed
+in [`kaggle-gpu/`](kaggle-gpu/), whose README names the kernel version and commit of each
+and how it was fetched.
 
-- Date: 2026-11-15. Timebox: 1 day. GPU budget: 1.5 hours (plan section 3.8).
+- Dates: research 2026-11-15, measurements 2026-11-16. Timebox: 1 day. GPU budget: 1.5
+  hours (plan section 3.8); the GPU session spent 0.59 hours (`kaggle quota -v`, and its
+  row in `docs/compute-ledger.md`).
 - Built: the kernel metadata template and its checks (`kaggle/kernel-metadata.template.json`,
   `forge.ops.kaggle`), the spike script `kaggle/spike/throughput.py`, the bundler
-  `scripts/kaggle_spike.py`, and candidate GPU pins in `kaggle/requirements-gpu.txt`.
-- Decided from research: [ADR-0005](../adr/0005-kaggle-compute.md) (accepted) and
-  [ADR-0006](../adr/0006-train-backend.md) (proposed until this spike measures it).
-- Pending on the first GPU session: every "To be measured" item below, the ledger row,
-  and the section 3.8 budget update at Gate 3. `docs/runs/pending.yaml` lists the runs.
+  `scripts/kaggle_spike.py`, the GPU pins in `kaggle/requirements-gpu.txt`, and the secret
+  probe `kaggle/spike/secret_probe.py` (question 2).
+- Decided: [ADR-0005](../adr/0005-kaggle-compute.md) (accepted from research, with the
+  measured answers to questions 2 and 6) and [ADR-0006](../adr/0006-train-backend.md)
+  (accepted on question 5's table: TRL with transformers generation).
+- The section 3.8 budget is redone from these numbers (see Budget).
 
 ## Running the spike
 
@@ -28,7 +31,8 @@ Once `uv run forge doctor` shows Kaggle auth ok, on a clean commit that passed `
 3. For question 2, create the GPU kernel without running it, then attach a secret:
    `kaggle kernels push -p build/kaggle-spike/gpu --no-run`, open the kernel in the
    Kaggle editor, and under Add-ons, Secrets attach `HF_TOKEN`. A read-only token is
-   enough: the stage only checks that it can be read, and never records its value.
+   enough: the stage only checks that it can be read, and never records its value. The
+   binding did not reach the version step 4 pushed (question 2).
 4. Push the GPU kernel through the job runner, which checks the smoke marker, the clean
    tree and the week's budget first (FG-303, `docs/runbook.md` "Kaggle jobs"):
    `uv run forge kaggle run --job spike --config configs/spike/throughput.yaml`.
@@ -55,10 +59,9 @@ Once `uv run forge doctor` shows Kaggle auth ok, on a clean commit that passed `
 If the GPU kernel fails in its first 10 minutes, stop, read the log and reproduce on CPU
 before pushing again (plan section 5.3). The report says which stage failed and why.
 
-If `vllm:Qwen/Qwen3-8B:bnb` still ends skipped or timed out, which leaves FG-306's 4-bit
-allowance and FG-307's reference waiting, a second push can run vLLM's stages alone: the
-same command with a copy of the config whose `argv` is `[run, --stacks]`, no GRPO stack.
-That costs another GPU session, so it is the gatekeeper's call.
+The 4-bit question is answered, so no second push is needed: `vllm:Qwen/Qwen3-8B:bnb`
+failed at once, since vLLM 0.33.0 has no bitsandbytes (question 4). FG-398 moves FG-307's
+reference to an AWQ checkpoint, which the reference's own run is the first to try on a T4.
 
 ## What the spike script measures
 
@@ -115,7 +118,8 @@ still says how it happened. The children run this script's file, a file is taken
 only if it holds the script's `REPORT_SCHEMA` line, and when there is none the cell's
 source is written to the work folder and run from there (`launch.script`).
 
-The stacks are candidates, each pinned in the script and none verified on a T4:
+The stacks, each pinned in the script, were candidates until this session; question 5 says
+how each did:
 
 | Stack | Pins | Why |
 |---|---|---|
@@ -168,14 +172,34 @@ lands in the venv all the same.
 push: an unknown key, a missing `enable_internet`, a title that doesn't slugify to the
 slug, a P100, a public kernel.
 
-**To be measured on the first GPU session.**
+**Measured on 2026-11-16.**
 
-- Does `--accelerator NvidiaTeslaT4` on a kernel whose metadata says the same give a T4
-  session? (`env.nvidia_smi`, `env.torch.devices`.) Not measured yet.
-- How many GPUs does the session show, and how much memory each? Not measured yet.
-- How does Kaggle start a script kernel: what are `launch.argv0`, `launch.argv`,
-  `launch.file` and `launch.cwd` in the report, and which file did the children run
-  (`launch.script`)? FG-303's entry script depends on it. Not measured yet.
+From the GPU spike's report (`spike-report.json`) unless another file is named:
+
+- `--accelerator NvidiaTeslaT4`, on metadata whose `machine_shape` says the same, gave a T4
+  x2 session: `env.nvidia_smi` lists two `Tesla T4, 580.178.04, 15360 MiB, 7.5`, and
+  `env.torch.devices` two Tesla T4s of compute capability 7.5 with 15,636,037,632 bytes
+  (15.6 GB) each.
+- Every bench used one of the two, as planned: each `grpo:*` and `vllm:*` stage ran with
+  `CUDA_VISIBLE_DEVICES=0` (its `env`), and each GRPO trainer counted one GPU (`n_gpu` is 1
+  in all four `grpo:*` results that ran).
+- Kaggle starts a script kernel as a file, not in IPython, and with no arguments:
+  `launch.argv0`, `launch.file` and `launch.script` are `/kaggle/src/script.py`,
+  `launch.argv` is that path alone, and `launch.cwd` is `/kaggle/working`. The arguments
+  came from the script's baked ones (`launch.kernel_argv`, `["run"]`), and the children
+  ran the same file. The CPU probe started the same way (`limit-spike-report.json`).
+- Private datasets mount at `/kaggle/input/datasets/<owner>/<slug>`: the 50-question eval
+  job found the code and the data there, the data with its 170 files
+  (`stages.code.result.folder` and `stages.data.result` in its `status.json`, in
+  `docs/runs/2026-11-16-smoke-kaggle-50-val-c8f4b41/`). Jobs find their files by glob, so
+  the layout needed no change.
+- Kaggle refuses a kernel title over 50 characters, which the research didn't turn up.
+  `kaggle kernels push --no-run` of throwaway kernels (deleted afterwards) saved a
+  50-character title and got `400 Client Error: Bad Request` from `SaveKernel` at 51, and
+  nothing else in the metadata mattered. The first push of the 50-question job failed the
+  same way: its default run id made the 57-character title `Forge
+  2026-11-16-qwen2-5-coder-1-5b-instruct-eval-c8f4b41`. FG-398 checks the limit before a
+  push and gives a long run id a kernel name that fits.
 
 ## 2. Kaggle Secrets in pushed runs
 
@@ -197,12 +221,27 @@ slug, a P100, a public kernel.
 ADR-0005 plans for "no": results come back through `kaggle kernels output`, and a token
 in a private dataset is the last resort, with its risk written down.
 
-**To be measured on the first GPU session.**
+**Measured on 2026-11-16.**
 
-- With `HF_TOKEN` attached in the editor after a `--no-run` push, can the next CLI push
-  read it? (`secrets.labels.HF_TOKEN.readable`, and the error type if not.) Not measured
-  yet.
-- What is `KAGGLE_KERNEL_RUN_TYPE` in a pushed run? Not measured yet.
+- No. `HF_TOKEN` was attached to `hoomanesteki/forge-throughput-spike` in the editor
+  after the `--no-run` push (step 3), and version 2, pushed from the CLI, couldn't read it:
+  `secrets.labels.HF_TOKEN` is `{"readable": false, "error": "ConnectionError"}`. The
+  50-question eval job got the same `ConnectionError` for `HF_TOKEN` and `WANDB_API_KEY`
+  (`stages.secrets` in its `status.json`).
+- Why, from the secret probe (`secret-probe.json`, version 3 of the same kernel, so an
+  editor binding that had survived would apply): Kaggle sets `KAGGLE_USER_SECRETS_TOKEN`
+  in the pushed run (`has_user_secrets_token` is true), and the secrets service answers
+  `HTTP Error 400: Bad Request` for `HF_TOKEN` exactly as for `FORGE_NO_SUCH_LABEL`, a
+  label no secret has (`HF_TOKEN.cause`, `FORGE_NO_SUCH_LABEL.cause`). So the binding
+  attached in the editor did not survive the CLI push, as users reported. `kaggle_secrets`
+  wraps the 400 in the builtin `ConnectionError` ("Connection error trying to communicate
+  with service."), so here that error is the service refusing the label, not the network.
+- `KAGGLE_KERNEL_RUN_TYPE` is `Batch` in a pushed run (`secrets.run_type`,
+  `env.kaggle_run_type`, and the probe's `run_type`).
+
+So ADR-0005's second way holds: no token on Kaggle. Results come back with `forge kaggle
+output` (or `forge runs pull --store kaggle`) and go to the Hub from the laptop with `forge
+runs push`, first done for the 50-question run (`docs/runbook.md`, Run store).
 
 ## 3. Python, CUDA and install times
 
@@ -224,15 +263,39 @@ in a private dataset is the last resort, with its risk written down.
   [PyPI unsloth 2026.11.4](https://pypi.org/pypi/unsloth/2026.11.4/json),
   [Kaggle-Qwen3_(4B)-GRPO.ipynb](https://github.com/unslothai/notebooks/blob/main/nb/Kaggle-Qwen3_(4B)-GRPO.ipynb).
 
-**To be measured on the first GPU session.**
+**Measured on 2026-11-16.**
 
-- Python version (`env.python`). Not measured yet.
-- CUDA and torch versions, cuDNN, driver (`env.torch`, `env.nvidia_smi`), and the image
-  build (`env.image`). Not measured yet.
-- Install seconds and venv size for each stack (`install:<stack>`), and whether each
-  installs at all. Not measured yet.
-- Should GPU wheels be uploaded as a dataset to save install time? Decide from the
-  install seconds against a session's length. Not decided yet.
+- Python 3.13.16 (`env.python`), as the research said for v173.
+- torch 2.11.0+cu130 with CUDA 13.0, cuDNN 92700 as torch reports it, no bf16
+  (`env.torch`), and driver 580.178.04 (`env.nvidia_smi`). The image was built
+  `20261030-181552` from commit `6a20e87c` (`env.image`), the day of v173's release tag.
+- Preinstalled (`env.packages`): transformers 5.20.2, peft 0.21.2, accelerate 1.15.0,
+  datasets 4.8.5, huggingface-hub 1.33.0 and kaggle 2.0.2. trl, bitsandbytes, vllm and
+  unsloth are not, which the research couldn't tell.
+- The machine has 4 CPUs and 33.7 GB of memory (`env.cpu_count`, `env.memory_bytes`), with
+  20.9 GB free in `/kaggle/working` and 1.04 TB in `/kaggle/temp` (`env.disk_free_bytes`).
+- Every stack installed, each into a venv of its own (`install:<stack>.result`:
+  `install_seconds`, `venv_bytes`):
+
+  | Stack | Installer | Seconds | Venv |
+  |---|---|---:|---:|
+  | `trl` | pip, over the image's torch | 20.0 | 0.47 GB |
+  | `unsloth` | uv | 124.4 | 10.87 GB |
+  | `trl-vllm` | uv | 95.9 | 9.67 GB |
+  | `vllm` | uv, from uv's cache just after `trl-vllm` | 1.5 | 9.44 GB |
+
+- In a kernel job the install is slower. `kaggle/entry.py` runs `pip install` for the
+  wheel and then `requirements-gpu.txt`, the `trl-vllm` list, over the image, and in the
+  50-question eval job that took 391.6 s (`stages.install.seconds` in its `status.json`),
+  four times uv's 95.9 s for the same list. With the code (28.9 s), data (48.0 s), secrets
+  (0.2 s) and preflight (168.1 s, which downloads and loads the model) stages, the job
+  spent 636.8 s, about 11 minutes, before its job stage started.
+- GPU wheels as a dataset: not decided. On these numbers, installing with uv instead of pip
+  would save about 5 minutes a job, and prebuilt wheels might save more, but the venvs
+  these lists make are 9 to 11 GB, a dataset to keep in step with every pin change.
+  FG-398 or a later story may switch the kernel's install to uv or to wheels in a dataset;
+  until one measures it, kernels install with pip, and FG-302's `publish-wheels` isn't
+  built.
 
 ## 4. vLLM in fp16 on the T4
 
@@ -249,18 +312,37 @@ in a private dataset is the last resort, with its risk written down.
   figures are for Qwen2.5 0.5B and 1.5B on older vLLM, and are not a substitute for a
   measurement. Source: [vllm-serving-benchmark-t4](https://github.com/lyftium/vllm-serving-benchmark-t4).
 
-**To be measured on the first GPU session.**
+**Measured on 2026-11-16.**
 
-- Does vLLM 0.33.0 load and generate in fp16 on the T4? (`vllm:<model>` status.) Not
-  measured yet.
-- Tokens per second for Qwen3 1.7B on 100 prompts (`completion_tokens_per_second`). Not
-  measured yet.
-- Tokens per second for Qwen3 4B on 100 prompts. Not measured yet.
-- Load seconds, device memory in use, and how many replies hit the 256-token cap. Not
-  measured yet.
-- Does vLLM 0.33.0 load Qwen3-8B in 4-bit with bitsandbytes and answer on the T4
-  (`vllm:Qwen/Qwen3-8B:bnb` status, `load_seconds`, `memory`, `samples`)? FG-306 allows
-  4-bit loading and FG-307 runs its reference only if it does. Not measured yet.
+- Yes. vLLM 0.33.0, with torch 2.14.0 and transformers 5.20.2 (`vllm:<model>.result.versions`),
+  loaded Qwen3 1.7B and 4B in fp16 (`settings.dtype` `half`) and generated greedily on one
+  T4 with the Triton attention backend, as the research expected. The log says `Using
+  TRITON_ATTN attention backend out of potential backends: ['TRITON_ATTN',
+  'FLEX_ATTENTION'].` For 100 prompts of up to 256 tokens a reply (`vllm:<model>.result`):
+
+  | | Qwen3 1.7B | Qwen3 4B |
+  |---|---:|---:|
+  | Load (`load_seconds`) | 112.4 s | 126.7 s |
+  | Generation (`generate_seconds`) | 9.9 s | 11.8 s |
+  | Completion tokens (`completion_tokens`) | 5,728 | 4,601 |
+  | Tokens a second (`completion_tokens_per_second`) | 577.3 | 391.4 |
+  | Replies cut at 256 tokens (`cut_at_max_tokens`) | 0 | 0 |
+  | Device memory in use (`memory.device_used_bytes`) | 13.1 GB | 13.2 GB |
+
+  The 100 prompts hold 25,921 tokens (`prompt_tokens`), 259 a prompt. vLLM takes 85% of
+  the device (`settings.gpu_memory_utilization`), so the memory in use is its share, not
+  the model's need; torch's own counters read 0 (`memory.peak_allocated_bytes`), since the
+  engine runs in a process of its own.
+- 4-bit with bitsandbytes: no. `vllm:Qwen/Qwen3-8B:bnb` failed in 26.3 s, before any
+  weight loaded, with `ValidationError: 1 validation error for ModelConfig` and `Value
+  error, Unknown quantization method: bitsandbytes. Must be one of ['awq', 'auto_awq',
+  'fp8', ...]`: vLLM 0.33.0 has no bitsandbytes quantization, though bitsandbytes 0.50.2
+  was in its venv. The research behind FG-306 and ADR-0012 counted bitsandbytes among
+  the quantizations vLLM runs on Turing. That holds for the vLLM 0.11.2 in Unsloth's
+  stack, which loaded 4-bit weights in the same session (`'load_format': 'bitsandbytes'`
+  in its log), and not for 0.33.0. The 8B's weights were downloaded (16.4 GB in 80.2 s,
+  `download:Qwen/Qwen3-8B`) and never loaded. AWQ is on 0.33.0's list, and FG-398 moves
+  FG-307's reference to the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`; no run has tried it on a T4.
 
 ## 5. GRPO on the T4 with 4-bit models
 
@@ -286,20 +368,51 @@ in a private dataset is the last resort, with its risk written down.
 The spike runs TRL's path first, since ADR-0006 makes it the default; the CPU path of the
 same code runs in CI (`tests/integration/test_spike_grpo.py`).
 
-**To be measured on the first GPU session.**
+**Measured on 2026-11-16.**
 
-For Qwen3 1.7B and 4B, 4-bit, 6 generations, up to 256 completion tokens, 10 steps:
+Qwen3 1.7B and 4B in 4-bit, LoRA rank 16, fp16 (`settings.fp16` true, `bf16` false), 6
+generations of up to 256 tokens, 6 completions a device and 4 accumulation steps, 10 steps
+(`grpo:<stack>:<model>.result`):
 
-- TRL with transformers generation (`grpo:trl:<model>`): seconds per step (median after
-  the first) and peak memory. Not measured yet.
-- TRL with colocated vLLM (`grpo:trl-vllm:<model>`): whether it runs, then the same
-  numbers. Not measured yet.
-- Unsloth with fast inference (`grpo:unsloth:<model>`): whether it runs, then the same
-  numbers. Not measured yet.
-- Does fp16 training stay finite over the 10 steps (`log_history`)? Not measured yet.
-- Did each bench train on one GPU and 24 completions a step (`grpo:<stack>:<model>`,
-  `n_gpu` and `completions_per_step`), and how long were the replies with thinking off
-  (`mean_completion_length`)? Not measured yet.
+| Stage | Median s a step | Peak allocated | Peak reserved | Load s | Install s |
+|---|---:|---:|---:|---:|---:|
+| `grpo:trl:Qwen/Qwen3-1.7B` | 18.43 | 3.02 GB | 4.02 GB | 5.3 | 20.0 |
+| `grpo:trl:Qwen/Qwen3-4B` | 32.92 | 4.94 GB | 6.42 GB | 9.3 | 20.0 |
+| `grpo:unsloth:Qwen/Qwen3-1.7B` | 11.64 | 12.75 GB | 13.25 GB | 139.4 | 124.4 |
+| `grpo:unsloth:Qwen/Qwen3-4B` | 21.22 | 13.66 GB | 14.15 GB | 129.5 | 124.4 |
+| `grpo:trl-vllm:Qwen/Qwen3-1.7B` | error | | | | 95.9 |
+| `grpo:trl-vllm:Qwen/Qwen3-4B` | error | | | | 95.9 |
+
+The median is of steps 2 to 10 (`median_step_seconds`), the peaks are of the device's
+15.64 GB (`memory.peak_allocated_bytes`, `memory.peak_reserved_bytes`), the load is the
+model's (`load_seconds`), and the install is the stack's (`install:<stack>`).
+
+- TRL with transformers generation ran both models in 4-bit with fp16 and no out-of-memory,
+  the 4B at 4.94 GB allocated at most, on the lock's versions (`versions`: trl 1.18.0,
+  transformers 5.23.0, peft 0.21.3, on the image's torch 2.11.0+cu130).
+- fp16 stayed finite: every loss and grad norm the four benches that ran logged is finite
+  (`log_history`). Many are exactly 0: on a step where each prompt's 6 completions got the
+  same reward (`frac_reward_zero_std` 1.0) GRPO has nothing to learn from, and 9 of the 4B
+  TRL bench's 10 steps were such steps. The reward is a cheap check for a closed sql block,
+  so these benches time the trainer; they say nothing about learning, nor about stability
+  over hundreds of steps.
+- Each bench trained on one GPU (`n_gpu` 1) and 24 completions a step
+  (`completions_per_step` 24.0, the `planned_completions_per_step`), with thinking off
+  (`thinking_off`) and short replies: 55.6 and 47.6 tokens on average for TRL's 1.7B and
+  4B, 51.8 and 45.0 for Unsloth's (`mean_completion_length`).
+- Unsloth with fast inference ran both, on its own stack (`versions`: trl 0.22.2,
+  transformers 4.57.6, vLLM 0.11.2, torch 2.9.0), 37% and 36% faster a step than TRL,
+  after about 130 s of loading its colocated vLLM engine. Its peaks are that engine's
+  reservation, not the training's need: standby mode set vLLM's share to 0.76 (`Unsloth:
+  Standby mode is enabled. Changing gpu_memory_utilization to 0.76.` in the log), as the
+  research said it would. The research's report of about a step a minute for the 4B was
+  on another batch.
+- TRL with colocated vLLM failed on both models before training, at vLLM's load of the
+  4-bit policy, with question 4's error (`grpo:trl-vllm:<model>.error`): vLLM 0.33.0
+  can't take the `bitsandbytes` quantization of the policy TRL hands it.
+
+So ADR-0006 is accepted: GRPO and SFT on the T4 use TRL with transformers generation, the
+`trl` stack, and the plan's fallback to the 1.7B model alone isn't needed.
 
 ## 6. The 12-hour limit
 
@@ -317,18 +430,32 @@ For Qwen3 1.7B and 4B, 4-bit, 6 generations, up to 256 completion tokens, 10 ste
 The plan already assumes "no": checkpoints go to the run store, and the time guard stops a
 job at 11 h 15 min (FG-305).
 
-**To be measured on the first GPU session.**
+**Measured on 2026-11-16.**
 
-- When a session is killed at its timeout (`-t 900` on the CPU probe), is the output
-  written before the kill kept? (`limit-probe.json` comes back, and its `last_beat_at`
-  against the start plus 900 s.) Not measured yet.
-- What does `kaggle kernels status` report for a session killed at its timeout? Not
-  measured yet.
-- The probe tests a timeout the push sets, which is the same cut as the 12-hour limit only
-  if Kaggle ends both the same way. That is an assumption to confirm, not a result.
+- A session killed at its timeout keeps what it wrote before the kill. The CPU probe,
+  pushed with `-t 900`, started at 15:56:12 UTC and wrote its last beat at 16:11:12, 900 s
+  later (`limit-probe.json`: `started_at`, `last_beat_at`, and `beats` 31 at
+  `interval_seconds` 30), and that file came back with `kaggle kernels output`. Its log
+  ends at beat 31, 900.8 s in.
+- `kaggle kernels status` reports such a session as `KernelWorkerStatus.CANCEL_ACKNOWLEDGED`,
+  which `forge kaggle wait` already reads as an end with no job outcome.
+- The probe measured a timeout the push set, not the 12-hour limit itself; that Kaggle ends
+  both the same way is still an assumption. The time guard (11 h 15 min) stays either way.
+- At most two GPU sessions run at once: a third GPU kernel pushed while two ran was refused
+  on 2026-11-16 with `Kernel push error: Maximum batch GPU session count of 2 reached.`
+  (FG-307's baselines).
+- The weekly quota is 30 hours. `kaggle quota -v` printed
+  `GPU,0.59h,29.41h,30.00h,2026-11-21T00:00:00+00:00` after the spike (used, left, total
+  and the next refresh), with 0.00 h used before it, so it refreshes at 00:00 UTC on a
+  Saturday, as one source in the research said. The 50-question job's push saw the same
+  29.41 h left (`kaggle_gpu_hours_left` in its `kernels.json`).
 
 ## Budget
 
-The section 3.8 table keeps its estimates until this spike's numbers exist. At Gate 3 the
-gatekeeper redoes the GRPO and evaluation rows from `grpo:*` and `vllm:*`, and the throughput
-spike row from the ledger.
+Plan section 3.8's GPU hour budget is redone from these numbers. The throughput spike's
+row is its ledger row, 0.59 h. GRPO rows use the `trl` stack's median step for the model's
+size (`grpo:trl:<model>`), and evaluation rows a kernel eval job's measured setup (the
+50-question job's `status.json`, the model's download and vLLM's load) and vLLM's tokens a
+second (`vllm:<model>`). The note under the table gives each formula; SFT, the ablations
+and the reserve keep their estimates. The total is 39.34 h, within the 45 h the Phase 3
+gate allows.
