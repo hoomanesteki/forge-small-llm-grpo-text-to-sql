@@ -29,6 +29,7 @@ from forge.eval.run_files import (
     start,
 )
 from forge.ops.manifest import DirtyTreeError, config_hash, git_sha
+from forge.ops.sessions import Session, read_sessions
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = {(f"q{i}", 0) for i in range(4)}
@@ -219,7 +220,8 @@ def test_start_resumes_only_the_same_unfinished_run(tmp_path: Path) -> None:
     paths = RunPaths(tmp_path / "run", "val")
     fresh = _manifest()
     started = start(paths, fresh)
-    assert started.status == "running" and started.outputs == {"config": "config.yaml"}
+    assert started.status == "running"
+    assert started.outputs == {"config": "config.yaml", "sessions": "sessions.json"}
     assert RunManifest.model_validate_json(paths.manifest.read_bytes()) == started
     assert yaml.safe_load(paths.config.read_text()) == fresh.config
 
@@ -263,14 +265,65 @@ def test_finish_records_a_failure_and_clears_it_on_success(tmp_path: Path) -> No
     except RuntimeError as exc:
         failed = finish(paths, manifest, exc)
     assert failed.status == "failed" and failed.ended_at is not None
-    assert failed.outputs == {"config": "config.yaml", "error": "error.txt"}
+    assert failed.outputs == {
+        "config": "config.yaml",
+        "sessions": "sessions.json",
+        "error": "error.txt",
+    }
     text = paths.error.read_text()
     assert text.startswith("Traceback") and text.endswith("RuntimeError: the backend fell over\n")
     assert RunManifest.model_validate_json(paths.manifest.read_bytes()) == failed
 
     done = finish(paths, start(paths, _manifest()), None)
-    assert done.status == "finished" and done.outputs == {"config": "config.yaml"}
+    assert done.status == "finished"
+    assert done.outputs == {"config": "config.yaml", "sessions": "sessions.json"}
     assert not paths.error.exists()
+
+
+def _at(day: int, hour: int) -> datetime:
+    return datetime(2026, 11, day, hour, 0, tzinfo=UTC)
+
+
+@pytest.mark.phase(3)
+def test_each_attempt_is_a_session_and_the_gaps_hold_no_gpu(tmp_path: Path) -> None:
+    paths = RunPaths(tmp_path / "run", "val")
+    on_gpu = {"platform": "kaggle", "gpu": "Tesla T4"}
+    stopped = finish(paths, start(paths, _manifest(**on_gpu)), None, stopped=True, now=_at(15, 11))
+    assert stopped.gpu_hours == 2.0
+    # Resumed two days later for an hour: three GPU hours, not the 55 since the first start.
+    resumed = start(paths, _manifest(**on_gpu, started_at=_at(17, 15)))
+    done = finish(paths, resumed, None, now=_at(17, 16))
+    assert (done.started_at, done.ended_at, done.gpu_hours) == (_at(15, 9), _at(17, 16), 3.0)
+    assert done.outputs["sessions"] == "sessions.json"
+    assert read_sessions(paths.root) == [
+        Session(_at(15, 9), _at(15, 11), "stopped_time_guard"),
+        Session(_at(17, 15), _at(17, 16), "finished"),
+    ]
+
+    # An attempt killed outright leaves its session running; the next one marks it failed,
+    # with no end, since nothing knows when the GPU let go.
+    killed = RunPaths(tmp_path / "killed", "val")
+    start(killed, _manifest(**on_gpu))
+    again = start(killed, _manifest(**on_gpu, started_at=_at(15, 12)))
+    assert finish(killed, again, None, now=_at(15, 13)).gpu_hours == 1.0
+    assert read_sessions(killed.root) == [
+        Session(_at(15, 9), None, "failed"),
+        Session(_at(15, 12), _at(15, 13), "finished"),
+    ]
+
+    # A run stored before runs kept sessions: its manifest's span is its first session.
+    older = RunPaths(tmp_path / "older", "val")
+    older.root.mkdir()
+    made = _manifest(**on_gpu, status="failed", ended_at=_at(15, 10), gpu_hours=1.0)
+    older.manifest.write_text(made.model_dump_json())
+    start(older, _manifest(**on_gpu, started_at=_at(15, 12)))
+    assert read_sessions(older.root) == [
+        Session(_at(15, 9), _at(15, 10), "failed"),
+        Session(_at(15, 12)),
+    ]
+    older.sessions.write_text('[{"started_at": "yesterday"}]')
+    with pytest.raises(RunCorrupt, match="is not a list of sessions"):
+        start(older, _manifest(**on_gpu, started_at=_at(15, 14)))
 
 
 @pytest.mark.phase(2)
