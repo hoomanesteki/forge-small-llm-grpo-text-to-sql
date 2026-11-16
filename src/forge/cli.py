@@ -970,7 +970,9 @@ def kaggle_run(
     which is published if it doesn't; and the config's ops.est_gpu_hours must fit what the
     ledger and Kaggle's quota leave this week. It prints the estimate, asks unless --yes,
     pushes the kernel on a T4 and prints the run id, which status, logs, wait and output
-    take. A dev job's push spends one of the six dev looks, logged in docs/dev-usage.md.
+    take. A dev job's push spends one of the six dev looks, logged in docs/dev-usage.md as
+    soon as Kaggle accepts it; a --resume of the run is the same look. A source Kaggle
+    could not add is a warning: that version runs without it, recorded like any other.
     """
     import json
 
@@ -1033,17 +1035,37 @@ def kaggle_run(
             raise typer.Exit(1)
         folder = jobs.write_kernel(root, plan, code=code, data=data, run_store=run_store)
         pushed = client.push_kernel(folder, timeout_s=plan.timeout_s, gpu=True)
-        kernel = pushed.kernel or plan.kernel
-        jobs.record_push(
-            runs_dir(), plan, kernel=kernel, version=pushed.version, code=code, budget=budget
-        )
-        looks = jobs.log_dev_look(plan)
     except _kaggle_job_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
+    kernel = pushed.kernel or plan.kernel
+    try:
+        # Kaggle runs the kernel now, and it may read dev, so its look is logged before
+        # anything else that could fail.
+        looks = jobs.log_dev_look(plan)
+        jobs.record_push(
+            runs_dir(), plan, kernel=kernel, version=pushed.version, code=code, budget=budget
+        )
+    except _kaggle_job_errors() as exc:
+        typer.echo(
+            f"error: {exc}; Kaggle runs {kernel} version {pushed.version} all the same, so "
+            f"don't push it again: follow it at https://www.kaggle.com/code/{kernel}",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
     typer.echo(pushed.output)
+    for line in pushed.dropped:
+        typer.echo(f"warning: {line}", err=True)
+    if pushed.dropped:
+        typer.echo(
+            f"warning: Kaggle started version {pushed.version} without them; forge kaggle "
+            f"wait {plan.run_id} says how the job ends",
+            err=True,
+        )
     if looks is not None:
         typer.echo(f"dev look {looks} of {MAX_DEV_USES} logged in docs/dev-usage.md")
+    elif plan.reads_dev:
+        typer.echo(f"dev look: run {plan.run_id}'s own, logged when it was first pushed")
     typer.echo(f"run {plan.run_id}: kernel {kernel}, version {pushed.version}")
     typer.echo(f"next: forge kaggle wait {plan.run_id}")
 

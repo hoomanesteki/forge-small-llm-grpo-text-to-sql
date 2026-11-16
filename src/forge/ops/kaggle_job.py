@@ -24,7 +24,10 @@ Before a push, in the plan's order (FG-303):
 A dev eval job takes ``--reason``, as ``forge eval run --split dev`` does, and is refused
 once the six dev looks are spent (ADR-0004). The push spends its look: ``log_dev_look``
 writes the row in ``docs/dev-usage.md`` here, where the repo is, since the kernel's own
-log stays in its output. A notebook can run any number of times, so a dev job has none.
+log stays in its output, as soon as Kaggle has accepted the push and before anything else
+that could fail. A ``--resume`` of the same run is the same look, so it adds no row and
+goes even once the looks are spent. A notebook can run any number of times, so a dev job
+has none.
 
 The ``spike`` job pushes FG-301's throughput script instead of the entry script. It runs
 without Forge, so it mounts no dataset and has no preflight.
@@ -57,7 +60,7 @@ from forge.eval.config import (
 )
 from forge.eval.run_files import MANIFEST_FILE
 from forge.ops.clock import utc_today
-from forge.ops.dev_usage import MAX_DEV_USES, count_dev_uses, log_dev_use
+from forge.ops.dev_usage import MAX_DEV_USES, count_dev_uses, log_dev_use, read_uses
 from forge.ops.kaggle import (
     CODE_SLUG,
     DATA_SLUG,
@@ -224,17 +227,11 @@ def plan_job(
         # Checked here as the kernel will check it, so a bad option costs no GPU time.
         eval_config = EvalConfig(**options, host="kaggle")
         check_config(eval_config)
-        if eval_config.split == "dev":
-            if notebook:
-                raise JobRefused(
-                    "a notebook can run any number of times, so it can't log its dev look; "
-                    "push a dev job with forge kaggle run, which logs the one look it spends"
-                )
-            if count_dev_uses() >= MAX_DEV_USES:
-                raise JobRefused(
-                    f"the dev split has had its {MAX_DEV_USES} looks (docs/dev-usage.md, "
-                    "ADR-0004), so no dev job can go"
-                )
+        if eval_config.split == "dev" and notebook:
+            raise JobRefused(
+                "a notebook can run any number of times, so it can't log its dev look; "
+                "push a dev job with forge kaggle run, which logs the one look it spends"
+            )
         default_id = make_run_id("eval", eval_config.model, sha, on=day)
     est = ops.est_gpu_hours
     if est is None:
@@ -274,6 +271,13 @@ def plan_job(
         kernel_sources = (f"{last['kernel']}/{last['version']}",)
         attempt = len(record["kernels"]) + 1
         slug, title = f"{slug}-{attempt}", f"{title} {attempt}"
+    reads_dev = options.get("split") == "dev"
+    same_look = resume and _look_logged(run_id)
+    if reads_dev and not same_look and count_dev_uses() >= MAX_DEV_USES:
+        raise JobRefused(
+            f"the dev split has had its {MAX_DEV_USES} looks (docs/dev-usage.md, "
+            "ADR-0004), so no dev job can go"
+        )
     return JobPlan(
         job=job,
         run_id=run_id,
@@ -384,10 +388,15 @@ def check_budget(est_gpu_hours: float, ledger: Summary, client: KaggleClient) ->
 
 def log_dev_look(plan: JobPlan) -> int | None:
     """Log the dev look a pushed dev job spends, and return how many are spent; ``None``
-    for a job that reads no dev."""
-    if not plan.reads_dev:
+    for a push that spends none: a job that reads no dev, or a resume of a run whose look
+    is logged already, which is the same look (one row a run id)."""
+    if not plan.reads_dev or (plan.resume and _look_logged(plan.run_id)):
         return None
     return log_dev_use(plan.run_id, str(plan.options["reason"]))
+
+
+def _look_logged(run_id: str) -> bool:
+    return any(logged == run_id for _, logged, _ in read_uses())
 
 
 def entry_argv(plan: JobPlan, run_store: str) -> list[str]:
