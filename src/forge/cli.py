@@ -1165,26 +1165,45 @@ def runs_pull(
         ),
     ] = "hub",
 ) -> None:
-    """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR).
+    """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR), and add its ledger row.
 
     Each file or folder at the top of the run that the store holds replaces the local one,
-    and what only runs/<run_id>/ holds, such as kernels.json, stays.
+    and what only runs/<run_id>/ holds, such as kernels.json, stays. A run that held a GPU
+    and has ended gets its row in docs/compute-ledger.md from its manifest, once.
     """
-    if store == "kaggle":
-        kaggle_output(run_id)
-        return
+    from forge.eval.run_files import MANIFEST_FILE
     from forge.ops.hub import LocalRunStore, hub_store
+    from forge.ops.ledger import record_run
     from forge.ops.paths import runs_dir
 
+    if store == "kaggle":
+        kaggle_output(run_id)
+        if not (runs_dir() / run_id / MANIFEST_FILE).is_file():
+            # A spike's output, or a kernel that failed before its run began.
+            typer.echo("ledger: no row, the output has no manifest; use forge ledger add")
+            return
+    pulled_from = None
     try:
-        hub, local = hub_store(), LocalRunStore(runs_dir())
-        hub.pull(run_id, local.root / run_id)
+        local = LocalRunStore(runs_dir())
+        if store == "hub":
+            hub = hub_store()
+            hub.pull(run_id, local.root / run_id)
+            pulled_from = str(hub)
         manifest = local.get_manifest(run_id)
     except _runs_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"run {run_id}: {local.root / run_id}, from {hub}")
+    if pulled_from is not None:
+        typer.echo(f"run {run_id}: {local.root / run_id}, from {pulled_from}")
     typer.echo(f"{manifest.kind} run, {manifest.status}")
+    try:
+        _, note = record_run(manifest)
+    except _runs_errors() as exc:
+        typer.echo(
+            f"error: run {run_id} is pulled, but its ledger row wasn't added: {exc}", err=True
+        )
+        raise typer.Exit(1) from exc
+    typer.echo(note)
 
 
 @runs_app.command("push")

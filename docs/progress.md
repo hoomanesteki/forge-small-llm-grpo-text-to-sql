@@ -47,7 +47,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-302 | Code and data packaging as Kaggle datasets | 3 | blocked: the real publish needs a Kaggle account, an API token and `FORGE_KAGGLE_USER` |  |  | Built and tested with the CLI mocked: `KaggleClient` runs kaggle as argument lists, `forge kaggle publish-code` (wheel at a clean HEAD, pinned `requirements-gpu.txt`, `GIT_SHA`; `version -m <sha> -r zip`, or `create` the first time) and `publish-data` (the 170 verified Spider files and `spider.sha256` as `<owner>/forge-spider`, CC BY-SA 4.0 attribution and citation, uploaded once). Both private, never `-u`. Pending: one real publish of each, output for the PR (`docs/runs/pending.yaml`). No `publish-wheels`: FG-301 hasn't measured install times |
 | FG-303 | Kaggle job runner CLI | 5 | blocked: the real 50-question eval job needs a phone-verified Kaggle account with an API token and `FORGE_KAGGLE_USER`, both datasets published, and the vllm backend (FG-306) |  |  | Built and tested with the kaggle CLI mocked: `forge kaggle run` (smoke marker and clean tree, config checked as the kernel will, code dataset pinned by version with HEAD's `GIT_SHA` or published, ledger and `kaggle quota` budget with `--allow-over-budget` in the eval run's config, confirm, T4 push with a timeout of the estimate and half again, `runs/<run_id>/kernels.json`, `--resume`, `--job spike`, `--emit-notebook`), `status`, `logs`, `wait` and `output`; `kaggle/entry.py` (env, code, install, data, secrets, preflight, job, upload; `status.json` always); `ops` section in eval configs; `code_sha` from `FORGE_CODE_SHA` outside a checkout; Python 3.13 in CI. Pending: the real job (`docs/runs/pending.yaml`) |
 | FG-304 | Hub run store and resume | 5 | done |  |  | `forge.ops.hub`: `RunStore` (plan 3.5's methods plus `put_folder`, `runs` and `prune_checkpoints`), `LocalRunStore` and `HubRunStore` on the private model repo through huggingface_hub 2.4 (`upload_file`, `upload_folder`, `list_repo_files`, `hf_hub_download`, `snapshot_download`, `delete_files`), each call tried 3 more times, 2, 4 and 8 s apart, on network errors; `latest_checkpoint` by step number; retention keeps the latest 2 `step-NNNNNN` and `best/`; `forge runs list|show|pull|push`, `pull --store kaggle` being `forge kaggle output`; `forge eval run --store hub` fetches an earlier attempt to resume and stores the run when it ends; the kernel's upload stage goes through the store. Tested with the Hub client faked; no real Hub call yet, as the account doesn't exist (FG-303's pending job makes the first) |
-| FG-305 | Time guard and automatic ledger rows | 3 | todo |  |  |  |
+| FG-305 | Time guard and automatic ledger rows | 3 | done |  |  | `forge.ops.timeguard.Deadline` times steps on a monotonic clock and stops before one that might pass the deadline; `TimeGuardCallback` saves, stops, pushes `checkpoints/step-NNNNNN`, marks the stored manifest `stopped_time_guard` and prunes (tiny model on CPU, fake clock); `run_eval(deadline=)` stops between batches and resumes; manifests name their GPU (CUDA name, Apple chip) and count wall-clock GPU hours; `forge runs pull` adds one ledger row a run id under the append's lock; I7 on `docs/runs`, `runs/` and the ledger |
 | FG-306 | vLLM inference backend | 3 | todo |  |  |  |
 | FG-307 | GPU baselines and model choice | 3 | todo |  |  |  |
 
@@ -716,3 +716,15 @@ Work discovered along the way that is not a plan story.
 - The kernel writes `status.json` after its upload stage, so a run pulled from the Hub has none;
   `forge kaggle wait` reads it from the kernel output. FG-305's ledger row comes from the manifest,
   which the Hub copy has (FG-304).
+- A resumed run keeps its first `started_at`, so its wall-clock GPU hours include the time
+  between sessions, and a ledger row is written once a run id, so a row pulled after the
+  first session misses the later ones. FG-507's two-session GRPO run is the first to hit
+  this; it needs per-session hours or rows (FG-305).
+- `kaggle/entry.py` gives eval jobs no `Deadline` yet, and would have to skip the report of
+  a run the guard stopped, since `read_run` refuses unfinished runs. A kernel's own timeout
+  (the estimate and half again) stops an eval job meanwhile (FG-305).
+- A manifest that `kaggle/entry.py` closes as failed after a crash keeps `gpu_hours` 0; its
+  ledger row is still right, since a pulled row takes its hours from `started_at` and
+  `ended_at` (FG-305).
+- The FG-291 pilot's manifest predates GPU naming (`gpu` null, `gpu_hours` 0); its ledger
+  row holds the chip and hours, and the committed manifest stays as made (FG-305).

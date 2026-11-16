@@ -134,6 +134,14 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 
 - A pull replaces each top-level file or folder of the run that the store holds and keeps the
   rest, such as `kernels.json`, as `forge kaggle output` does.
+- A pull, from either store, also writes the run's row in `docs/compute-ledger.md` from its
+  manifest, once a run id: the UTC date it started, its platform and GPU, its wall-clock
+  hours from `started_at` to `ended_at`, what it was and its cost. A `local-cpu` run gets no
+  row, and a run still `running` none yet: pull it again once it ends. Kernel output with
+  no manifest, such as a spike's, gets none either; add it with `forge ledger add`.
+- Invariant I7 (`tests/integration/test_invariants.py`) checks that every `kaggle`, `colab`
+  or `modal` run under `docs/runs/` and `runs/` has a row, that a run's row names its
+  platform, and that the ledger's cash stays within $50.
 - `forge eval run --store hub` fetches the run from the store when `runs/<run_id>/` has no
   manifest, so a run another machine started resumes here, and puts the folder in the store
   when the run ends, finished or failed. If that upload fails after the run finished, the
@@ -153,7 +161,27 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 
 ## Resume after a session limit
 
-Added in FG-305.
+A Kaggle session ends at 12 hours, and whatever is still running then is lost, so a job
+stops itself first, at a deadline short of the limit (`forge.ops.timeguard`; plan section
+3.8 puts it at 11 h 15 min for a full session). The guard times the job's steps, and once
+the deadline is within the longest step so far, plus a margin when one is given, it stops
+before the next one.
+
+- Training: `TimeGuardCallback(deadline_minutes, store=..., run_id=...)` from
+  `forge.train.callbacks` goes in the trainer's callbacks, made when the job starts, since
+  the deadline counts from then. When it fires, the trainer saves `checkpoint-<step>` in its
+  output folder and stops after that step; the callback pushes the folder to the run's
+  `checkpoints/step-NNNNNN/` in the run store, marks the stored manifest
+  `stopped_time_guard` and prunes the older checkpoints as retention says. A new session
+  resumes from `latest_checkpoint`.
+- Eval: `run_eval(..., deadline=Deadline(minutes))` asks before each batch. A stopped run
+  keeps the batches it stored, leaves official EX to the attempt that finishes it, says
+  `stopped_time_guard` in its manifest and goes to its run store like a run that ended.
+  It resumes like a failed one: the same `--run-id`, or `forge kaggle run --resume`.
+  `forge eval run` and the kernel's entry script don't pass a deadline yet.
+- A manifest's `gpu_hours` is its wall-clock time from `started_at` to `ended_at` on a
+  platform with a GPU (`local-mps` too), and none on `local-cpu`. A resumed run keeps its
+  first `started_at`, so its hours include the time between its sessions.
 
 ## Troubleshooting
 

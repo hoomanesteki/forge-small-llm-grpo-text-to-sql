@@ -137,7 +137,10 @@ def test_pull_mirrors_the_hub_run_into_runs(hub: FakeHub, tmp_path: Path) -> Non
     result = _invoke("pull", RUN)
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == f"run {RUN}: {local}, from {REPO}\neval run, finished\n"
+    assert result.stdout == (
+        f"run {RUN}: {local}, from {REPO}\neval run, finished\n"
+        f"ledger: added 0.67 h on kaggle for run {RUN}\n"
+    )
     assert sorted(p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file()) == [
         "eval/val-scores.jsonl",
         "kernels.json",
@@ -172,6 +175,18 @@ def test_pull_from_kaggle_is_forge_kaggle_output(
     assert result.exit_code == 0, result.output
     assert fetched == [("o/forge-x/3", RUN, runs)]
     assert result.stdout.startswith(f"run {RUN}: {runs / RUN}; the kernel's log")
+    assert result.stdout.endswith(
+        "ledger: no row, the output has no manifest; use forge ledger add\n"
+    )
+    assert hub.calls == []
+
+    # Output that holds the run's manifest gives it its ledger row, as a pull from the Hub.
+    (runs / RUN / "manifest.json").write_bytes(manifest_bytes(_manifest()))
+    result = _invoke("pull", RUN, "--store", "kaggle")
+    assert result.exit_code == 0, result.output
+    assert result.stdout.endswith(
+        f"eval run, finished\nledger: added 0.67 h on kaggle for run {RUN}\n"
+    )
     assert hub.calls == []
 
 

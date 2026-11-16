@@ -30,6 +30,10 @@ A run evaluates one model on one split:
 10. With a run store (``--store hub``), an earlier attempt's files come from it when
     this machine has none, and the run's folder goes to it when the run ends, finished
     or failed (``forge.ops.hub``).
+11. With a deadline (``forge.ops.timeguard``), the run asks it before each batch and
+    stops once that batch might not end in time. The batches stored stay, official EX
+    waits for the attempt that resumes the run, and the manifest says
+    ``stopped_time_guard``; the run goes to the store as one that ended.
 
 The options and their checks are ``forge.eval.config``; the run's folder, its manifest
 and how a killed run resumes are ``forge.eval.run_files``.
@@ -67,8 +71,9 @@ from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
 from forge.ops.hub import RunNotFound, RunStore, hub_store
-from forge.ops.manifest import CODE_SHA_ENV, build_manifest
+from forge.ops.manifest import CODE_SHA_ENV, accelerator, build_manifest
 from forge.ops.paths import RepoRootNotFound, cache_dir, repo_root, runs_dir
+from forge.ops.timeguard import Deadline
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
 
@@ -145,6 +150,7 @@ def run_eval(
     batch_size: int = BATCH_SIZE,
     progress: Callable[[int, int], None] | None = None,
     store: RunStore | None = None,
+    deadline: Deadline | None = None,
 ) -> EvalRun:
     """Evaluate as ``config`` says, storing everything as the module docstring describes.
 
@@ -152,6 +158,7 @@ def run_eval(
     test; ``count_tokens`` measures its prompts, and counts words by default.
     ``store`` likewise replaces the run store ``config.store`` names, ``hub_store()`` for
     ``hub``. ``progress`` is called after each batch with the scores stored and the total.
+    ``deadline`` stops the run between batches, as step 11 of the module docstring says.
     Raises ``DirtyTreeError`` on uncommitted changes unless ``allow_dirty``, and
     ``OSError`` when a finished run can't be stored.
     """
@@ -167,6 +174,7 @@ def run_eval(
         run_id=config.run_id,
         platform=config.platform,
         adapter_ref=config.adapter,
+        gpu=accelerator(config.platform),
         allow_dirty=allow_dirty,
         repo=_code_root(),
         data_dir=root,
@@ -179,7 +187,7 @@ def run_eval(
             _fetch_earlier(store, paths)
         manifest = start(paths, fresh)
         try:
-            questions, files, generate_s = _evaluate(
+            questions, files, generate_s, stopped = _evaluate(
                 config,
                 manifest,
                 paths,
@@ -190,6 +198,7 @@ def run_eval(
                 workers=workers,
                 batch_size=batch_size,
                 progress=progress,
+                deadline=deadline,
             )
         except BaseException as exc:
             # KeyboardInterrupt too: a run stopped by hand is failed, not still running.
@@ -197,7 +206,7 @@ def run_eval(
             if store is not None:
                 _store_failed(store, paths)
             raise
-        final = finish(paths, manifest, None)
+        final = finish(paths, manifest, None, stopped=stopped)
         if store is not None:
             _store(store, paths)
     stored = None if store is None else str(store)
@@ -250,7 +259,10 @@ def _evaluate(
     workers: int,
     batch_size: int,
     progress: Callable[[int, int], None] | None,
-) -> tuple[int, RunFiles, float]:
+    deadline: Deadline | None,
+) -> tuple[int, RunFiles, float, bool]:
+    """Score the run's pending questions: how many it asks, its files, the seconds spent
+    generating, and whether the deadline stopped it."""
     if backend is None and config.backend == "hf":
         # Loaded before dev, so a model that fails to load spends no look at dev.
         backend, count_tokens = _hf_backend(config)
@@ -280,8 +292,21 @@ def _evaluate(
         )
     schemas = _schemas(pending, root)
     timed = _TimedBackend(backend)
+    stopped = False
     with SandboxPool(workers, data_dir=root, imports=(testsuite.__name__,)) as pool:
+        if deadline is not None:
+            deadline.mark()  # a batch is timed from here, not from loading the model
         for begin in range(0, len(pending), batch_size):
+            if deadline is not None and deadline.near():
+                log.warning(
+                    "time guard: stopping %s with %d of %d scores stored; %s",
+                    manifest.run_id,
+                    len(files.scores),
+                    len(files.expected),
+                    deadline.describe(),
+                )
+                stopped = True
+                break
             batch = pending[begin : begin + batch_size]
             prompts = [
                 fit_prompt(example, config.prompt_version, measure, data_dir=root).prompt
@@ -305,8 +330,11 @@ def _evaluate(
             files.append(generations, scores, [first for first, _ in firsts.values()])
             if progress is not None:
                 progress(len(files.scores), len(files.expected))
-        _fill_official(files, by_id, pool)
-    return len(chosen), files, timed.seconds
+            if deadline is not None:
+                deadline.lap()
+        if not stopped:
+            _fill_official(files, by_id, pool)
+    return len(chosen), files, timed.seconds, stopped
 
 
 def _hf_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:

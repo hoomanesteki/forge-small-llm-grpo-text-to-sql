@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, get_args
@@ -11,13 +12,16 @@ from pydantic import ValidationError
 
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
+from forge.ops.ledger import PLATFORMS
 from forge.ops.manifest import (
     CODE_SHA_ENV,
     DirtyTreeError,
     GitError,
     NoCommitError,
     Platform,
+    accelerator,
     build_manifest,
+    close,
     code_sha,
     config_hash,
     git_sha,
@@ -384,3 +388,65 @@ def test_outside_a_checkout_the_commit_comes_from_the_kernel_variable(
 def test_kernel_variable_must_be_a_full_clean_commit(tmp_path: Path, value: str) -> None:
     with pytest.raises(ValueError, match=f"{CODE_SHA_ENV} must be a full 40-character commit"):
         code_sha(tmp_path, env={CODE_SHA_ENV: value})
+
+
+@pytest.mark.phase(3)
+def test_accelerator_names_the_gpu_of_each_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    import torch
+
+    asked: list[tuple[str, ...]] = []
+
+    def sysctl(stdout: str, code: int = 0) -> Any:
+        def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            asked.append(tuple(command))
+            return subprocess.CompletedProcess(command, code, stdout=stdout, stderr="")
+
+        return run
+
+    monkeypatch.setattr(subprocess, "run", sysctl("Apple M4\n"))
+    assert accelerator("local-mps") == "Apple M4"
+    assert asked == [("sysctl", "-n", "machdep.cpu.brand_string")]
+    # A Mac that won't name its chip, and a machine with no sysctl, still have MPS.
+    monkeypatch.setattr(subprocess, "run", sysctl("", code=1))
+    assert accelerator("local-mps") == "mps"
+
+    def no_sysctl(command: list[str], **kwargs: Any) -> None:
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(subprocess, "run", no_sysctl)
+    assert accelerator("local-mps") == "mps"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device=None: "Tesla T4")
+    assert accelerator("kaggle") == "Tesla T4"
+    assert accelerator("local-cpu") is None
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert accelerator("colab") is None
+    monkeypatch.setitem(sys.modules, "torch", None)  # import torch now raises ImportError
+    assert accelerator("modal") is None
+
+
+@pytest.mark.phase(3)
+def test_close_counts_wall_clock_hours_on_gpu_platforms(repo: Path) -> None:
+    started = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
+    ended = started + timedelta(minutes=45)
+    gpu = {"local-mps", "kaggle", "colab", "modal"}
+    for platform in sorted(PLATFORMS):
+        manifest = build_manifest(
+            "eval", {}, model_ref="m", seed=0, repo=repo, platform=platform, now=started
+        )
+        closed = close(manifest, "stopped_time_guard", now=ended)
+        assert (closed.status, closed.ended_at) == ("stopped_time_guard", ended)
+        # Only the laptop's CPU holds no GPU while the run goes on.
+        assert closed.gpu_hours == pytest.approx(0.75 if platform in gpu else 0.0), platform
+        assert (manifest.status, manifest.ended_at, manifest.gpu_hours) == ("running", None, 0.0)
+
+    kaggle = build_manifest("eval", {}, model_ref="m", seed=0, repo=repo, platform="kaggle")
+    assert close(kaggle, "finished").ended_at is not None
+    with pytest.raises(ValueError, match="timezone-aware"):
+        close(kaggle, "failed", now=datetime(2026, 11, 15, 10))
+    early = build_manifest(
+        "eval", {}, model_ref="m", seed=0, repo=repo, platform="kaggle", now=ended
+    )
+    with pytest.raises(ValueError, match="can't end"):
+        close(early, "finished", now=started)
