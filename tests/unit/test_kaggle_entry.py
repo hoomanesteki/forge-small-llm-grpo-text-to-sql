@@ -248,7 +248,8 @@ def test_training_jobs_install_the_trl_stack_and_never_vllm(
     code = kernel_root / "input" / "forge-code"
     pip: list[list[str]] = []
     for job in ("sft", "grpo"):
-        # The trainers come with FG-403 and FG-504; the stages before the job are here.
+        # A stand-in job, since the stages before it are what is checked here: the SFT
+        # job trains in tests/integration/test_kaggle_entry.py, and GRPO's comes with FG-504.
         monkeypatch.setitem(script.JOBS, job, Job())
         pip.clear()
         shutil.rmtree(kernel_root / "working", ignore_errors=True)

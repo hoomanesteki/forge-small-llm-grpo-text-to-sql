@@ -28,10 +28,13 @@ from forge.eval.config import EvalConfig
 from forge.ops.dev_usage import read_uses
 from forge.ops.hub import HubRunStore
 from forge.ops.sessions import read_sessions
+from forge.train import sft
+from forge.train.config import OpsConfig, TrainConfig, load_train_config
 from tests.fakes import REPO_URL, FakeHub, FakeVllm, gold_reply
 from tests.kernel import SHA, argv, build_inputs, kernel_folder, mount_output
 from tests.spike import entry
 
+ROOT = Path(__file__).resolve().parents[2]
 script = entry()
 # Built at run time, so no literal here looks like a real token.
 TOKEN = "hf_" + "".join(chr(97 + (i * 11) % 26) for i in range(30))
@@ -319,3 +322,158 @@ def test_a_resume_carries_on_after_attempts_that_failed_before_their_job(
     # Every attempt is a session of the run, the early failures too.
     sessions = read_sessions(run_dir) or []
     assert [s.status for s in sessions] == ["failed", "failed", "failed", "finished"]
+
+
+@pytest.mark.phase(4)
+def test_entry_runs_an_sft_job_end_to_end(
+    tmp_path: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The tiny model on the CPU, standing in for a T4: the job trains the config's 3 steps
+    # after a 2-step preflight, each a run of its own, outside any git checkout.
+    kernel_env = kernel_folder(tmp_path, monkeypatch)
+    build_inputs(kernel_env, spider_mini)
+    smoke = load_train_config(ROOT / "configs" / "sft" / "tiny-smoke.yaml")
+    config = smoke.model_copy(
+        update={"ops": OpsConfig(checkpoint_every=100, keep_checkpoints_at=(0.5,))}
+    )
+    options = {"config": config.model_dump(mode="json")}
+
+    job = argv(kernel_env, "--timeout-s", "3600", options=options)
+    job[job.index("eval")] = "sft"
+    pip: list[list[str]] = []
+    assert script.main(job, run=lambda command: pip.append(list(command))) == 0
+
+    work = kernel_env / "working"
+    run_dir = work / "runs" / "run-1"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert (status["status"], status["error"]) == ("finished", None), status["error"]
+    # A training job installs the trl stack, never vLLM's (ADR-0006).
+    trl_stack = kernel_env / "input" / "forge-code" / "requirements-train-gpu.txt"
+    assert pip[-1] == [*script.PIP, "-r", str(trl_stack)]
+    assert status["stages"]["install"]["result"]["requirements"] == trl_stack.name
+    run = RunManifest.model_validate_json((run_dir / "manifest.json").read_text())
+    assert (run.kind, run.status, run.git_sha, run.platform) == ("sft", "finished", SHA, "kaggle")
+    assert run.config["sft"]["max_steps"] == 3 and run.outputs["adapter"] == "checkpoints/final"
+    # The checkpoint half way, step 1 of 3, kept beside the final adapter for the upload.
+    assert run.outputs["kept_at_0.5"] == "checkpoints/step-000001"
+    for rel in ("checkpoints/final", "checkpoints/step-000001"):
+        assert (run_dir / rel / "adapter_model.safetensors").is_file(), rel
+    lines = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    assert [line["step"] for line in lines if "loss" in line] == [1, 2, 3]
+    # A training run writes no sessions.json, so its one session is the kernel's, added
+    # with the run's status and spanning the whole kernel, as an eval job's is.
+    (session,) = read_sessions(run_dir) or []
+    assert (session.status, status["session"]) == ("finished", 1)
+    assert session.started_at == datetime.fromisoformat(status["started_at"])
+    assert session.ended_at == datetime.fromisoformat(status["ended_at"])
+
+    # The preflight trained 2 steps of the same config, saving as the job does.
+    preflight = work / "preflight" / "run-1-preflight"
+    first = RunManifest.model_validate_json((preflight / "manifest.json").read_text())
+    assert (first.status, first.config["sft"]["max_steps"]) == ("finished", 2)
+    assert (preflight / "checkpoints" / "final" / "adapter_config.json").is_file()
+    # The rows were built in the temp folder, which the output leaves out.
+    assert sorted(p.name for p in work.iterdir()) == ["preflight", "runs"]
+    assert len(list((kernel_env / "temp" / "sft").iterdir())) == 1
+
+
+@pytest.mark.phase(4)
+@pytest.mark.parametrize(
+    ("timeout_s", "guard", "expected"),
+    [
+        # The push's hour less the tenth kept back for the guard's save and the upload is
+        # 54 minutes from the kernel's start, and the setup and preflight took 10.
+        (3600, 675.0, 44.0),
+        # A config's own guard that comes sooner stays.
+        (3600, 30.0, 30.0),
+        # A timeout the setup and preflight used up leaves nothing to train in.
+        (600, 675.0, None),
+    ],
+)
+def test_sft_jobs_time_guard_stops_before_the_pushs_timeout(
+    tmp_path: Path,
+    spider_mini: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_s: int,
+    guard: float,
+    expected: float | None,
+) -> None:
+    now = [0.0]
+
+    def clock() -> float:
+        return now[0]
+
+    trained: list[tuple[TrainConfig, object]] = []
+
+    def run_sft(config: TrainConfig, *, clock: object, **kwargs: object) -> object:
+        trained.append((config, clock))
+        now[0] += 600.0  # each run takes ten minutes of the kernel's time
+        return types.SimpleNamespace(manifest=types.SimpleNamespace(status="finished"))
+
+    monkeypatch.setattr(sft, "run_sft", run_sft)
+    kernel_env = kernel_folder(tmp_path, monkeypatch)
+    build_inputs(kernel_env, spider_mini)
+    smoke = load_train_config(ROOT / "configs" / "sft" / "tiny-smoke.yaml")
+    config = smoke.model_copy(update={"ops": OpsConfig(time_guard_minutes=guard)})
+    job = argv(kernel_env, "--timeout-s", str(timeout_s), options={"config": config.model_dump()})
+    job[job.index("eval")] = "sft"
+
+    assert script.main(job, run=lambda command: None, clock=clock) == 0
+
+    status = json.loads((kernel_env / "working" / "runs" / "run-1" / "status.json").read_text())
+    # The preflight's 2 steps keep the config's guard, on the kernel's clock.
+    assert trained[0][0].ops.time_guard_minutes == guard and trained[0][1] is clock
+    if expected is None:
+        assert (status["status"], status["stage"]) == ("failed", "job")
+        assert "leaves the job no time to train" in status["error"]
+        assert len(trained) == 1
+        return
+    assert (status["status"], status["error"]) == ("finished", None), status["error"]
+    (job_config, job_clock) = trained[1]
+    assert job_config.ops.time_guard_minutes == pytest.approx(expected) and job_clock is clock
+    # Only the guard: the run's config, and so its hash, is the one forge kaggle run checked.
+    assert job_config.model_dump(exclude={"ops"}) == config.model_dump(exclude={"ops"})
+
+
+@pytest.mark.phase(4)
+def test_entry_fetches_a_checkpoint_adapter_from_the_run_store(
+    tmp_path: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vllm = FakeVllm(gold_reply(load_val(spider_mini))).install(monkeypatch)
+    kernel_env = kernel_folder(tmp_path, monkeypatch)
+    build_inputs(kernel_env, spider_mini)
+    hub = FakeHub()
+    monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    sft_run = "2026-11-20-qwen3-4b-sft-abc1234"
+    adapter = f"runs/{sft_run}/checkpoints/step-000242"
+    for name in ("adapter_config.json", "adapter_model.safetensors"):
+        hub.files[f"{adapter}/{name}"] = f"{name} at step 242".encode()
+    hub.files[f"runs/{sft_run}/checkpoints/final/adapter_model.safetensors"] = b"final"
+    options = {"model": "org/model@abc123", "adapter": adapter, "backend": "vllm", "limit": 3}
+
+    # Without a token the store can't be read, and the job says so before a model loads.
+    assert script.main(argv(kernel_env, options=options), run=lambda command: None) == 0
+    work = kernel_env / "working"
+    status = json.loads((work / "runs" / "run-1" / "status.json").read_text())
+    assert status["status"] == "failed" and "without an HF_TOKEN secret" in status["error"]
+    assert vllm.engines == []
+
+    monkeypatch.setenv("HF_TOKEN", "hf_" + "".join(chr(97 + i % 26) for i in range(30)))
+    again = argv(kernel_env, options=options)
+    again[again.index("run-1")] = "run-2"
+    assert script.main(again, run=lambda command: None) == 0
+
+    status = json.loads((work / "runs" / "run-2" / "status.json").read_text())
+    assert (status["status"], status["error"]) == ("finished", None), status["error"]
+    # That checkpoint alone, at the path the config names, as on the laptop.
+    fetched = work / adapter
+    assert sorted(p.name for p in fetched.iterdir()) == [
+        "adapter_config.json",
+        "adapter_model.safetensors",
+    ]
+    assert not (work / "runs" / sft_run / "checkpoints" / "final").exists()
+    (call,) = [kwargs for name, kwargs in hub.calls if name == "snapshot_download"]
+    assert call["allow_patterns"] == [f"{adapter}/*"]
+    assert vllm.engines[0]["enable_lora"] is True
+    run = RunManifest.model_validate_json((work / "runs" / "run-2" / "manifest.json").read_text())
+    assert (run.status, run.adapter_ref, run.config["adapter"]) == ("finished", adapter, adapter)

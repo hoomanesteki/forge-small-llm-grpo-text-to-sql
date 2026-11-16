@@ -17,9 +17,9 @@ Before a push, in the plan's order (FG-303):
    the last attempt's kernel, whose output holds the run so far.
 6. ``KaggleClient.push_kernel`` with a T4 and a timeout of the estimate and half again, at
    most a session's 12 hours: plan section 5.3 stops a job 50% over its estimate. The
-   entry script gets the timeout too, and its eval job stops at the time guard before
-   it. A push whose CLI failed without saying it pushed is a push made when Kaggle has
-   the attempt's new kernel all the same (``JobPlan.new_kernel``): only its answer was
+   entry script gets the timeout too, and its eval or SFT job stops at its time guard
+   before it. A push whose CLI failed without saying it pushed is a push made when Kaggle
+   has the attempt's new kernel all the same (``JobPlan.new_kernel``): only its answer was
    lost. Each push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait
    and output read to find the run's kernel. A resume mounts the last attempt whose
    output holds the run: not one whose own kernel source Kaggle dropped, since that one
@@ -42,6 +42,12 @@ checks before any dataset is published. Each push gets a kernel of its own, name
 over 50 characters, so a longer name keeps the run id up to a dash and adds a hash of the
 whole run id. The run id itself never changes: ``kernels.json`` maps it to its kernels,
 which is how status, logs, wait, output and ``--resume`` find them.
+
+An ``sft`` job takes a training config (``configs/sft/*.yaml``) whose device may be
+CUDA, and trains it as ``forge train sft`` does, its run's platform the kernel's host. Its
+options carry the whole config as it was checked here, defaults filled in, so the kernel
+trains what was checked. It reads train only, so it takes no ``--reason``, and an SFT run
+can't be resumed yet. Its preflight trains a few steps of the same config.
 
 The ``spike`` job pushes FG-301's throughput script instead of the entry script. It runs
 without Forge, so it mounts no dataset and has no preflight.
@@ -102,10 +108,11 @@ from forge.ops.kaggle import (
 from forge.ops.ledger import Summary, run_hours
 from forge.ops.manifest import DirtyTreeError, git_sha
 from forge.ops.sessions import SESSIONS_FILE
+from forge.train.config import load_train_config
 
 JOBS = ("eval", "sft", "grpo", "spike")
 # Jobs the kernel's entry script can't run yet, with the story that brings each.
-LATER_JOBS: Mapping[str, str] = {"sft": "FG-404", "grpo": "FG-504"}
+LATER_JOBS: Mapping[str, str] = {"grpo": "FG-504"}
 ENTRY = Path("kaggle") / "entry.py"  # relative to the repo root, like the spike
 SPIKE = Path("kaggle") / "spike" / "throughput.py"
 # The FG-301 GPU kernel's name, the one scripts/kaggle_spike.py bundles.
@@ -223,6 +230,7 @@ def plan_job(
     preflight: bool | None = None,
     allow_over_budget: bool = False,
     reason: str | None = None,
+    adapter: str | None = None,
     notebook: bool = False,
     today: date | None = None,
 ) -> JobPlan:
@@ -230,10 +238,12 @@ def plan_job(
     notebook would run, with ``notebook``.
 
     ``preflight`` is on by default for entry jobs. ``reason`` goes with a dev eval job,
-    and only with one. Raises ``JobRefused`` for a job that can't go yet, a run that
-    clashes with an earlier push, a run id that makes no kernel slug, a resume or a dev
-    job as a notebook, a dev job once the dev looks are spent, ``ValueError`` for a bad
-    config, and ``NotAvailable`` for options a later story builds.
+    and only with one. ``adapter`` is an eval job's, for a config that names none, so a
+    checkpoint is scored with its base model's config. Raises ``JobRefused`` for a job
+    that can't go yet, a run that clashes with an earlier push, a run id that makes no
+    kernel slug, a resume or a dev job as a notebook, a dev job once the dev looks are
+    spent, ``ValueError`` for a bad config, and ``NotAvailable`` for options a later story
+    builds.
     """
     if job in LATER_JOBS:
         raise JobRefused(f"--job {job} comes with {LATER_JOBS[job]}")
@@ -245,6 +255,8 @@ def plan_job(
             "run; push the resume with forge kaggle run --resume, or give the notebook a new "
             "--run-id"
         )
+    if adapter is not None and job != "eval":
+        raise JobRefused(f"--adapter is an eval job's, not a {job} job's")
     day = today or utc_today()
     options: dict[str, Any]
     if job == "spike":
@@ -255,10 +267,33 @@ def plan_job(
         argv, ops = read_spike_config(config)
         options = {"argv": argv, **({"allow_over_budget": True} if allow_over_budget else {})}
         default_id = f"{day:%Y-%m-%d}-throughput-spike-{sha[:7]}"
+        est = ops.est_gpu_hours
+    elif job == "sft":
+        if reason is not None:
+            raise JobRefused("an SFT job trains on the train split only, so it takes no --reason")
+        if resume:
+            raise JobRefused("an SFT run can't be resumed yet; pass --run-id to start a new one")
+        train = load_train_config(config)
+        if train.run.kind != "sft":
+            raise JobRefused(f"{config} trains a {train.run.kind} run, and --job sft an sft one")
+        if train.run.device in ("cpu", "mps"):
+            raise JobRefused(
+                f"{config} trains on {train.run.device}, and a kernel on its GPU: set "
+                "run.device to auto or cuda, or train on the laptop with forge train sft"
+            )
+        options = {
+            "config": train.model_dump(mode="json"),
+            **({"allow_over_budget": True} if allow_over_budget else {}),
+        }
+        default_id = make_run_id("sft", train.run.model_ref, sha, on=day)
+        est = train.ops.est_gpu_hours
     else:
         file_options, ops = read_config_sections(config)
+        if adapter is not None and file_options.get("adapter") is not None:
+            raise JobRefused(f"{config} names an adapter already; leave out --adapter")
         options = {
             **file_options,
+            **({"adapter": adapter} if adapter is not None else {}),
             **({"reason": reason} if reason is not None else {}),
             **({"allow_over_budget": True} if allow_over_budget else {}),
         }
@@ -271,7 +306,7 @@ def plan_job(
                 "push a dev job with forge kaggle run, which logs the one look it spends"
             )
         default_id = make_run_id("eval", eval_config.model, sha, on=day)
-    est = ops.est_gpu_hours
+        est = ops.est_gpu_hours
     if est is None:
         raise JobRefused(f"{config} sets no ops.est_gpu_hours, which the budget check needs")
     if est > SESSION_HOURS:

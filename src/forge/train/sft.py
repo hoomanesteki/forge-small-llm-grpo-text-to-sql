@@ -3,9 +3,9 @@
 One run, in order (plan FG-403; the starting values are ADR-0010's):
 
 1. The backend the config names (``forge.train.backends.select_backend``), and the
-   platform its manifest gives: ``local-cpu`` or ``local-mps``. CUDA here has no
-   platform to name (ADR-0016), so such a run is refused before anything loads; a GPU run
-   goes through a kernel job.
+   platform its manifest gives: ``local-cpu`` or ``local-mps``, or in a kernel job the
+   host ``kaggle/entry.py`` names. CUDA on the laptop has no platform to name (ADR-0016),
+   so such a run is refused before anything loads; a GPU run goes through a kernel job.
 2. The model with LoRA, and its tokenizer.
 3. The SFT rows of the train split, measured with that tokenizer (``forge.train.sft_data``)
    and saved to ``<sft_root>/<hash>/``, which keeps a folder already built with that hash,
@@ -61,7 +61,7 @@ from forge.core.ids import make_run_id
 from forge.core.types import RunManifest
 from forge.data.prompts import ChatTokenizer, chat_token_counter
 from forge.data.spider import resolve_data_dir
-from forge.eval.config import check_run_id
+from forge.eval.config import Host, check_run_id
 from forge.eval.metrics import summarize
 from forge.eval.run_files import read_run, write_atomic
 from forge.ops.hub import (
@@ -170,14 +170,16 @@ def run_sft(
     runs_root: Path | None = None,
     sft_root: Path | None = None,
     backend: TrainBackend | None = None,
+    host: Host | None = None,
     env: Mapping[str, str] | None = None,
     clock: Clock = time.monotonic,
 ) -> SftRun:
     """Train the SFT run ``config`` describes, as the module docstring says.
 
     ``backend`` replaces the one the config names, such as a stand-in in a test.
-    ``sft_root`` is where the rows' folder goes (``data/sft`` by default), ``env`` where
-    the callbacks look for a W&B key, and ``clock`` the time guard's clock. Raises
+    ``sft_root`` is where the rows' folder goes (``data/sft`` by default), ``host`` the
+    kernel's machine a job runs on, ``env`` where the callbacks look for a W&B key, and
+    ``clock`` the time guard's clock. Raises
     ``DirtyTreeError`` on uncommitted changes unless ``allow_dirty``, ``RunExists`` for a
     run id already used, and ``ValueError`` for a config or a device no SFT run can take.
     """
@@ -196,7 +198,7 @@ def run_sft(
         backend = select_backend(
             config.run.backend, device=config.run.device, max_seq_length=config.max_seq_length
         )
-    platform = platform_for(backend.device)
+    platform = host if host is not None else platform_for(backend.device)
     # Imported once the backend is made: Unsloth patches transformers as it is imported,
     # so nothing may import transformers before it.
     from forge.train.callbacks import CheckpointCallback, TimeGuardCallback, training_callbacks

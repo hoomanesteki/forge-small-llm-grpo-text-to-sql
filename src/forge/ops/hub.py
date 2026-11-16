@@ -52,7 +52,8 @@ only a machine keeps stays (``LOCAL_ONLY``): an eval run's lock file, which neve
 the machine it was taken on, and ``kernels.json``, the kernels ``forge kaggle run``
 pushed for the run, with ``kernel/``, the rest of a kernel's output, unless the copy's
 ``kernels.json`` lists more pushes than this machine's: ``forge runs push`` uploads them,
-so the store may hold an older record.
+so the store may hold an older record. ``HubRunStore.get_folder`` fetches one folder of a
+run, such as the checkpoint a kernel's eval job loads as its adapter.
 """
 
 from __future__ import annotations
@@ -659,6 +660,21 @@ class HubRunStore:
             )
         return doomed
 
+    def get_folder(self, run_id: str, rel: str, local_dir: str | Path) -> Path:
+        """Download the run's folder ``rel``, such as a checkpoint, to ``local_dir``, which
+        it replaces; returns ``local_dir``."""
+        path, target = self._path(run_id, _inside(rel)), Path(local_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Staged beside the target, as pull does, so a failed download leaves it as it was.
+        with tempfile.TemporaryDirectory(prefix=".get-", dir=target.parent) as staging:
+            fetched = self._download(path, staging)
+            if not fetched.is_dir():
+                raise RunNotFound(f"run {run_id} in {self.repo_id} has no {rel}")
+            if target.is_dir():
+                shutil.rmtree(target)
+            shutil.move(fetched, target)
+        return target
+
     def runs(self) -> list[str]:
         """The ids of the runs in the repo, those with a manifest, sorted (by date first)."""
         files = self._call(self.api.list_repo_files, f"listing the files of {self.repo_id}")
@@ -675,23 +691,28 @@ class HubRunStore:
         # Staged beside the target, so moving the files in is a rename, and nothing of a
         # download that fails reaches it.
         with tempfile.TemporaryDirectory(prefix=".pull-", dir=target.parent) as staging:
-
-            def download(**kwargs: Any) -> object:
-                # snapshot_download that can't reach the Hub returns a folder that isn't
-                # empty as if it were complete, so no try starts on what one before left.
-                _empty(Path(staging))
-                return self.api.snapshot_download(**kwargs)
-
-            self._call(
-                download,
-                f"downloading {self.repo_id}/{path}",
-                local_dir=staging,
-                allow_patterns=[f"{path}/*"],
-            )
-            fetched = Path(staging, path)
+            fetched = self._download(path, staging)
             if not fetched.is_dir():
                 raise RunNotFound(f"no run {run_id} in {self.repo_id}")
             replace_run(fetched, target, move=True)
+
+    def _download(self, path: str, staging: str) -> Path:
+        """Download the repo's folder ``path`` into the folder ``staging``, and return
+        where it lands there, which is no folder when the repo has none at ``path``."""
+
+        def download(**kwargs: Any) -> object:
+            # snapshot_download that can't reach the Hub returns a folder that isn't
+            # empty as if it were complete, so no try starts on what one before left.
+            _empty(Path(staging))
+            return self.api.snapshot_download(**kwargs)
+
+        self._call(
+            download,
+            f"downloading {self.repo_id}/{path}",
+            local_dir=staging,
+            allow_patterns=[f"{path}/*"],
+        )
+        return Path(staging, path)
 
 
 def hub_store(env: Mapping[str, str] | None = None) -> HubRunStore:

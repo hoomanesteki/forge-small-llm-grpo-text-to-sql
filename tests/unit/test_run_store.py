@@ -514,6 +514,47 @@ def test_a_retried_pull_starts_from_an_empty_folder(tmp_path: Path) -> None:
     assert _files(tmp_path / "runs" / RUN) == {"manifest.json": manifest_bytes(_manifest())}
 
 
+@pytest.mark.phase(4)
+def test_get_folder_fetches_one_folder_whole_from_an_empty_start(tmp_path: Path) -> None:
+    class HalfwayHub(FakeHub):
+        """Fails its first download halfway through, then works."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.found: list[list[str]] = []  # what each download found in its folder
+
+        def snapshot_download(self, **kwargs: Any) -> str:
+            root = Path(kwargs["local_dir"])
+            self.found.append(sorted(p.relative_to(root).as_posix() for p in root.rglob("*")))
+            if len(self.found) > 1:
+                return super().snapshot_download(**kwargs)
+            cut = root / "runs" / RUN / checkpoint_dir(2) / "cut.safetensors"
+            cut.parent.mkdir(parents=True)
+            cut.write_text("weights cut sh")
+            raise LocalEntryNotFoundError("the Hub went away") from connect_error(REPO_URL)
+
+    fake = HalfwayHub()
+    store = HubRunStore(REPO, api=fake, sleep=lambda seconds: None)
+    saved = _checkpoint(tmp_path, 2)
+    store.put_folder(RUN, saved, checkpoint_dir(2))
+    store.put_folder(RUN, _checkpoint(tmp_path, 4), checkpoint_dir(4))
+    target = tmp_path / "work" / "runs" / RUN / checkpoint_dir(2)
+    target.mkdir(parents=True)
+    (target / "stale.txt").write_text("from before")
+
+    assert store.get_folder(RUN, checkpoint_dir(2), target) == target
+
+    # As in a pull, the second try starts from nothing, and the folder comes whole and
+    # alone: the run's other checkpoint stays in the store.
+    assert fake.found == [[], []]
+    assert _files(target) == _files(saved)
+    assert sorted(p.name for p in target.parent.iterdir()) == ["step-000002"]
+    missing = tmp_path / "work" / "missing"
+    with pytest.raises(RunNotFound, match=f"run {RUN} in {REPO} has no checkpoints/step-000003"):
+        store.get_folder(RUN, checkpoint_dir(3), missing)
+    assert not missing.exists()
+
+
 Handler = Callable[[httpx2.Request], httpx2.Response]
 
 
