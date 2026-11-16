@@ -1,4 +1,4 @@
-"""Kaggle kernels: the metadata a push sends, checked before it is sent.
+"""Kaggle: the metadata a kernel push sends, and the datasets a kernel mounts.
 
 ``kaggle kernels push -p DIR`` reads ``DIR/kernel-metadata.json`` and uploads the one
 script it names. The CLI (kaggle 2.2.5) lets some mistakes through quietly: it ignores a
@@ -10,15 +10,31 @@ laptop instead of in a queued GPU session.
 Every Forge kernel is a private Python script. The template in
 ``kaggle/kernel-metadata.template.json`` asks for a T4 with internet; a CPU kernel drops
 the GPU and the machine shape.
+
+A GPU job mounts two private datasets: ``<owner>/forge-code``, the wheel built at one
+commit with ``requirements-gpu.txt`` and ``GIT_SHA``, and ``<owner>/forge-spider``, the
+Spider files ``spider.sha256`` lists, with that file. ``KaggleClient`` runs the kaggle CLI
+as an argument list, never through a shell, and reads what it prints as well as its exit
+code: ``datasets create`` and ``version`` report a refused upload and still exit 0.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+import shlex
+import shutil
+import subprocess
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
+
+from forge.data.spider import CHECKSUMS, load_checksums, verify_files
+from forge.ops.dotenv import forge_env
+from forge.ops.manifest import DirtyTreeError, git_sha
 
 TEMPLATE = Path("kaggle") / "kernel-metadata.template.json"  # relative to the repo root
 METADATA_FILE = "kernel-metadata.json"
@@ -213,3 +229,284 @@ def _strings(meta: Mapping[str, Any]) -> list[tuple[str, str]]:
         items = value if isinstance(value, list) else [value]
         found += [(key, item) for item in items if isinstance(item, str)]
     return found
+
+
+CODE_SLUG = "forge-code"
+DATA_SLUG = "forge-spider"
+OWNER_ENV = "FORGE_KAGGLE_USER"
+DATASET_METADATA_FILE = "dataset-metadata.json"
+GIT_SHA_FILE = "GIT_SHA"
+CHECKSUM_FILE = "spider.sha256"
+# Relative to the repo root; git ignores build/.
+REQUIREMENTS = Path("kaggle") / "requirements-gpu.txt"
+CODE_BUNDLE = Path("build") / "kaggle-code"
+DATA_BUNDLE = Path("build") / "kaggle-data"
+
+# CC BY-SA 4.0 asks for the authors, the license and its link wherever the data goes.
+SPIDER_DESCRIPTION = (
+    "Spider 1.0 for Forge's text-to-SQL jobs: the question and schema JSON files and every "
+    "`database/<db>/<db>.sqlite`, unchanged, each listed with its sha256 in `spider.sha256`."
+    "\n\n"
+    "Spider 1.0 by Tao Yu, Rui Zhang, Kai Yang, Michihiro Yasunaga, Dongxu Wang, Zifan Li, "
+    "James Ma, Irene Li, Qingning Yao, Shanelle Roman, Zilin Zhang and Dragomir Radev "
+    "(Yale LILY), licensed under CC BY-SA 4.0 "
+    "(https://creativecommons.org/licenses/by-sa/4.0/)."
+    "\n\n"
+    'Yu et al., "Spider: A Large-Scale Human-Labeled Dataset for Complex and Cross-Domain '
+    'Semantic Parsing and Text-to-SQL Task", EMNLP 2018, pages 3911-3921, '
+    "doi:10.18653/v1/D18-1425.\n"
+)
+
+# One package at one exact version: ``name==1.2.3``, with extras allowed.
+_PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?==[A-Za-z0-9._+!-]+")
+# kaggle 2.2.5 prints "Dataset creation error: ..." or "Dataset version creation error: ..."
+# on stdout and exits 0 when the server refuses an upload.
+_UPLOAD_REFUSED = re.compile(r"creation error", re.IGNORECASE)
+
+# Gets a command as an argument list; returns its exit code and captured output.
+Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+
+
+class KaggleError(RuntimeError):
+    """A kaggle or uv command failed, or printed a failure and exited 0."""
+
+
+def run_command(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run ``args`` without a shell, capturing output, with the repo's ``.env`` merged in.
+
+    The merged environment matters: Kaggle credentials may live only in ``.env``.
+    """
+    return subprocess.run(list(args), capture_output=True, text=True, check=False, env=forge_env())
+
+
+def kaggle_bin() -> str:
+    """The kaggle script next to this interpreter, so an unactivated venv still works."""
+    sibling = Path(sys.executable).parent / "kaggle"
+    return str(sibling) if sibling.is_file() else "kaggle"
+
+
+@dataclass(frozen=True)
+class KaggleClient:
+    """The kaggle CLI, run through ``run`` so tests can stand in for it."""
+
+    run: Runner = run_command
+    executable: str = field(default_factory=kaggle_bin)
+
+    def dataset_exists(self, ref: str) -> bool:
+        """Whether the dataset ``owner/slug`` exists; raises on any other failure."""
+        command = [self.executable, "datasets", "status", ref]
+        result = _run(self.run, command)
+        if result.returncode == 0:
+            return True
+        # A missing dataset is a 404, which kaggle 2.2.5 reports as "... was not found."
+        if "not found" in _output(result).lower():
+            return False
+        raise _failed(command, result)
+
+    def create_dataset(self, folder: Path) -> str:
+        """Create the dataset ``folder``'s metadata names; returns what the CLI printed."""
+        # Never -u: without it a new dataset is private. zip mode uploads each subfolder
+        # as an archive, where the default (skip) would leave it out without a word.
+        return self._upload([self.executable, "datasets", "create", "-p", str(folder), "-r", "zip"])
+
+    def version_dataset(self, folder: Path, message: str) -> str:
+        """Upload ``folder`` as a new version, noted ``message``; returns what the CLI printed."""
+        command = [self.executable, "datasets", "version", "-p", str(folder), "-m", message]
+        return self._upload([*command, "-r", "zip"])
+
+    def _upload(self, command: list[str]) -> str:
+        output = _check(self.run, command)
+        if _UPLOAD_REFUSED.search(output):
+            raise KaggleError(f"{_display(command)} was refused: {_tail(output)}")
+        return output.strip()
+
+
+def kaggle_owner(env: Mapping[str, str], home: Path) -> str:
+    """The Kaggle user who owns Forge's datasets.
+
+    ``FORGE_KAGGLE_USER`` if set, else the username in the Kaggle credentials:
+    ``KAGGLE_USERNAME``, or ``kaggle.json`` in ``KAGGLE_CONFIG_DIR`` or ``~/.kaggle``. An
+    API token doesn't name its user, so with one ``FORGE_KAGGLE_USER`` has to be set.
+    """
+    owner = env.get(OWNER_ENV) or env.get("KAGGLE_USERNAME") or _kaggle_json_username(env, home)
+    if not owner:
+        raise KaggleError(
+            f"no Kaggle username: set {OWNER_ENV} in .env or the environment, since an API "
+            "token doesn't name its user"
+        )
+    if not _OWNER.fullmatch(owner):
+        raise KaggleError(f"{owner!r} is not a Kaggle username")
+    return owner
+
+
+def dataset_metadata(ref: str, license_name: str, description: str | None = None) -> dict[str, Any]:
+    """``dataset-metadata.json`` for the private dataset ``ref``, titled with its slug."""
+    meta: dict[str, Any] = {"id": ref, "title": ref.split("/")[1]}
+    if description is not None:
+        meta["description"] = description
+    meta["licenses"] = [{"name": license_name}]
+    # create keeps a dataset private without -u, but `kaggle datasets metadata --update`
+    # makes it public unless the metadata says otherwise.
+    meta["isPrivate"] = True
+    return meta
+
+
+def unpinned_requirements(text: str) -> list[str]:
+    """The lines of a requirements file that don't pin one exact version with ``==``."""
+    lines = (raw.split("#", 1)[0].strip() for raw in text.splitlines())
+    return [line for line in lines if line and not _PINNED.fullmatch(line)]
+
+
+@dataclass(frozen=True)
+class CodeBundle:
+    path: Path
+    wheel: str  # the wheel's file name
+    git_sha: str
+
+
+@dataclass(frozen=True)
+class Published:
+    ref: str
+    created: bool  # False for a new version of a dataset that was there
+    output: str  # what the kaggle CLI printed
+
+
+def build_code_bundle(root: Path, owner: str, *, run: Runner = run_command) -> CodeBundle:
+    """Write ``build/kaggle-code``: the wheel built at HEAD, the pinned GPU requirements,
+    ``GIT_SHA`` and the dataset metadata, and nothing else.
+
+    A tree with uncommitted changes is refused before anything is built: the wheel would
+    hold code that ``GIT_SHA`` doesn't name.
+    """
+    try:
+        sha = git_sha(root)
+    except DirtyTreeError as exc:
+        raise DirtyTreeError(
+            "the working tree has uncommitted changes; commit them first, so the code "
+            "dataset holds a commit CI can test"
+        ) from exc
+    unpinned = unpinned_requirements((root / REQUIREMENTS).read_text(encoding="utf-8"))
+    if unpinned:
+        raise ValueError(f"{REQUIREMENTS} must pin each package with ==, not {unpinned}")
+    out = _fresh_dir(root / CODE_BUNDLE)
+    _check(
+        run, ["uv", "build", str(root), "--wheel", "--out-dir", str(out), "--no-create-gitignore"]
+    )
+    built = sorted(path.name for path in out.iterdir())
+    if len(built) != 1 or not built[0].endswith(".whl"):
+        raise KaggleError(f"uv build should leave one wheel in {out}, but left {built}")
+    shutil.copyfile(root / REQUIREMENTS, out / REQUIREMENTS.name)
+    (out / GIT_SHA_FILE).write_text(f"{sha}\n", encoding="utf-8")
+    _write_json(out / DATASET_METADATA_FILE, dataset_metadata(f"{owner}/{CODE_SLUG}", "MIT"))
+    return CodeBundle(out, built[0], sha)
+
+
+def build_data_bundle(
+    root: Path, owner: str, data_dir: Path, checksums: Traversable = CHECKSUMS
+) -> Path:
+    """Write ``build/kaggle-data``: each file ``checksums`` lists, the list itself as
+    ``spider.sha256``, and the dataset metadata with Spider's attribution.
+
+    Every file is checked against the list first, so only verified data is uploaded;
+    ``ChecksumMismatch`` names each one that is missing or differs.
+    """
+    expected = load_checksums(checksums)
+    verify_files(data_dir, expected)
+    out = _fresh_dir(root / DATA_BUNDLE)
+    for rel in sorted(expected):
+        target = out / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(data_dir / rel, target)
+    (out / CHECKSUM_FILE).write_bytes(checksums.read_bytes())
+    meta = dataset_metadata(f"{owner}/{DATA_SLUG}", "CC-BY-SA-4.0", SPIDER_DESCRIPTION)
+    _write_json(out / DATASET_METADATA_FILE, meta)
+    return out
+
+
+def publish_code(root: Path, owner: str, client: KaggleClient) -> tuple[CodeBundle, Published]:
+    """Build the code bundle and upload it: a new version noted with the SHA, or the
+    dataset's first version when it doesn't exist yet. uv runs through the client's runner."""
+    bundle = build_code_bundle(root, owner, run=client.run)
+    ref = f"{owner}/{CODE_SLUG}"
+    if client.dataset_exists(ref):
+        return bundle, Published(ref, False, client.version_dataset(bundle.path, bundle.git_sha))
+    return bundle, Published(ref, True, client.create_dataset(bundle.path))
+
+
+def publish_data(
+    root: Path,
+    owner: str,
+    client: KaggleClient,
+    data_dir: Path,
+    checksums: Traversable = CHECKSUMS,
+) -> Published | None:
+    """Create ``<owner>/forge-spider`` from the verified data; ``None`` if it exists.
+
+    The checksum list pins Spider, so the data never changes and one upload serves every
+    job. The check comes first, so a dataset that is there costs no copy of the data.
+    """
+    ref = f"{owner}/{DATA_SLUG}"
+    if client.dataset_exists(ref):
+        return None
+    bundle = build_data_bundle(root, owner, data_dir, checksums)
+    return Published(ref, True, client.create_dataset(bundle))
+
+
+def _kaggle_json_username(env: Mapping[str, str], home: Path) -> str | None:
+    config_dir = (
+        Path(env["KAGGLE_CONFIG_DIR"]) if env.get("KAGGLE_CONFIG_DIR") else home / ".kaggle"
+    )
+    path = config_dir / "kaggle.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        # The decoder's message gives a position, never the file's text, so no key leaks.
+        raise KaggleError(f"{path} is not valid JSON: {exc}") from exc
+    username = data.get("username") if isinstance(data, dict) else None
+    return username if isinstance(username, str) and username else None
+
+
+def _fresh_dir(path: Path) -> Path:
+    # Files left from an earlier bundle would be uploaded with this one.
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
+
+
+def _write_json(path: Path, data: Mapping[str, Any]) -> None:
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _run(run: Runner, command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return run(command)
+    except OSError as exc:  # FileNotFoundError when the program isn't installed
+        raise KaggleError(f"could not run {Path(command[0]).name}: {exc}") from exc
+
+
+def _check(run: Runner, command: list[str]) -> str:
+    result = _run(run, command)
+    if result.returncode != 0:
+        raise _failed(command, result)
+    return result.stdout
+
+
+def _failed(command: list[str], result: subprocess.CompletedProcess[str]) -> KaggleError:
+    return KaggleError(f"{_display(command)} exited {result.returncode}: {_tail(_output(result))}")
+
+
+def _output(result: subprocess.CompletedProcess[str]) -> str:
+    return f"{result.stdout or ''}\n{result.stderr or ''}"
+
+
+def _tail(text: str, lines: int = 3) -> str:
+    # The last lines say why; earlier ones are upload progress and usage text.
+    kept = [line.strip() for line in text.splitlines() if line.strip()]
+    return " / ".join(kept[-lines:]) or "no output"
+
+
+def _display(command: Sequence[str]) -> str:
+    return shlex.join([Path(command[0]).name, *command[1:]])

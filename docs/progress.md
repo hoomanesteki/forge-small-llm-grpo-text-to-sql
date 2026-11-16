@@ -44,7 +44,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
 | FG-301 | Spike: Kaggle, Unsloth and vLLM on a T4 | 3 | blocked: needs Kaggle account (phone verified) and API token |  |  | Built on CPU: the kernel metadata template and `check_kernel_metadata`, the self-contained spike `kaggle/spike/throughput.py` (env, secrets, downloads, installs, vLLM fp16 and GRPO benches, session-limit probe) and its bundler, candidate pins in `kaggle/requirements-gpu.txt`, `docs/spikes/kaggle-gpu.md` (research with sources; nothing measured), ADR-0005, ADR-0006 (proposed). Pending: the GPU session, its ledger row and the section 3.8 budget update (`docs/runs/pending.yaml`) |
-| FG-302 | Code and data packaging as Kaggle datasets | 3 | todo |  |  |  |
+| FG-302 | Code and data packaging as Kaggle datasets | 3 | blocked: the real publish needs a Kaggle account, an API token and `FORGE_KAGGLE_USER` |  |  | Built and tested with the CLI mocked: `KaggleClient` runs kaggle as argument lists, `forge kaggle publish-code` (wheel at a clean HEAD, pinned `requirements-gpu.txt`, `GIT_SHA`; `version -m <sha> -r zip`, or `create` the first time) and `publish-data` (the 170 verified Spider files and `spider.sha256` as `<owner>/forge-spider`, CC BY-SA 4.0 attribution and citation, uploaded once). Both private, never `-u`. Pending: one real publish of each, output for the PR (`docs/runs/pending.yaml`). No `publish-wheels`: FG-301 hasn't measured install times |
 | FG-303 | Kaggle job runner CLI | 5 | todo |  |  |  |
 | FG-304 | Hub run store and resume | 5 | todo |  |  |  |
 | FG-305 | Time guard and automatic ledger rows | 3 | todo |  |  |  |
@@ -662,3 +662,18 @@ Work discovered along the way that is not a plan story.
   once FG-301's numbers confirm it; update both rows then (FG-301).
 - The spike's session-limit probe is a CPU kernel killed by its own `-t 900` timeout, so it spends no
   GPU quota. That it behaves like the 12-hour cut is an assumption the run can't prove (FG-301).
+- kaggle 2.2.5's `datasets create` and `version` print a refused upload, such as a slug already in
+  use, as "Dataset creation error: ..." and exit 0, so `KaggleClient` reads their output as well as
+  the exit code. `kernels push` does the same with "not valid dataset sources ... could not be
+  added", which would start a job without its code or data; FG-303 should treat that line as a
+  failure (FG-302).
+- An API token, the runbook's setup, doesn't name its user: the kaggle CLI asks the server. The
+  owner of Forge's datasets is `FORGE_KAGGLE_USER`, else `KAGGLE_USERNAME` or `kaggle.json`, and
+  the runbook now says to set it (FG-302).
+- `-r zip` uploads `database/` as one `database.zip`. Whether Kaggle mounts it unpacked as
+  `database/<db>/<db>.sqlite` under `/kaggle/input` is not seen yet, so FG-303's entry script
+  should find `spider.sha256` by glob, point `FORGE_DATA_DIR` at its folder and verify the files
+  before a job starts (FG-302).
+- `kaggle datasets version` returns before Kaggle has processed the upload. FG-303 should wait for
+  `kaggle datasets status <owner>/forge-code` to say `ready` before pushing a kernel that mounts
+  it (FG-302).
