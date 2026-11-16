@@ -7,9 +7,10 @@ The layout is the run store's (plan section 3.9), under ``runs/<run_id>/``:
 that retries failed queries (``forge.eval.retry``) keeps the first replies of the samples
 it retried in ``eval/<split>-first-tries.jsonl``; their generations line holds the
 second reply, the one scored (ADR-0015). The manifest's ``outputs`` lists whichever of
-these exist, as paths inside the folder. Reports of a finished run
-(``forge.eval.report``) add ``eval/<split>-report.md`` and its chart, which the finished
-manifest doesn't list.
+these exist, as paths inside the folder, and for a run with an adapter its digest as
+``adapter_sha256`` (``forge.ops.adapters.adapter_sha256``), which ties the scores to the
+weights that made them. Reports of a finished run (``forge.eval.report``) add
+``eval/<split>-report.md`` and its chart, which the finished manifest doesn't list.
 
 ``start`` writes the manifest with status ``running`` before any work and begins the
 attempt's session, and ``finish`` ends the session and writes the manifest again, with
@@ -17,9 +18,9 @@ its end time and the GPU hours of its sessions (``forge.ops.manifest.close``):
 ``finished``, ``stopped_time_guard`` when the time guard stopped it between batches, or
 ``failed`` with the traceback in ``error.txt``. A run killed outright stays ``running``,
 and the next attempt marks its session failed, its end unknown. Any but a finished run
-can be resumed: the same run with the same config, commit and data. A finished run, one
-made with other options, code or data, or one of another kind is refused, and ``hold``
-keeps a second process off a run while one works on it.
+can be resumed: the same run with the same config, commit, data and adapter weights. A
+finished run, one made with other options, code, data or adapter files, or one of another
+kind is refused, and ``hold`` keeps a second process off a run while one works on it.
 
 ``RunFiles`` treats the scores file as the record of what is done. Each batch's first
 tries are appended before its generations, and those before its scores, every line
@@ -57,6 +58,8 @@ from forge.ops.sessions import SESSIONS_FILE, begin, end
 log = logging.getLogger(__name__)
 
 M = TypeVar("M", bound=BaseModel)
+# The output that holds the digest of a run's adapter files, the one output that is no path.
+ADAPTER_DIGEST = "adapter_sha256"
 Key = tuple[str, int]  # (example_id, sample_idx)
 
 LOCK_FILE = ".lock"
@@ -187,9 +190,15 @@ def start(paths: RunPaths, fresh: RunManifest) -> RunManifest:
         begin(paths.root, fresh.started_at, resumes=previous)
     except ValueError as exc:
         raise RunCorrupt(str(exc)) from exc
-    manifest = manifest.model_copy(update={"outputs": paths.outputs()})
+    manifest = manifest.model_copy(update={"outputs": _outputs(paths, manifest)})
     _write_manifest(paths, manifest)
     return manifest
+
+
+def _outputs(paths: RunPaths, manifest: RunManifest) -> dict[str, str]:
+    """The run's files that exist, and the digest of its adapter that ``manifest`` holds."""
+    digest = manifest.outputs.get(ADAPTER_DIGEST)
+    return {**paths.outputs(), **({ADAPTER_DIGEST: digest} if digest is not None else {})}
 
 
 def check_resumable(previous: RunManifest, fresh: RunManifest) -> None:
@@ -222,6 +231,12 @@ def check_resumable(previous: RunManifest, fresh: RunManifest) -> None:
             f"{previous.data_manifest_hash[:12]}, not {fresh.data_manifest_hash[:12]}); "
             "pass a new --run-id"
         )
+    before, now = previous.outputs.get(ADAPTER_DIGEST), fresh.outputs.get(ADAPTER_DIGEST)
+    if before != now:
+        raise RunConflict(
+            f"run {run} was made with other files at its adapter's path (sha256 {before}, "
+            f"not {now}); resume it with those, or pass a new --run-id"
+        )
 
 
 def finish(
@@ -248,7 +263,7 @@ def finish(
     )
     now = now or datetime.now(UTC)
     final = close(manifest, status, now=now, sessions=end(paths.root, now, status))
-    final = final.model_copy(update={"outputs": paths.outputs()})
+    final = final.model_copy(update={"outputs": _outputs(paths, manifest)})
     _write_manifest(paths, final)
     return final
 

@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +25,13 @@ from forge.data.spider import FAILING_GOLD_IDS, ROWLESS_DBS
 from forge.data.splits import load_train, load_val
 from forge.eval import runner
 from forge.eval.config import OFFICIAL_ITEM_TIMEOUT_S, PRED_TIMEOUT_MS, EvalConfig
-from forge.eval.run_files import RunConflict
+from forge.eval.run_files import ADAPTER_DIGEST, RunConflict
 from forge.eval.runner import run_eval
 from forge.eval.taxonomy import ERROR_CLASSES
 from forge.infer import hf_backend
 from forge.infer.base import FakeBackend
 from forge.ops import timeguard
+from forge.ops.adapters import ADAPTER_FILES, adapter_sha256
 from forge.ops.dev_usage import read_uses
 from forge.ops.hub import LocalRunStore
 from forge.ops.ledger import run_hours
@@ -111,6 +113,14 @@ def _stored(run_dir: Path, split: str = "val") -> tuple[RunManifest, list[Genera
         for line in (eval_dir / f"{split}-scores.jsonl").read_bytes().splitlines()
     ]
     return manifest, generations, scores
+
+
+def _adapter(folder: Path, weights: str) -> Path:
+    """A LoRA adapter's two files in ``folder``, the weights file holding ``weights``."""
+    folder.mkdir(parents=True)
+    (folder / "adapter_config.json").write_text('{"r": 16}\n', encoding="utf-8")
+    (folder / "adapter_model.safetensors").write_text(weights, encoding="utf-8")
+    return folder
 
 
 def _summary(name: str, hits: int, total: int) -> str:
@@ -406,6 +416,59 @@ def test_failed_run_is_recorded_then_resumed(spider_mini: Path, runs: Path) -> N
         run_eval(config, backend=FakeBackend(reply, model_ref="gold"), allow_dirty=True)
 
 
+@pytest.mark.phase(4)
+def test_an_adapter_runs_digest_ties_its_scores_to_the_files(
+    spider_mini: Path, runs: Path, tmp_path: Path
+) -> None:
+    val = _val()
+    reply = _gold_reply(val)
+    adapter = _adapter(tmp_path / "checkpoint", "step 242")
+
+    def breaks_on_sixth(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        if prompt.example_id == val[5].id:
+            raise RuntimeError("the backend fell over")
+        return reply(prompt, params, sample_idx)
+
+    config = EvalConfig(model="org/model@abc123", adapter=str(adapter), run_id="adapted")
+    with pytest.raises(RuntimeError, match="the backend fell over"):
+        run_eval(
+            config,
+            backend=FakeBackend(breaks_on_sixth, model_ref="org/model@abc123"),
+            allow_dirty=True,
+            workers=1,
+            batch_size=4,
+        )
+    digest = adapter_sha256(adapter)
+    failed, _, _ = _stored(runs / "adapted")
+    assert failed.status == "failed" and failed.outputs[ADAPTER_DIGEST] == digest
+
+    # Other weights at the same path would mix two adapters' scores in one run.
+    (adapter / "adapter_model.safetensors").write_text("step 300", encoding="utf-8")
+    backend = FakeBackend(reply, model_ref="org/model@abc123")
+    with pytest.raises(RunConflict, match=rf"other files at its adapter's path \(sha256 {digest}"):
+        run_eval(config, backend=backend, allow_dirty=True, workers=1)
+    (adapter / "adapter_model.safetensors").write_text("step 242", encoding="utf-8")
+    run = run_eval(config, backend=backend, allow_dirty=True, workers=1)
+    assert (run.manifest.status, run.resumed) == ("finished", 4)
+    assert run.manifest.outputs[ADAPTER_DIGEST] == digest
+    assert run.manifest.outputs["scores"] == "eval/val-scores.jsonl"
+
+    # An adapter that isn't there fails before the run starts, a training run's checkpoint
+    # with how to get it.
+    missing = "runs/2026-11-20-qwen3-4b-sft-abc1234/checkpoints/final"
+    with pytest.raises(FileNotFoundError, match="forge runs pull 2026-11-20-qwen3-4b-sft-abc1234"):
+        run_eval(
+            replace(config, adapter=missing, run_id="unpulled"), backend=backend, allow_dirty=True
+        )
+    with pytest.raises(FileNotFoundError, match=r"has no adapter_config\.json"):
+        run_eval(
+            replace(config, adapter=str(tmp_path), run_id="no-adapter"),
+            backend=backend,
+            allow_dirty=True,
+        )
+    assert not (runs / "unpulled").exists() and not (runs / "no-adapter").exists()
+
+
 @pytest.mark.phase(3)
 def test_time_guard_stops_between_batches_then_resumes(
     spider_mini: Path, runs: Path, tmp_path: Path
@@ -546,6 +609,15 @@ def test_hf_backend_is_built_from_the_options(
             return self._fake.generate(prompts, params)
 
     monkeypatch.setattr(hf_backend, "HfBackend", StubHf)
+    # The Hub adapter's files, from the cache the backend loads them from.
+    fetched = _adapter(runs.parent / "hub-cache", "hub weights")
+    downloads: list[tuple[str, dict[str, Any]]] = []
+
+    def snapshot_download(repo: str, **kwargs: Any) -> str:
+        downloads.append((repo, kwargs))
+        return str(fetched)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
     run = run_eval(
         EvalConfig(model="org/model@abc123", adapter="org/adapter", limit=2, run_id="hf"),
         allow_dirty=True,
@@ -554,6 +626,9 @@ def test_hf_backend_is_built_from_the_options(
     # The device is asked for by name, so a run on a Mac doesn't drift onto MPS unasked.
     assert built == [("org/model@abc123", "org/adapter", "cpu")]
     assert (run.manifest.model_ref, run.manifest.adapter_ref) == ("org/model@abc123", "org/adapter")
+    assert run.manifest.outputs[ADAPTER_DIGEST] == adapter_sha256(fetched)
+    allowed = {"revision": None, "allow_patterns": list(ADAPTER_FILES)}
+    assert downloads == [("org/adapter", allowed)]
     assert (run.manifest.platform, run.manifest.config["device"]) == ("local-cpu", "cpu")
     # The prompts were measured with the model's own tokenizer, assistant turn opened.
     assert len(tokenizer.calls) == 2
@@ -582,8 +657,7 @@ def test_vllm_backend_is_built_from_the_options(
 ) -> None:
     # vLLM faked: a kernel job's eval, from the config to stored scores, off the GPU.
     vllm = FakeVllm(gold_reply(_val())).install(monkeypatch)
-    adapter = tmp_path / "adapter"
-    adapter.mkdir()
+    adapter = _adapter(tmp_path / "adapter", "lora weights")
     config = EvalConfig(
         model="org/model@abc123",
         adapter=str(adapter),
@@ -604,6 +678,7 @@ def test_vllm_backend_is_built_from_the_options(
         "vllm",
     )
     assert (manifest.model_ref, manifest.adapter_ref) == ("org/model@abc123", str(adapter))
+    assert manifest.outputs[ADAPTER_DIGEST] == adapter_sha256(adapter)
     # Prompts were measured with the engine's tokenizer, and vLLM counted what it was sent.
     measured = [kwargs for _, kwargs in vllm.tokenizer.calls if kwargs.get("tokenize", True)]
     assert len(measured) == 3 and all(kwargs["add_generation_prompt"] for kwargs in measured)

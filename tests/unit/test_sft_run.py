@@ -20,7 +20,8 @@ from forge import cli
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.splits import load_train
-from forge.ops.hub import LocalRunStore
+from forge.ops.adapters import adapter_sha256, digest_output
+from forge.ops.hub import FINAL, LocalRunStore
 from forge.ops.manifest import config_hash
 from forge.train import sft
 from forge.train.backends import ADAPTER_DIR, Precision
@@ -102,6 +103,7 @@ class FakeBackend:
             if control.should_save:
                 saved = out / f"checkpoint-{state.global_step}"
                 saved.mkdir(parents=True)
+                (saved / "adapter_config.json").write_text('{"r": 16}')
                 (saved / "adapter_model.safetensors").write_text(f"step {state.global_step}")
                 for callback in callbacks:
                     callback.on_save(args, state, control)
@@ -110,6 +112,7 @@ class FakeBackend:
             callback.on_train_end(args, state, control)
         adapter = out / ADAPTER_DIR
         adapter.mkdir()
+        (adapter / "adapter_config.json").write_text('{"r": 16}')
         (adapter / "adapter_model.safetensors").write_text(f"{state.global_step} steps")
         return str(adapter)
 
@@ -164,11 +167,16 @@ def test_sft_run_writes_its_adapter_and_manifest(spider_mini: Path, tmp_path: Pa
     assert (manifest.kind, manifest.status, manifest.run_id) == ("sft", "finished", RUN)
     assert (manifest.model_ref, manifest.seed, manifest.platform) == (MODEL, 7, "local-cpu")
     assert manifest.gpu is None and manifest.ended_at is not None
+    # With the digest of each checkpoint the run keeps, which an eval of one records too.
+    half = "checkpoints/step-000002"
     assert manifest.outputs == {
         "config": "config.yaml",
         "metrics": "metrics.jsonl",
         "adapter": "checkpoints/final",
+        digest_output(FINAL): adapter_sha256(run.adapter),
+        digest_output(half): adapter_sha256(root / half),
     }
+    assert manifest.outputs[digest_output(FINAL)] != manifest.outputs[digest_output(half)]
 
     # The data hash: the rows' own, the name of the folder they were saved to, beside the
     # Spider files' in data_manifest_hash.
@@ -328,10 +336,13 @@ def test_failed_training_leaves_a_failed_run(spider_mini: Path, tmp_path: Path) 
     root = tmp_path / "runs" / RUN
     manifest = _stored(tmp_path)
     assert manifest.status == "failed" and manifest.ended_at is not None
+    # The checkpoint it saved before the failure, by its digest.
+    saved = "checkpoints/step-000002"
     assert manifest.outputs == {
         "config": "config.yaml",
         "metrics": "metrics.jsonl",
         "error": "error.txt",
+        digest_output(saved): adapter_sha256(root / saved),
     }
     error = (root / "error.txt").read_text(encoding="utf-8")
     assert error.startswith("Traceback") and "RuntimeError: the loss is NaN at step 3" in error
@@ -369,11 +380,16 @@ def test_sft_run_keeps_its_checkpoint_half_way(spider_mini: Path, tmp_path: Path
     # Step 3 outlives retention, which keeps the latest two of the cadence's beside it.
     assert folders == ["final", "step-000003", "step-000004", "step-000006"]
     assert (run.root / "checkpoints/step-000003/adapter_model.safetensors").read_text() == "step 3"
+    kept = ["final", "step-000003", "step-000004", "step-000006"]
     assert run.manifest.outputs == {
         "config": "config.yaml",
         "metrics": "metrics.jsonl",
         "adapter": "checkpoints/final",
         "kept_at_0.5": "checkpoints/step-000003",
+        **{
+            digest_output(f"checkpoints/{name}"): adapter_sha256(run.root / "checkpoints" / name)
+            for name in kept
+        },
     }
     # Kept checkpoints change no weight, so the config hash is a run's without them.
     plain = _train(
