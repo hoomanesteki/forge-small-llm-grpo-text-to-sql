@@ -502,6 +502,25 @@ def test_mps_run_is_labeled_a_local_mps_pilot(
     assert untraced(report, runs / "pilot", data_dir=spider_mini) == []
 
 
+@pytest.mark.phase(3)
+def test_kernel_run_names_its_host_and_the_code_dataset_commit(
+    spider_mini: Path, runs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # What kaggle/entry.py does: no checkout, the dataset's commit in FORGE_CODE_SHA, and
+    # the host named in the config.
+    sha = "".join("fedcba9876543210"[(i * 5) % 16] for i in range(40))
+    kernel = tmp_path / "working"
+    kernel.mkdir()
+    monkeypatch.chdir(kernel)
+    monkeypatch.setenv("FORGE_CODE_SHA", sha)
+    config = EvalConfig(model="gold", backend="fake", limit=2, run_id="kernel", host="kaggle")
+    run = run_eval(config, workers=1)
+    assert (run.manifest.git_sha, run.manifest.platform) == (sha, "kaggle")
+    assert run.manifest.status == "finished"
+    laptop = EvalConfig(model="gold", backend="fake", limit=2)
+    assert run.manifest.config == laptop.manifest_config()
+
+
 @pytest.mark.phase(2)
 def test_wrong_predictions_get_their_error_class(spider_mini: Path, runs: Path) -> None:
     val = _val()

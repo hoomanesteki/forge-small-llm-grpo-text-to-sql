@@ -45,7 +45,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 |---|---|---|---|---|---|---|
 | FG-301 | Spike: Kaggle, Unsloth and vLLM on a T4 | 3 | blocked: needs Kaggle account (phone verified) and API token |  |  | Built on CPU: the kernel metadata template and `check_kernel_metadata`, the self-contained spike `kaggle/spike/throughput.py` (env, secrets, downloads, installs, vLLM fp16 and GRPO benches, session-limit probe) and its bundler, candidate pins in `kaggle/requirements-gpu.txt`, `docs/spikes/kaggle-gpu.md` (research with sources; nothing measured), ADR-0005, ADR-0006 (proposed). Pending: the GPU session, its ledger row and the section 3.8 budget update (`docs/runs/pending.yaml`) |
 | FG-302 | Code and data packaging as Kaggle datasets | 3 | blocked: the real publish needs a Kaggle account, an API token and `FORGE_KAGGLE_USER` |  |  | Built and tested with the CLI mocked: `KaggleClient` runs kaggle as argument lists, `forge kaggle publish-code` (wheel at a clean HEAD, pinned `requirements-gpu.txt`, `GIT_SHA`; `version -m <sha> -r zip`, or `create` the first time) and `publish-data` (the 170 verified Spider files and `spider.sha256` as `<owner>/forge-spider`, CC BY-SA 4.0 attribution and citation, uploaded once). Both private, never `-u`. Pending: one real publish of each, output for the PR (`docs/runs/pending.yaml`). No `publish-wheels`: FG-301 hasn't measured install times |
-| FG-303 | Kaggle job runner CLI | 5 | todo |  |  |  |
+| FG-303 | Kaggle job runner CLI | 5 | blocked: the real 50-question eval job needs a phone-verified Kaggle account with an API token and `FORGE_KAGGLE_USER`, both datasets published, and the vllm backend (FG-306) |  |  | Built and tested with the kaggle CLI mocked: `forge kaggle run` (smoke marker and clean tree, config checked as the kernel will, code dataset pinned by version with HEAD's `GIT_SHA` or published, ledger and `kaggle quota` budget with `--allow-over-budget` in the eval run's config, confirm, T4 push with a timeout of the estimate and half again, `runs/<run_id>/kernels.json`, `--resume`, `--job spike`, `--emit-notebook`), `status`, `logs`, `wait` and `output`; `kaggle/entry.py` (env, code, install, data, secrets, preflight, job, upload; `status.json` always); `ops` section in eval configs; `code_sha` from `FORGE_CODE_SHA` outside a checkout; Python 3.13 in CI. Pending: the real job (`docs/runs/pending.yaml`) |
 | FG-304 | Hub run store and resume | 5 | todo |  |  |  |
 | FG-305 | Time guard and automatic ledger rows | 3 | todo |  |  |  |
 | FG-306 | vLLM inference backend | 3 | todo |  |  |  |
@@ -466,10 +466,11 @@ Work discovered along the way that is not a plan story.
   there) raises `GitError` instead of recording that repository's commit (FG-295).
 - `git_sha` raises `GitError`, a `RuntimeError`, outside a checkout or where git can't run,
   and no longer `subprocess.CalledProcessError` or `OSError`, so every caller must catch
-  `GitError`. On the Phase 3 branches `forge kaggle publish-code`'s except tuple (FG-302) and
-  `_kaggle_job_errors` (FG-303) catch `CalledProcessError` and not `GitError`, and rebasing
-  them onto this stack gives no conflict that shows it: add `GitError` to both, or those
-  commands print a traceback where they printed one `error:` line (FG-292, FG-295).
+  `GitError`. `forge kaggle publish-code` and `forge kaggle run` caught `CalledProcessError`
+  until the Phase 3 stack was replayed onto the gate 2 fixes; they catch `GitError` now and
+  print one `error:` line outside a checkout (FG-292, FG-295, FG-303). The eval runner reads
+  the commit at the Forge root, or, on a Kaggle kernel with no Forge root, from
+  `FORGE_CODE_SHA` (FG-303).
 - The scores and generations files hold the contract types only, so the executor's error message
   for a failed prediction is not stored. FG-204 classifies from the live result in the runner;
   FG-205's failure examples can show the class, or a later story can store the message (FG-202).
@@ -604,8 +605,9 @@ Work discovered along the way that is not a plan story.
 - `forge eval run --config <yaml>` loads the file into click's default map: each value is
   checked by its option's type, and options on the command line override it. A file may set
   only the options that change a score; the run id, store and dev reason stay on the command
-  line (FG-291). FG-303's `forge kaggle run --job eval --config` can read the same files with
-  `read_config_file`.
+  line (FG-291). A file may also hold an `ops` section (`est_gpu_hours`), which
+  `forge eval run` checks and ignores; `forge kaggle run --job eval --config` reads both
+  with `read_config_sections` (FG-303).
 - Report headers name the run's platform, so a pilot can't pass for a T4 run; I4's trace
   checks the row (FG-291).
 - A pilot's numbers are a 0.5B model's in float32 on MPS through transformers, so they say
@@ -635,7 +637,8 @@ Work discovered along the way that is not a plan story.
 - Kaggle's newest GPU image (v173, released 2026-10-30) has Python 3.13 by its Dockerfile, and
   `pyproject.toml` requires Python below 3.13, so FG-302's wheel would not install there. The
   spike's `env` stage reads the live version; if it is 3.13, widen `requires-python` and add 3.13
-  to CI, as ADR-0002's revisit condition says (FG-301).
+  to CI, as ADR-0002's revisit condition says (FG-301). FG-303 did both, ahead of the spike: every
+  package CI installs has a 3.13 wheel, and re-locking added only `audioop-lts` for the demo extra.
 - The same image moved from CUDA 12.8 to CUDA 13 (torch 2.11.0+cu130), so wheels built for CUDA 12,
   bitsandbytes' among them, may not load. The spike's installs show it (FG-301).
 - No one environment holds Forge's lock and vLLM: vllm 0.33.0 pins torch 2.14.0 and transformers
@@ -677,3 +680,23 @@ Work discovered along the way that is not a plan story.
 - `kaggle datasets version` returns before Kaggle has processed the upload. FG-303 should wait for
   `kaggle datasets status <owner>/forge-code` to say `ready` before pushing a kernel that mounts
   it (FG-302).
+- The code dataset's wheel is installed with `--no-deps`, so the packages Forge itself needs
+  (sqlglot, sqlparse, httpx2, statsmodels and the rest) have to be on Kaggle's image or in
+  `requirements-gpu.txt`. Which of them the image lacks is not seen yet; the entry script's
+  install stage names each one missing or out of range and stops before the job, and its fix is
+  a pin at the `uv.lock` version (FG-303).
+- `kernels push` prints the kernel's URL, and `forge kaggle run` records the kernel it names. How
+  long a kernel title may be is not documented; a long model name makes a long run id and title,
+  and the first real push will show whether Kaggle takes it (FG-303).
+- An eval job on Kaggle refuses `backend: hf`, which runs on the CPU and would leave the T4 idle,
+  so the story's real 50-question job waits for FG-306's vllm backend as well as the account
+  (FG-303).
+- `--allow-over-budget` is in the eval run's manifest config, as the plan asks, so it is part of
+  the config hash: a resumed run has to be pushed with the same flag, and `--resume` refuses
+  other options before anything is uploaded (FG-303).
+- `RunManifest` has no field for where `git_sha` came from. A `kaggle` or `colab` platform means
+  the code dataset's `GIT_SHA`, passed as `FORGE_CODE_SHA`; the runbook says so rather than
+  changing the contract (FG-303).
+- The entry script exits 0 when its job fails, as the spike does, because a kernel that ends in
+  an error might not keep its output. `forge kaggle wait` therefore reads the run's `status.json`
+  after `COMPLETE`, and exits 0 only for `finished` (FG-303).

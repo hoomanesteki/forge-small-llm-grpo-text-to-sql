@@ -26,7 +26,8 @@ def test_workflow_has_required_jobs() -> None:
     jobs = workflow["jobs"]
     assert {"lint-type", "unit", "integration", "security"} <= set(jobs)
     for name in ("unit", "integration"):
-        assert jobs[name]["strategy"]["matrix"]["python"] == ["3.11", "3.12"]
+        # 3.13 is the Python of Kaggle's GPU image (FG-303).
+        assert jobs[name]["strategy"]["matrix"]["python"] == ["3.11", "3.12", "3.13"]
     assert "pull_request" in workflow["on"]
 
 

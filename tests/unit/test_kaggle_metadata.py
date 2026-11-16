@@ -88,6 +88,12 @@ def test_cpu_kernel_and_dataset_sources() -> None:
         ({"accelerator": "NvidiaTeslaT4"}, "unknown key 'accelerator'"),
         ({"dataset_sources": "forge-owner/forge-code"}, "dataset_sources must be a list"),
         ({"dataset_sources": ["forge-code"]}, "must have 2 '/'-separated parts"),
+        ({"dataset_sources": ["forge-owner/forge-code/latest"]}, "end in a version number"),
+        ({"dataset_sources": ["forge-owner/forge-code/0"]}, "not '0'"),
+        ({"dataset_sources": ["forge-owner/forge-code/"]}, "or 3 to pin a version"),
+        ({"kernel_sources": ["forge-owner/forge-run/v2"]}, "not 'v2'"),
+        ({"kernel_sources": ["a/b/1/2"]}, "must have 2 '/'-separated parts, or 3"),
+        ({"competition_sources": ["titanic/1"]}, "must have 1 '/'-separated parts"),
         ({"model_sources": ["qwen-lm/qwen3/transformers/1.7b"]}, "must have 5"),
         ({"code_file": "{code_file}"}, "still holds a template placeholder"),
     ],
@@ -95,6 +101,17 @@ def test_cpu_kernel_and_dataset_sources() -> None:
 def test_metadata_check_rejects(overrides: dict[str, Any], problem: str) -> None:
     problems = check_kernel_metadata(_rendered(**overrides))
     assert any(problem in p for p in problems), problems
+
+
+@pytest.mark.phase(3)
+def test_dataset_and_kernel_sources_may_pin_a_version() -> None:
+    # kaggle 2.2.5 mounts the version a source names, so a job runs the code it was checked
+    # against even if a newer version is uploaded before the kernel starts.
+    meta = _rendered(
+        dataset_sources=["forge-owner/forge-code/12", "forge-owner/forge-spider"],
+        kernel_sources=["forge-owner/forge-run-1/3"],
+    )
+    assert check_kernel_metadata(meta) == []
 
 
 @pytest.mark.phase(3)

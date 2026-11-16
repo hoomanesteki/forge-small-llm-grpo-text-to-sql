@@ -5,7 +5,7 @@ description = "Post-train a small open LLM with GRPO on verifiable text-to-SQL r
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Hooman Esteki" }]
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     # huggingface-hub's HTTP client: forge data fetch catches its transport errors, which
     # are not OSErrors.
@@ -93,8 +93,8 @@ known-first-party = ["forge"]
 
 [tool.mypy]
 python_version = "3.11"
-# The spike script runs on Kaggle without Forge, so it lives outside the package.
-files = ["src/forge", "kaggle/spike"]
+# The kernel scripts run on Kaggle before Forge is installed, so they live outside the package.
+files = ["src/forge", "kaggle/spike", "kaggle/entry.py"]
 exclude = ["third_party/"]
 check_untyped_defs = true
 warn_unused_ignores = true
