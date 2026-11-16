@@ -286,6 +286,9 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 - Retention keeps a run's latest 2 `step-NNNNNN` checkpoints and `best/`
   (`prune_checkpoints`), for training jobs, which push a checkpoint every 50 steps (plan
   section 3.8). `latest_checkpoint` picks the highest step, which a resumed job starts from.
+  A training config's `ops.keep_checkpoints_at` names shares of the run, such as `[0.5]`,
+  whose checkpoints are saved and kept too, for val to compare with `checkpoints/final`;
+  the manifest's outputs name each, as `kept_at_0.5`.
 
 ## Resume after a session limit
 

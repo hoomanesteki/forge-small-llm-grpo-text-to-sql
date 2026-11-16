@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
 from safetensors.torch import load_file
 from typer.testing import CliRunner
 
@@ -22,7 +23,8 @@ from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.splits import load_train
 from forge.ops.manifest import config_hash
-from forge.train.config import LORA_TARGETS
+from forge.train.config import LORA_TARGETS, OpsConfig, load_train_config
+from forge.train.sft import run_sft
 from forge.train.sft_data import META_FILE, read_meta
 from tests.report_trace import read_stored
 
@@ -101,3 +103,40 @@ def test_sft_trains_saves_and_evaluates(
     for reply in stored.generations.values():
         assert (reply.model_ref, reply.adapter_ref) == (tiny_model_ref, str(adapter))
         assert reply.text and reply.tokens_out >= 1
+
+
+@pytest.mark.phase(4)
+def test_sft_keeps_the_checkpoint_half_way(
+    spider_mini: Path, tiny_model_ref: str, tmp_path: Path
+) -> None:
+    # The trainer saves at the step the share names, where no cadence asks it to, and the
+    # run keeps that checkpoint beside its final adapter for val to compare (FG-404).
+    loaded = load_train_config(SMOKE_CONFIG)
+    assert loaded.sft is not None
+    config = loaded.model_copy(
+        update={
+            "sft": loaded.sft.model_copy(update={"max_steps": 4}),
+            "ops": OpsConfig(checkpoint_every=100, keep_checkpoints_at=(0.5,)),
+        }
+    )
+
+    run = run_sft(
+        config,
+        run_id="sft-kept",
+        allow_dirty=True,
+        runs_root=tmp_path / "runs",
+        sft_root=tmp_path / "sft",
+        env={},
+    )
+
+    assert run.manifest.status == "finished"
+    kept = run.root / run.manifest.outputs["kept_at_0.5"]
+    assert kept == run.root / "checkpoints" / "step-000002"
+    assert sorted(p.name for p in (run.root / "checkpoints").iterdir()) == ["final", "step-000002"]
+    # A whole adapter, as forge eval run --adapter loads one, and other weights than the
+    # final adapter's two steps later.
+    half, final = (
+        load_file(folder / "adapter_model.safetensors") for folder in (kept, run.adapter)
+    )
+    assert (kept / "adapter_config.json").is_file() and half.keys() == final.keys()
+    assert any(not torch.equal(half[name], final[name]) for name in half)

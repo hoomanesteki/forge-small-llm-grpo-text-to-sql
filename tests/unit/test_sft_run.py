@@ -350,6 +350,35 @@ def test_time_guard_stop_keeps_its_checkpoint_and_no_final(
 
 
 @pytest.mark.phase(4)
+def test_sft_run_keeps_its_checkpoint_half_way(spider_mini: Path, tmp_path: Path) -> None:
+    # FG-404's main run: the checkpoint at 50% and the final adapter, both for val to score.
+    config = _config(
+        sft={"max_steps": 6}, ops={"checkpoint_every": 2, "keep_checkpoints_at": [0.5]}
+    )
+    run = _train(tmp_path, FakeBackend(steps=6), config)
+
+    folders = sorted(p.name for p in (run.root / "checkpoints").iterdir())
+    # Step 3 outlives retention, which keeps the latest two of the cadence's beside it.
+    assert folders == ["final", "step-000003", "step-000004", "step-000006"]
+    assert (run.root / "checkpoints/step-000003/adapter_model.safetensors").read_text() == "step 3"
+    assert run.manifest.outputs == {
+        "config": "config.yaml",
+        "metrics": "metrics.jsonl",
+        "adapter": "checkpoints/final",
+        "kept_at_0.5": "checkpoints/step-000003",
+    }
+    # Kept checkpoints change no weight, so the config hash is a run's without them.
+    plain = _train(
+        tmp_path,
+        FakeBackend(steps=6),
+        _config(sft={"max_steps": 6}, ops={"checkpoint_every": 2}),
+        run_id="2026-11-15-tiny-sft-def5678",
+    )
+    assert plain.manifest.config_hash == run.manifest.config_hash
+    assert "kept_at_0.5" not in plain.manifest.outputs
+
+
+@pytest.mark.phase(4)
 def test_rows_must_hash_to_their_folder(spider_mini: Path, tmp_path: Path) -> None:
     def build(version: str) -> Any:
         return build_sft_dataset(version, MODEL, lambda prompt: 1)

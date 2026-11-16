@@ -26,6 +26,9 @@
   retries is logged and training goes on, since the checkpoint stays in the output
   folder and the next one tries again. Any other failure, such as a refused token,
   stops the job: no later push would work either.
+- Both keep the checkpoints of ``keep_checkpoints_at``, shares of the run's steps
+  (``kept_steps``), which ``CheckpointCallback`` also saves, from retention: val chooses
+  among them and ``checkpoints/final`` once the run ends (FG-404).
 - ``MetricsCallback`` appends each log the trainer writes to ``metrics.jsonl`` as one
   JSON line, and pushes the file to the run at every save and at the end, failing as
   ``CheckpointCallback`` does.
@@ -37,9 +40,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -58,13 +62,24 @@ log = logging.getLogger(__name__)
 WANDB_KEY = "WANDB_API_KEY"
 
 
+def kept_steps(shares: Sequence[float], max_steps: int) -> dict[float, int]:
+    """The step of each share of a ``max_steps``-step run whose checkpoint is kept: the
+    last step the share covers, at least the first. A step at the run's end is left out,
+    since that checkpoint is ``checkpoints/final``."""
+    if max_steps < 1:
+        raise ValueError(f"a run of {max_steps} steps keeps no checkpoint")
+    found = {share: max(1, math.floor(share * max_steps)) for share in shares}
+    return {share: step for share, step in found.items() if step < max_steps}
+
+
 class TimeGuardCallback(TrainerCallback):
     """Stop training ``deadline_minutes`` after this callback is made, saving first.
 
     Make it when the job starts, since the session's clock is already running. ``store``
     and ``run_id`` name where the checkpoint and the manifest go; without them the guard
     only saves and stops, and the job marks its own manifest by ``stopped_at``.
-    ``margin_s`` keeps time back for the save and the push.
+    ``margin_s`` keeps time back for the save and the push. ``keep_at`` names the shares
+    of the run whose checkpoints its pruning keeps.
     """
 
     def __init__(
@@ -74,6 +89,7 @@ class TimeGuardCallback(TrainerCallback):
         store: RunStore | None = None,
         run_id: str | None = None,
         margin_s: float = 0.0,
+        keep_at: Sequence[float] = (),
         clock: Clock = time.monotonic,
     ) -> None:
         if (store is None) != (run_id is None):
@@ -81,6 +97,8 @@ class TimeGuardCallback(TrainerCallback):
         self.deadline = Deadline(deadline_minutes, margin_s=margin_s, clock=clock)
         self.store = store
         self.run_id = run_id
+        self.keep_at = tuple(keep_at)
+        self.kept: dict[float, int] = {}  # share: step, once training begins
         self.stopped_at: int | None = None  # the step training stopped after
         self.saved = False  # whether the trainer has saved that step
         self.pushed: str | None = None  # where the store holds that step's checkpoint
@@ -88,6 +106,7 @@ class TimeGuardCallback(TrainerCallback):
     def on_train_begin(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
     ) -> None:
+        self.kept = kept_steps(self.keep_at, state.max_steps)
         # Loading the model is no step's time.
         self.deadline.mark()
 
@@ -142,7 +161,7 @@ class TimeGuardCallback(TrainerCallback):
         self.store.put_manifest(close(manifest, "stopped_time_guard"))
         log.warning("time guard: run %s stopped; its checkpoint is %s", self.run_id, self.pushed)
         try:
-            self.store.prune_checkpoints(self.run_id)
+            self.store.prune_checkpoints(self.run_id, keep_steps=self.kept.values())
         # Logged, not raised: the checkpoint and the manifest are stored, and the next push
         # prunes again.
         except OSError as exc:
@@ -150,7 +169,9 @@ class TimeGuardCallback(TrainerCallback):
 
 
 class CheckpointCallback(TrainerCallback):
-    """Save every ``every`` steps, and push each of those checkpoints to the run store.
+    """Save every ``every`` steps and at the shares of the run ``keep_at`` names, and push
+    each of those checkpoints to the run store, where pruning keeps the latest and the
+    ``keep_at`` ones.
 
     A step ``guard`` stops at is the guard's to push, since it marks the manifest once
     the checkpoint is stored.
@@ -163,6 +184,7 @@ class CheckpointCallback(TrainerCallback):
         every: int,
         *,
         guard: TimeGuardCallback | None = None,
+        keep_at: Sequence[float] = (),
     ) -> None:
         if every < 1:
             raise ValueError(f"a checkpoint comes every 1 step or more, not every {every}")
@@ -170,19 +192,29 @@ class CheckpointCallback(TrainerCallback):
         self.run_id = run_id
         self.every = every
         self.guard = guard
+        self.keep_at = tuple(keep_at)
+        self.kept: dict[float, int] = {}  # share: step, once training begins
         self.pushed: dict[int, str] = {}  # step: where the store holds its checkpoint
+
+    def on_train_begin(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
+    ) -> None:
+        self.kept = kept_steps(self.keep_at, state.max_steps)
+
+    def _due(self, step: int) -> bool:
+        return step % self.every == 0 or step in self.kept.values()
 
     def on_step_end(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
     ) -> None:
-        if state.global_step % self.every == 0:
+        if self._due(state.global_step):
             control.should_save = True
 
     def on_save(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
     ) -> None:
         step = state.global_step
-        if step % self.every or step in self.pushed:
+        if not self._due(step) or step in self.pushed:
             return
         if self.guard is not None and self.guard.stopped_at == step:
             return
@@ -210,7 +242,7 @@ class CheckpointCallback(TrainerCallback):
             ) from exc
         log.info("checkpoint: step %d of run %s is %s", step, self.run_id, self.pushed[step])
         try:
-            self.store.prune_checkpoints(self.run_id)
+            self.store.prune_checkpoints(self.run_id, keep_steps=self.kept.values())
         # Logged, not raised: the checkpoint is stored, and the next push prunes again.
         except OSError as exc:
             log.warning("checkpoint: run %s keeps its older checkpoints: %s", self.run_id, exc)
@@ -317,10 +349,13 @@ def training_callbacks(
 
     Make them when the job starts: the time guard's deadline counts from then.
     """
-    guard = TimeGuardCallback(ops.time_guard_minutes, store=store, run_id=run_id, clock=clock)
+    keep_at = ops.keep_checkpoints_at
+    guard = TimeGuardCallback(
+        ops.time_guard_minutes, store=store, run_id=run_id, keep_at=keep_at, clock=clock
+    )
     callbacks: list[TrainerCallback] = [
         guard,
-        CheckpointCallback(store, run_id, ops.checkpoint_every, guard=guard),
+        CheckpointCallback(store, run_id, ops.checkpoint_every, guard=guard, keep_at=keep_at),
         MetricsCallback(metrics_path, store=store, run_id=run_id),
     ]
     tracker = wandb_callback(env)
