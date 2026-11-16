@@ -57,7 +57,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 |---|---|---|---|---|---|---|
 | FG-401 | SFT dataset builder | 3 | done |  |  | `forge.train.sft_data`: TRL conversational prompt-completion rows (`prompt` from `fit_prompt`, `completion` the gold query in a sql block, `example_id`, `db_id`) from `load_train()` only, checked again by `assert_train_only`; repeats (casefolded, spacing collapsed), `FAILING_GOLD_IDS`, prompts over the limit and prompts that show a gold table without columns are left out and counted; `forge data build-sft --prompt-version --tokenizer [--out]` saves `data/sft/<sha256>/` with `meta.json`; `load_tokenizer` takes `<repo>@<revision>`. Masking checked through `SFTTrainer`'s own preparation with the tiny Qwen2.5 tokenizer |
 | FG-402 | Training backend abstraction and configs | 5 | done |  |  | `forge.train.config`: strict pydantic `LoraConfig`, `SftConfig`, `GrpoConfig`, `OpsConfig` (and `run`, `data`) from one YAML file, refusing unknown or repeated keys, `max_completion_length` over 512, `num_generations` that doesn't divide the generation batch, any split but train, and Unsloth or 4-bit off CUDA; `forge.train.backends`: `TrainBackend`, `TrlBackend` (float32 on CPU; bf16 on MPS from macOS 14, else float32; bf16 on CUDA where the GPU has it, else fp16) and a lazily imported `UnslothBackend`, one trainer builder for both, `max_prompt_length` dropping GRPO rows before TRL, `select_backend`; `forge.train.callbacks`: `CheckpointCallback`, `MetricsCallback` (JSONL), optional W&B, `training_callbacks`. Unsloth itself untried until a GPU job installs it |
-| FG-403 | SFT trainer with CPU smoke | 3 | todo |  |  |  |
+| FG-403 | SFT trainer with CPU smoke | 3 | done |  |  | `forge train sft --config [--run-id] [--sft-dir] [--allow-dirty]` (`forge.train.sft.run_sft`): builds the rows with the model's tokenizer, keeps an existing `data/sft/<hash>/`, reads it in memory once it hashes to its name, trains with the job callbacks and saves `checkpoints/final`; the manifest's config holds the run, data, LoRA and SFT sections, `sft_data.hash` and the trainer's backend, device and dtype, under the config hash. Local runs are `local-cpu` or `local-mps` only. `configs/sft/`: tiny-smoke, pilot-qwen25coder05b-mps, qwen3-1p7b-pilot and qwen3-4b-main, at ADR-0010's values (written here, with `max_length` 2,048). `make smoke` trains 3 steps and evaluates the adapter on 10 val questions |
 | FG-404 | SFT runs on Kaggle | 3 | todo |  |  |  |
 | FG-405 | SFT results and comparison | 2 | todo |  |  |  |
 
@@ -1044,3 +1044,18 @@ Work discovered along the way that is not a plan story.
 - A periodic checkpoint whose push still fails on the network after the store's retries is
   logged, and training goes on; any other store error stops the job. The time guard's own
   push always raises, as before (FG-402).
+- `forge kaggle run --job sft` is still refused, now naming FG-404: `kaggle/entry.py` runs
+  eval jobs only, and `run_sft` makes local runs only. A kernel's SFT job needs the host as
+  the manifest's platform and the Hub run store for its step checkpoints. Then the run's
+  local folder lacks those checkpoints, so pushing it with `forge runs push`, which replaces
+  the store's copy, would delete them (FG-403).
+- PEFT writes the base model's repo into `adapter_config.json` without its revision
+  (`revision: null`), so only the run manifest's `model_ref` pins the base an adapter was
+  trained on. `forge eval run --adapter` loads the base from `--model`, so evaluation is
+  unaffected; an adapter published on its own should carry the revision (FG-403).
+- No SFT run writes `checkpoints/best/`: training reads train only, so the trainer has no
+  eval set, and `best/` is the checkpoint val picks once each is evaluated, in FG-404 (FG-403).
+- Five tests in `tests/unit/test_kaggle_runner.py` build the expected run id from
+  `date.today()`, in local time, while `plan_job` dates run ids in UTC, so they fail on a
+  machine west of UTC between UTC midnight and local midnight. CI runs in UTC; `TZ=UTC make
+  check` passes locally (FG-403).
