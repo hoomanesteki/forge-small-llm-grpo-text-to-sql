@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from forge.infer.base import (
 )
 from forge.infer.vllm_backend import (
     GPU_MEMORY_UTILIZATION,
+    QUANTIZATIONS,
     REQUIREMENTS,
     VllmBackend,
     sampling_kwargs,
@@ -111,8 +113,27 @@ def test_import_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(err.value.__cause__, ImportError)
     assert (ROOT / REQUIREMENTS).is_file()
     # A setting no run takes is refused before vLLM is even looked for.
-    with pytest.raises(ValueError, match="quantization must be one of bitsandbytes, got 'awq'"):
-        module.VllmBackend("org/model", quantization="awq")
+    with pytest.raises(ValueError, match="quantization must be one of awq, got 'gptq'"):
+        module.VllmBackend("org/model", quantization="gptq")
+
+
+@pytest.mark.phase(3)
+def test_bitsandbytes_is_refused_since_vllm_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    # FG-301's vllm:Qwen/Qwen3-8B:bnb stage: vLLM 0.33.0 answered "Unknown quantization
+    # method: bitsandbytes", so the backend refuses it in one line, before vLLM loads.
+    vllm = FakeVllm(_sql_reply).install(monkeypatch)
+    with pytest.raises(ValueError) as refused:
+        VllmBackend("org/model", quantization="bitsandbytes")
+    message = str(refused.value)
+    assert "\n" not in message
+    assert message.startswith("quantization bitsandbytes: vLLM 0.33.0 has none")
+    assert "docs/spikes/kaggle-gpu.md, question 4" in message and "quantization awq" in message
+    assert vllm.engines == []
+    report = json.loads((ROOT / "docs/spikes/kaggle-gpu/spike-report.json").read_text())
+    (stage,) = [s for s in report["stages"] if s["name"] == "vllm:Qwen/Qwen3-8B:bnb"]
+    assert "Unknown quantization method: bitsandbytes" in stage["error"]
+    # AWQ is on that answer's list of the methods vLLM 0.33.0 knows.
+    assert "'awq'" in stage["error"] and QUANTIZATIONS == ("awq",)
 
 
 @pytest.mark.phase(3)
@@ -144,7 +165,7 @@ def test_engine_loads_the_model_in_fp16_with_lora_only_for_an_adapter(
         gpu_memory_utilization=0.6,
         max_model_len=4096,
         max_lora_rank=16,
-        quantization="bitsandbytes",
+        quantization="awq",
     )
     assert vllm.engines[1] == {
         "model": str(base),
@@ -152,7 +173,7 @@ def test_engine_loads_the_model_in_fp16_with_lora_only_for_an_adapter(
         "dtype": "half",
         "gpu_memory_utilization": 0.6,
         "max_model_len": 4096,
-        "quantization": "bitsandbytes",
+        "quantization": "awq",
         "enable_lora": True,
         "max_lora_rank": 16,
     }
@@ -166,10 +187,10 @@ def test_engine_loads_the_model_in_fp16_with_lora_only_for_an_adapter(
 def test_an_eval_config_in_4bit_loads_its_engine_in_4bit(monkeypatch: pytest.MonkeyPatch) -> None:
     vllm = FakeVllm(_sql_reply).install(monkeypatch)
     config = EvalConfig(model="org/big@0123abc", backend="vllm", host="kaggle")
-    for quantization in (None, "bitsandbytes"):
+    for quantization in (None, "awq"):
         backend, _ = model_backend(dataclasses.replace(config, quantization=quantization))
         assert isinstance(backend, VllmBackend)
-    assert [engine["quantization"] for engine in vllm.engines] == [None, "bitsandbytes"]
+    assert [engine["quantization"] for engine in vllm.engines] == [None, "awq"]
 
 
 @pytest.mark.phase(3)

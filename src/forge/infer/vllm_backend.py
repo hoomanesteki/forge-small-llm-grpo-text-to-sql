@@ -2,8 +2,10 @@
 
 ``VllmBackend`` loads the model once, in fp16 (``dtype="half"``: a T4 has no bf16). With
 ``adapter_ref`` it enables LoRA and names the adapter in every request through one
-``LoRARequest``. vLLM schedules and batches requests itself, so ``generate`` hands it every
-prompt at once.
+``LoRARequest``. With ``quantization="awq"`` it loads an AWQ checkpoint's 4-bit weights,
+for a reference model too big for a T4 in fp16; ``check_quantization`` refuses
+bitsandbytes, which vLLM 0.33.0 doesn't have (FG-301). vLLM schedules and batches
+requests itself, so ``generate`` hands it every prompt at once.
 
 Every prompt is rendered by ``render_chat``, the chat in the model's template with the
 assistant turn opened and Qwen3's thinking off, and sent to ``LLM.generate`` as the token
@@ -42,8 +44,10 @@ from forge.infer.base import check_params, render_chat, sample_seed, split_ref
 from forge.sql.extract import extract_sql
 
 REQUIREMENTS = "kaggle/requirements-gpu.txt"
-# The plan loads 4-bit bitsandbytes weights, and only for a reference model past 4B.
-QUANTIZATIONS = ("bitsandbytes",)
+# The 4-bit weights the backend loads, only for a reference model past 4B (FG-307): an AWQ
+# checkpoint's. vLLM's AWQ kernels need compute capability 7.5, which the T4 has; their
+# Marlin form needs 8.0, so a T4 gets the plain ones.
+QUANTIZATIONS = ("awq",)
 ADAPTER_NAME = "adapter"
 # The share of the GPU's memory the engine takes unless an eval config sets another.
 GPU_MEMORY_UTILIZATION = 0.85
@@ -64,10 +68,8 @@ class VllmBackend:
         max_lora_rank: int = 64,
         quantization: str | None = None,
     ) -> None:
-        if quantization is not None and quantization not in QUANTIZATIONS:
-            raise ValueError(
-                f"quantization must be one of {', '.join(QUANTIZATIONS)}, got {quantization!r}"
-            )
+        if quantization is not None:
+            check_quantization(quantization)
         llm_class, self._sampling_params, lora_class = _import_vllm()
         self.model_ref = model_ref
         self.adapter_ref = adapter_ref
@@ -139,6 +141,21 @@ class VllmBackend:
         ]
         return self.llm.generate(
             token_prompts, sampling_params=sampling, use_tqdm=False, lora_request=self.lora_request
+        )
+
+
+def check_quantization(quantization: str) -> None:
+    """Raise ``ValueError``, in one line, for a quantization the backend can't load."""
+    if quantization == "bitsandbytes":
+        # What FG-301's vllm:Qwen/Qwen3-8B:bnb stage got from vLLM 0.33.0.
+        raise ValueError(
+            "quantization bitsandbytes: vLLM 0.33.0 has none and refuses it as an unknown "
+            "quantization method (docs/spikes/kaggle-gpu.md, question 4; ADR-0006), so load "
+            "an AWQ checkpoint with quantization awq"
+        )
+    if quantization not in QUANTIZATIONS:
+        raise ValueError(
+            f"quantization must be one of {', '.join(QUANTIZATIONS)}, got {quantization!r}"
         )
 
 

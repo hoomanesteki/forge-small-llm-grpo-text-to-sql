@@ -151,19 +151,27 @@ def test_a_kernel_job_pushed_over_budget_says_so_in_its_config() -> None:
 def test_quantization_loads_a_vllm_model_in_4bit_and_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # FG-307's reference model is too big for a T4 in fp16, so vllm loads it in 4-bit.
-    kernel = EvalConfig(model="org/model", backend="vllm", host="kaggle")
-    four_bit = dataclasses.replace(kernel, quantization="bitsandbytes")
+    # FG-307's reference model is too big for a T4 in fp16, so vllm loads its 4-bit AWQ
+    # checkpoint.
+    kernel = EvalConfig(model="org/model-AWQ", backend="vllm", host="kaggle")
+    four_bit = dataclasses.replace(kernel, quantization="awq")
     check_config(four_bit)
-    recorded = {**kernel.manifest_config(), "quantization": "bitsandbytes"}
+    recorded = {**kernel.manifest_config(), "quantization": "awq"}
     assert four_bit.manifest_config() == recorded
     # Left out when unset, so a run made before the option keeps its config hash.
     assert "quantization" not in BASE.manifest_config()
+    # vLLM 0.33.0 has no bitsandbytes (FG-301): a config asking for it is refused before a
+    # push, in one line that says why.
+    with pytest.raises(ValueError) as refused:
+        check_config(dataclasses.replace(four_bit, quantization="bitsandbytes"))  # type: ignore[arg-type]
+    assert "\n" not in str(refused.value)
+    assert "vLLM 0.33.0 has none" in str(refused.value)
+    assert "docs/spikes/kaggle-gpu.md, question 4" in str(refused.value)
     for wrong, message in (
-        (dataclasses.replace(four_bit, quantization="awq"), "one of bitsandbytes, got 'awq'"),
-        (dataclasses.replace(BASE, quantization="bitsandbytes"), "for backend vllm, not hf"),
+        (dataclasses.replace(four_bit, quantization="gptq"), "one of awq, got 'gptq'"),
+        (dataclasses.replace(BASE, quantization="awq"), "for backend vllm, not hf"),
         (
-            EvalConfig(model="gold", backend="fake", quantization="bitsandbytes"),
+            EvalConfig(model="gold", backend="fake", quantization="awq"),
             "for backend vllm, not fake",
         ),
     ):
@@ -174,11 +182,11 @@ def test_quantization_loads_a_vllm_model_in_4bit_and_is_recorded(
     hint = get_type_hints(cli.eval_run, include_extras=False)["quantization"]
     assert get_args(get_args(hint)[0]) == QUANTIZATIONS
     path = tmp_path / "eval.yaml"
-    path.write_text("model: org/model\nbackend: vllm\nquantization: bitsandbytes\n")
-    assert read_config_file(path)["quantization"] == "bitsandbytes"
+    path.write_text("model: org/model\nbackend: vllm\nquantization: awq\n")
+    assert read_config_file(path)["quantization"] == "awq"
     configs = _captured(monkeypatch)
-    CliRunner().invoke(cli.app, ["eval", "run", "--model", "x", "--quantization", "bitsandbytes"])
-    assert [config.quantization for config in configs] == ["bitsandbytes"]
+    CliRunner().invoke(cli.app, ["eval", "run", "--model", "x", "--quantization", "awq"])
+    assert [config.quantization for config in configs] == ["awq"]
 
 
 @pytest.mark.phase(3)
