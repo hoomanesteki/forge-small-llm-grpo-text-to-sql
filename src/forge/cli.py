@@ -816,6 +816,31 @@ def ledger_add(
     typer.echo(f"added {hours:.2f} h on {platform} for {run_id}")
 
 
+@ledger_app.command("record")
+def ledger_record(
+    run_id: Annotated[
+        str, typer.Argument(help="A run in runs/ (FORGE_RUNS_DIR) that has ended, such as a pilot.")
+    ],
+) -> None:
+    """Add the row of a run made on this machine, from its manifest, once.
+
+    The date, platform, GPU and hours come from the manifest, as forge runs pull takes
+    them for a pulled run, so a local-mps pilot's hours are never typed. A local-cpu run
+    holds no GPU and gets no row.
+    """
+    from forge.ops.hub import LocalRunStore
+    from forge.ops.ledger import record_run
+    from forge.ops.paths import runs_dir
+
+    try:
+        manifest = LocalRunStore(runs_dir()).get_manifest(run_id)
+        _, note = record_run(manifest)
+    except _runs_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(note)
+
+
 @ledger_app.command("summary")
 def ledger_summary(days: int = typer.Option(7, help="quota window in days")) -> None:
     """Hours this week against the Kaggle quota, total GPU hours and cash spent."""

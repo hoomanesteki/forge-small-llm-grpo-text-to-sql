@@ -180,6 +180,9 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
   hours from `started_at` to `ended_at`, what it was and its cost. A `local-cpu` run gets no
   row, and a run still `running` none yet: pull it again once it ends. Kernel output with
   no manifest, such as a spike's, gets none either; add it with `forge ledger add`.
+- A run made on this machine, such as a `local-mps` pilot, has nothing to pull:
+  `uv run forge ledger record <run_id>` writes its row the same way, from
+  `runs/<run_id>/manifest.json` (`FORGE_RUNS_DIR`), so its hours are never typed.
 - Invariant I7 (`tests/integration/test_invariants.py`) checks that every `kaggle`, `colab`
   or `modal` run under `docs/runs/` and `runs/` has a row, that a run's row names its
   platform, and that the ledger's cash stays within $50.
