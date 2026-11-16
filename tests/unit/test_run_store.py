@@ -3,12 +3,22 @@ for by ``FakeHub``, so no test needs a token or the network."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import httpx2
+import huggingface_hub
 import pytest
-from huggingface_hub.errors import OfflineModeIsEnabled, RepositoryNotFoundError
+from huggingface_hub import HfApi
+from huggingface_hub.errors import (
+    LocalEntryNotFoundError,
+    OfflineModeIsEnabled,
+    RepositoryNotFoundError,
+)
+from huggingface_hub.utils import _http
 
 from forge.core.types import RunManifest
 from forge.ops.hub import (
@@ -21,7 +31,7 @@ from forge.ops.hub import (
     checkpoint_dir,
     manifest_bytes,
 )
-from tests.fakes import FakeHub, hub_error
+from tests.fakes import REPO_URL, TREE_URL, FakeHub, connect_error, hub_error
 
 RUN = "2026-11-15-tiny-grpo-abc1234"
 OTHER = "2026-11-16-tiny-grpo-abc1234"
@@ -264,6 +274,21 @@ def test_hub_store_calls_api(tmp_path: Path) -> None:
     assert Path(calls[8]["local_dir"]).parent == tmp_path / "runs"
 
 
+def _lfs_failure(cause: BaseException) -> RuntimeError:
+    """A failed LFS upload as huggingface_hub reports it: a bare RuntimeError from its cause."""
+    error = RuntimeError("Error while uploading 'runs/x/metrics.jsonl' to the Hub.")
+    error.__cause__ = cause
+    return error
+
+
+def _chain(error: BaseException | None) -> list[BaseException]:
+    found = []
+    while error is not None:
+        found.append(error)
+        error = error.__cause__
+    return found
+
+
 @pytest.mark.phase(3)
 @pytest.mark.parametrize(
     "error",
@@ -272,7 +297,7 @@ def test_hub_store_calls_api(tmp_path: Path) -> None:
         httpx2.ReadTimeout("read timed out"),
         hub_error(503),
         hub_error(429),
-        RuntimeError("Error while uploading 'runs/x/metrics.jsonl' to the Hub."),
+        _lfs_failure(httpx2.ConnectError("connection reset")),
     ],
 )
 def test_hub_store_retries_network_errors_with_backoff(
@@ -296,6 +321,57 @@ def test_hub_store_retries_network_errors_with_backoff(
     assert raised.value.__cause__ is error
     assert waits == [2.0, 4.0, 8.0] and len(fake.calls) == 4
 
+    # Downloads too, which huggingface_hub reports as LocalEntryNotFoundError: a blip is
+    # survived, and an outage is no missing run.
+    manifest = _manifest()
+    store.put_manifest(manifest)
+    waits.clear()
+    fake.fail["hf_hub_download"] = [error, error]
+    assert store.get_manifest(RUN) == manifest
+    assert waits == [2.0, 4.0]
+    waits.clear()
+    fake.fail["hf_hub_download"] = [error] * 4
+    with pytest.raises(StoreUnavailable, match="failed 4 times") as raised:
+        store.get_manifest(RUN)
+    assert error in _chain(raised.value) and not isinstance(raised.value, RunNotFound)
+    assert waits == [2.0, 4.0, 8.0]
+    waits.clear()
+    fake.fail["snapshot_download"] = [error] * 4
+    with pytest.raises(StoreUnavailable, match="failed 4 times") as raised:
+        store.pull(RUN, tmp_path / "runs" / RUN)
+    assert error in _chain(raised.value) and waits == [2.0, 4.0, 8.0]
+    assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == []
+    fake.fail["snapshot_download"] = [error]
+    store.pull(RUN, tmp_path / "runs" / RUN)
+    assert (tmp_path / "runs" / RUN / "manifest.json").read_bytes() == manifest_bytes(manifest)
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    "error",
+    [
+        connect_error(TREE_URL),
+        hub_error(503, url=TREE_URL),
+        hub_error(429, url=f"{REPO_URL}/preupload/main"),
+        _lfs_failure(connect_error("https://lfs.huggingface.co/upload/part-1")),
+    ],
+)
+def test_hub_store_leaves_to_the_client_what_it_retried(error: BaseException) -> None:
+    # huggingface_hub tried these requests 5 more times before it raised, so the store
+    # tries no more; a commit or the repo lookup it sends once, and the store retries.
+    fake = FakeHub()
+    store = HubRunStore(REPO, api=fake, sleep=_never_sleep)
+    fake.fail["list_repo_files"] = [error]
+    with pytest.raises(StoreUnavailable, match="after huggingface_hub's own retries") as raised:
+        store.runs()
+    assert raised.value.__cause__ is error and len(fake.calls) == 1
+
+    waits: list[float] = []
+    store = HubRunStore(REPO, api=fake, sleep=waits.append)
+    fake.fail["list_repo_files"] = [connect_error(f"{REPO_URL}/commit/main")] * 2
+    assert store.runs() == []
+    assert waits == [2.0, 4.0]
+
 
 @pytest.mark.phase(3)
 @pytest.mark.parametrize(
@@ -305,6 +381,11 @@ def test_hub_store_retries_network_errors_with_backoff(
         hub_error(403),
         OfflineModeIsEnabled("HF_HUB_OFFLINE is set"),
         ValueError("Invalid repo id"),
+        # Not every RuntimeError is the network: a refused LFS upload, a bug.
+        _lfs_failure(hub_error(403)),
+        RuntimeError("Error while uploading 'runs/x/metrics.jsonl' to the Hub."),
+        NotImplementedError("not built yet"),
+        httpx2.ProxyError("407 Proxy Authentication Required"),
     ],
 )
 def test_hub_store_fails_at_once_on_other_errors(error: BaseException) -> None:
@@ -314,6 +395,120 @@ def test_hub_store_fails_at_once_on_other_errors(error: BaseException) -> None:
     with pytest.raises(type(error)) as raised:
         store.latest_checkpoint(RUN)
     assert raised.value is error and len(fake.calls) == 1
+
+
+@pytest.mark.phase(3)
+def test_a_retried_pull_starts_from_an_empty_folder(tmp_path: Path) -> None:
+    class HalfwayHub(FakeHub):
+        """Fails its first download halfway through, then works."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.found: list[list[str]] = []  # what each download found in its folder
+
+        def snapshot_download(self, **kwargs: Any) -> str:
+            root = Path(kwargs["local_dir"])
+            self.found.append(sorted(p.relative_to(root).as_posix() for p in root.rglob("*")))
+            if len(self.found) > 1:
+                return super().snapshot_download(**kwargs)
+            (root / "runs" / RUN / "eval").mkdir(parents=True)
+            (root / "runs" / RUN / "eval" / "partial.jsonl").write_text("a line cut sh")
+            raise LocalEntryNotFoundError("the Hub went away") from connect_error(REPO_URL)
+
+    fake = HalfwayHub()
+    store = HubRunStore(REPO, api=fake, sleep=lambda seconds: None)
+    store.put_manifest(_manifest())
+
+    store.pull(RUN, tmp_path / "runs" / RUN)
+
+    # huggingface_hub returns a folder that isn't empty as it is when it can't reach the
+    # Hub, so a second try on the first one's leftovers could pass for a whole run.
+    assert fake.found == [[], []]
+    assert _files(tmp_path / "runs" / RUN) == {"manifest.json": manifest_bytes(_manifest())}
+
+
+Handler = Callable[[httpx2.Request], httpx2.Response]
+
+
+@pytest.fixture
+def answered(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[Handler], list[float]]]:
+    """huggingface_hub for real, with every request it sends answered by a handler in
+    this process. Returns a function that installs a handler and gives the list the
+    client's own retries record their waits in."""
+    waits: list[float] = []
+    monkeypatch.setattr(_http, "time", SimpleNamespace(sleep=waits.append))
+
+    def use(handler: Handler) -> list[float]:
+        huggingface_hub.set_client_factory(
+            lambda: httpx2.Client(transport=httpx2.MockTransport(handler))
+        )
+        return waits
+
+    yield use
+    huggingface_hub.set_client_factory(_http.default_client_factory)
+
+
+def _refused(request: httpx2.Request) -> httpx2.Response:
+    raise httpx2.ConnectError("connection refused", request=request)
+
+
+def _unavailable(request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(503, request=request)
+
+
+def _commit_refused(request: httpx2.Request) -> httpx2.Response:
+    """A Hub that takes the upload's preupload request and drops its commit."""
+    if "/preupload/" in request.url.path:
+        mode = {"path": f"runs/{RUN}/metrics.jsonl", "uploadMode": "regular", "shouldIgnore": False}
+        return httpx2.Response(200, json={"files": [mode]}, request=request)
+    return _refused(request)
+
+
+CLIENT_WAITS = [1, 2, 4, 8, 8]  # huggingface_hub 2.4's own, between its 6 tries
+STORE_WAITS = [2.0, 4.0, 8.0]  # the store's, between its 4
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    ("call", "handler", "client_waits", "store_waits"),
+    [
+        ("runs", _refused, CLIENT_WAITS, []),
+        ("runs", _unavailable, CLIENT_WAITS, []),
+        ("get_manifest", _refused, CLIENT_WAITS, []),
+        ("get_manifest", _unavailable, CLIENT_WAITS, []),
+        ("put_file", _refused, CLIENT_WAITS, []),
+        ("put_file", _commit_refused, [], STORE_WAITS),
+        ("pull", _refused, [], STORE_WAITS),
+        ("pull", _unavailable, [], STORE_WAITS),
+    ],
+)
+def test_store_and_client_retries_never_stack(
+    answered: Callable[[Handler], list[float]],
+    tmp_path: Path,
+    call: str,
+    handler: Handler,
+    client_waits: list[float],
+    store_waits: list[float],
+) -> None:
+    # The real client, so what it retries itself is measured rather than assumed.
+    client = answered(handler)
+    waits: list[float] = []
+    api = HfApi(endpoint="https://hub.test", token=False)
+    store = HubRunStore(REPO, api=api, sleep=waits.append)
+    (tmp_path / "metrics.jsonl").write_text("{}\n")
+    calls: dict[str, Callable[[], object]] = {
+        "runs": store.runs,
+        "get_manifest": lambda: store.get_manifest(RUN),
+        "put_file": lambda: store.put_file(RUN, tmp_path / "metrics.jsonl", "metrics.jsonl"),
+        "pull": lambda: store.pull(RUN, tmp_path / "runs" / RUN),
+    }
+
+    with pytest.raises(StoreUnavailable):
+        calls[call]()
+
+    # Each failure is retried by one of the two, so a call waits 23 s at most inside the
+    # client or 14 s between the store's tries, as the module docstring says.
+    assert (client, waits) == (client_waits, store_waits)
 
 
 @pytest.mark.phase(3)
