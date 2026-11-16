@@ -1,0 +1,360 @@
+"""GRPO's rewards: pay for SQL that answers the question and charge for the known
+shortcuts, so the model learns the skill rather than the checker (FG-501).
+
+``Rewards`` gives TRL four reward functions, in this order, and the weights
+``GRPOConfig(reward_weights=...)`` sums them by, from the config's ``rewards`` section:
+
+- ``execution_reward``: 1 when the query's rows match its gold query's under
+  ``forge.sql.compare.results_match``, the comparator I5 measures against the official
+  evaluator (ADR-0008), else 0. Weight ``rewards.execution``, 1.0 to start.
+- ``validity_reward``: 1 when the query runs without error, else 0. Weight
+  ``rewards.validity``, 0.1.
+- ``format_reward``: 1 when the reply is one ```` ```sql ```` block holding a statement, with
+  only whitespace around it, else 0. Weight ``rewards.format``, 0.05.
+- ``guard_penalty``: the sum of ``rewards.guards``' penalties for the guards that fire,
+  already in reward units, so its weight is 1:
+
+  - ``non_select``, -1.0: the executor denies the query, as it denies anything but one
+    ``SELECT`` or ``VALUES``; or, among several statements, sqlglot reads one as something
+    other than a query.
+  - ``multiple_statements``, -0.5: more than one statement, counted as the executor counts
+    them (``statement_count``), so it fires exactly when the executor refuses the SQL as
+    more than one statement.
+  - ``constant_query``, -0.5: sqlglot finds no table in the SQL but finds one in the gold
+    query. A common table expression, a subquery and a table-valued function such as
+    ``json_each`` are not tables. It is judged on the SQL alone, before the executor's
+    result: ``SELECT 3`` costs the same whether or not 3 is the answer.
+  - ``comment_payload``, -0.2: a comment over 40 characters, counted between its ``--``
+    or ``/* */`` and without the whitespace at its ends. Comments are read as SQLite reads
+    them (``forge.sql.executor.comments``), because sqlglot drops a comment that no token
+    follows and can't read a block comment left open, which SQLite runs as a comment to the
+    end.
+
+The first three return 0 or 1 and the weights scale them, so TRL's
+``rewards/<name>/mean`` reads as the share of completions that match, run or keep the
+format; with the starting weights, the gold query in a code block scores 1.15 in all.
+Execution, validity and format pay nothing once any guard fires, so a reply that sets one
+off scores its penalties alone. They pay nothing either for a query that ran but that
+sqlglot can't read, whose tables no one could check; such a query costs nothing. A reply in
+which ``extract_sql`` finds no SQL scores 0 on all four.
+
+Each function takes TRL's arguments, ``(prompts, completions, completion_ids=None,
+**kwargs)``: ``kwargs`` holds the dataset's ``example_id``, ``db_id`` and ``gold_sql``
+columns, one value a completion, which GRPO passes on with ``remove_unused_columns=False``.
+A completion is the reply's text or, in a conversational dataset, a list of messages whose
+first holds it as ``content``. The reply's ``<think>...</think>`` blocks are dropped before
+anything reads it. ``gold`` maps example ids to their gold queries' results, from
+``forge.eval.gold_cache.gold_results``.
+
+Model SQL is untrusted, so it runs only in the ``SandboxPool`` (ADR-0014), with the eval
+runner's timeout and row cap, which the gold cache's results allow for. TRL calls the four
+functions one after another on the same batch, so the batch's queries run once and the
+other three reuse its verdicts. Given the gold results the rewards are pure (I3): the same
+completion of the same example gets the same rewards, unless its query ends so near its
+deadline that one run times out and another doesn't.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Literal
+
+import sqlglot
+from sqlglot import exp
+from sqlglot.errors import SqlglotError
+from sqlglot.optimizer.scope import traverse_scope
+
+from forge.core.types import ExecResult
+from forge.eval.config import PRED_TIMEOUT_MS
+from forge.eval.gold_cache import MAX_ROWS
+from forge.sql.compare import order_matters, results_match
+from forge.sql.executor import comments, statement_count
+from forge.sql.extract import drop_thinking, extract_sql
+from forge.sql.sandbox import SandboxPool
+from forge.train.backends import RewardFunc
+from forge.train.config import RewardsConfig
+
+log = logging.getLogger(__name__)
+
+Guard = Literal["non_select", "multiple_statements", "constant_query", "comment_payload"]
+# The order penalties are added in, so a sum comes out as the same float every time.
+GUARDS: tuple[Guard, ...] = (
+    "non_select",
+    "multiple_statements",
+    "constant_query",
+    "comment_payload",
+)
+COMMENT_PAYLOAD_CHARS = 40
+# The dataset columns the rewards read from TRL's keyword arguments.
+COLUMNS = ("example_id", "db_id", "gold_sql")
+
+_SQL_REPLY = re.compile(r"\s*```sql\b(?P<body>.*?)```\s*", re.DOTALL | re.IGNORECASE)
+
+_BatchKey = tuple[tuple[str, str, str, str], ...]
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """How the rewards read one completion."""
+
+    sql: str | None  # what extract_sql found, None when it found nothing
+    guards: tuple[Guard, ...] = ()  # those that fired, in GUARDS order
+    valid: bool = False  # ran without error, and nothing withheld credit
+    matches: bool = False  # its rows are its gold query's, and nothing withheld credit
+    formatted: bool = False  # one sql block alone, and nothing withheld credit
+
+
+class Rewards:
+    """The reward functions of one GRPO run, as the module docstring describes them.
+
+    ``gold`` holds the result of each dataset example's gold query by example id, and
+    ``pool`` runs the completions' queries; the caller owns the pool and closes it.
+    """
+
+    def __init__(
+        self,
+        gold: Mapping[str, ExecResult],
+        pool: SandboxPool,
+        config: RewardsConfig | None = None,
+    ) -> None:
+        self.gold = gold
+        self.pool = pool
+        self.config = RewardsConfig() if config is None else config
+        guards = self.config.guards
+        self._penalties: dict[Guard, float] = {
+            "non_select": guards.non_select,
+            "multiple_statements": guards.multiple_statements,
+            "constant_query": guards.constant_query,
+            "comment_payload": guards.comment_payload,
+        }
+        self._last: tuple[_BatchKey, tuple[Verdict, ...]] | None = None
+
+    @property
+    def functions(self) -> list[RewardFunc]:
+        """The four reward functions for ``GRPOTrainer(reward_funcs=...)``."""
+        return [self.execution_reward, self.validity_reward, self.format_reward, self.guard_penalty]
+
+    @property
+    def weights(self) -> list[float]:
+        """``GRPOConfig.reward_weights``, in the order of ``functions``."""
+        config = self.config
+        return [config.execution, config.validity, config.format, 1.0]
+
+    def execution_reward(
+        self,
+        prompts: Sequence[object],
+        completions: Sequence[object],
+        completion_ids: object = None,
+        **kwargs: object,
+    ) -> list[float]:
+        """1 for each completion whose query returns its gold query's rows, else 0."""
+        return [float(v.matches) for v in self.judge(prompts, completions, kwargs)]
+
+    def validity_reward(
+        self,
+        prompts: Sequence[object],
+        completions: Sequence[object],
+        completion_ids: object = None,
+        **kwargs: object,
+    ) -> list[float]:
+        """1 for each completion whose query runs without error, else 0."""
+        return [float(v.valid) for v in self.judge(prompts, completions, kwargs)]
+
+    def format_reward(
+        self,
+        prompts: Sequence[object],
+        completions: Sequence[object],
+        completion_ids: object = None,
+        **kwargs: object,
+    ) -> list[float]:
+        """1 for each reply that is one sql code block and nothing else, else 0."""
+        return [float(v.formatted) for v in self.judge(prompts, completions, kwargs)]
+
+    def guard_penalty(
+        self,
+        prompts: Sequence[object],
+        completions: Sequence[object],
+        completion_ids: object = None,
+        **kwargs: object,
+    ) -> list[float]:
+        """The sum of the penalties of the guards each completion sets off; 0 for none."""
+        return [
+            sum((self._penalties[guard] for guard in v.guards), 0.0)
+            for v in self.judge(prompts, completions, kwargs)
+        ]
+
+    def judge(
+        self,
+        prompts: Sequence[object],
+        completions: Sequence[object],
+        columns: Mapping[str, object],
+    ) -> list[Verdict]:
+        """Each completion's verdict, from TRL's arguments; ``columns`` are its keywords.
+
+        Raises ``ValueError`` when a column is missing or doesn't hold one string a
+        completion, or an example has no gold result, ``TypeError`` for a completion that
+        is neither text nor a list of messages, and ``DataNotFound`` from the pool for a
+        database it doesn't have.
+        """
+        texts = [_reply_text(completion) for completion in completions]
+        if len(prompts) != len(texts):
+            raise ValueError(f"{len(prompts)} prompts came with {len(texts)} completions")
+        example_ids, db_ids, gold_sqls = (_column(columns, name, len(texts)) for name in COLUMNS)
+        key = tuple(zip(texts, example_ids, db_ids, gold_sqls, strict=True))
+        if self._last is not None and self._last[0] == key:
+            return list(self._last[1])
+        golds = [self._gold(example_id) for example_id in example_ids]
+        replies = [drop_thinking(text) for text in texts]
+        sqls = [extract_sql(reply) for reply in replies]
+        runnable = [(i, sql) for i, sql in enumerate(sqls) if sql is not None]
+        ran = self.pool.run_many(
+            [(db_ids[i], sql) for i, sql in runnable], timeout_ms=PRED_TIMEOUT_MS, max_rows=MAX_ROWS
+        )
+        results = dict(zip((i for i, _ in runnable), ran, strict=True))
+        verdicts = [
+            Verdict(sql=None)
+            if sql is None
+            else _verdict(replies[i], sql, results[i], golds[i], gold_sqls[i])
+            for i, sql in enumerate(sqls)
+        ]
+        self._last = (key, tuple(verdicts))
+        return verdicts
+
+    def _gold(self, example_id: str) -> ExecResult:
+        gold = self.gold.get(example_id)
+        if gold is None:
+            raise ValueError(
+                f"no gold result for {example_id}; the gold results must cover every example "
+                "of the dataset (forge.eval.gold_cache.gold_results)"
+            )
+        return gold
+
+
+def _verdict(reply: str, sql: str, pred: ExecResult, gold: ExecResult, gold_sql: str) -> Verdict:
+    """The verdict on ``sql``, found in ``reply``, whose result is ``pred``."""
+    statements = _read(sql)
+    count = statement_count(sql)
+    fired: set[Guard] = set()
+    if count > 1:
+        fired.add("multiple_statements")
+        if statements is not None and not all(map(_is_query, statements)):
+            fired.add("non_select")
+    elif pred.error_kind == "denied":
+        fired.add("non_select")
+    tables = _reads_a_table(statements)
+    if "non_select" not in fired and tables is False and _gold_reads_a_table(gold_sql):
+        fired.add("constant_query")
+    if any(len(text.strip()) > COMMENT_PAYLOAD_CHARS for text in comments(sql)):
+        fired.add("comment_payload")
+    guards = tuple(guard for guard in GUARDS if guard in fired)
+    # A query that ran but whose tables sqlglot couldn't check can't be cleared of being a
+    # constant, so it earns nothing, though nothing is charged.
+    credit = not guards and not (pred.ok and tables is None)
+    return Verdict(
+        sql=sql,
+        guards=guards,
+        valid=credit and pred.ok,
+        matches=credit and results_match(gold, pred, order_matters=_order_matters(gold_sql)),
+        # A block of nothing but comments holds no query to be in the format.
+        formatted=credit and count == 1 and _formatted(reply),
+    )
+
+
+def _reply_text(completion: object) -> str:
+    """The text of a completion: itself, or its first message's content."""
+    if isinstance(completion, str):
+        return completion
+    if isinstance(completion, Sequence) and completion and isinstance(completion[0], Mapping):
+        content = completion[0].get("content")
+        if isinstance(content, str):
+            return content
+    raise TypeError(
+        "a completion is its text or a list of messages with the text as the first one's "
+        f"content, not {completion!r:.100}"
+    )
+
+
+def _column(columns: Mapping[str, object], name: str, size: int) -> list[str]:
+    """Dataset column ``name`` from TRL's keywords: ``size`` strings."""
+    if name not in columns:
+        raise ValueError(
+            f"the rewards need the dataset's {name} column, which GRPO passes on only with "
+            "remove_unused_columns=False"
+        )
+    values = columns[name]
+    wrong = f"the {name} column must hold one string a completion, {size} in all"
+    if not isinstance(values, Sequence) or isinstance(values, str):
+        raise ValueError(wrong)
+    strings = [value for value in values if isinstance(value, str)]
+    if len(strings) != size or len(values) != size:
+        raise ValueError(wrong)
+    return strings
+
+
+def _read(sql: str) -> list[exp.Expr] | None:
+    """The statements sqlglot reads in ``sql``, or ``None`` when it can't read them."""
+    try:
+        statements = sqlglot.parse(sql, read="sqlite")
+    # sqlglot runs out of stack at about 47 nested parentheses and raises RecursionError.
+    except (SqlglotError, RecursionError):
+        return None
+    return [statement for statement in statements if statement is not None]
+
+
+def _is_query(statement: exp.Expr) -> bool:
+    # sqlglot reads a bare VALUES as a node of its own, but the executor runs it as a query.
+    return isinstance(statement, exp.Query | exp.Values)
+
+
+def _reads_a_table(statements: Sequence[exp.Expr] | None) -> bool | None:
+    """Whether the queries read a table of the database: ``None`` unless sqlglot read the
+    SQL as one or more queries and could follow their scopes.
+
+    A table is a source in a query's scope that is a named ``exp.Table``: a name bound to a
+    common table expression is that expression's scope, and a table-valued function has no
+    name. A bare ``VALUES`` has no scope, so the queries inside it are read instead.
+    """
+    if not statements or not all(map(_is_query, statements)):
+        return None
+    queries = [
+        query
+        for statement in statements
+        for query in (
+            [statement] if isinstance(statement, exp.Query) else statement.find_all(exp.Query)
+        )
+    ]
+    try:
+        return any(
+            isinstance(source, exp.Table) and isinstance(source.this, exp.Identifier)
+            for query in queries
+            for scope in traverse_scope(query)
+            for source in scope.sources.values()
+        )
+    except (SqlglotError, RecursionError):
+        return None
+
+
+@lru_cache(maxsize=16_384)
+def _gold_reads_a_table(gold_sql: str) -> bool:
+    """Whether the gold query reads a table; one sqlglot can't read is taken to, as all
+    7,787 train gold queries do."""
+    tables = _reads_a_table(_read(gold_sql))
+    if tables is None:
+        log.warning("sqlglot can't read the gold query %r; taking it to read a table", gold_sql)
+        return True
+    return tables
+
+
+@lru_cache(maxsize=16_384)
+def _order_matters(gold_sql: str) -> bool:
+    return order_matters(gold_sql)
+
+
+def _formatted(reply: str) -> bool:
+    """Whether the reply is one sql code block with only whitespace around it."""
+    match = _SQL_REPLY.fullmatch(reply)
+    return match is not None and "```" not in match["body"]
