@@ -205,6 +205,9 @@ STACKS = {
     ),
 }
 GRPO_STACKS = ("trl", "unsloth", "trl-vllm")  # in the order run measures them
+# A T4 x2 session has two GPUs, and a Trainer that sees both multiplies its batch by two in
+# one process; the jobs use the first (ADR-0005), so each bench sees only that one.
+ONE_GPU = (("CUDA_VISIBLE_DEVICES", "0"),)
 
 
 @dataclass(frozen=True)
@@ -214,6 +217,7 @@ class Stage:
     argv: tuple[str, ...]  # the child's subcommand and arguments
     needs: tuple[str, ...] = ()  # stages that must have passed first
     removes: str | None = None  # a venv to delete once this stage is over
+    env: tuple[tuple[str, str], ...] = ()  # set for the child over the session's own
 
 
 @dataclass(frozen=True)
@@ -343,6 +347,7 @@ def _stack_stages(
             str(venv / "bin" / "python"),
             bench_argv(model, args),
             needs=(install.name, f"download:{model}"),
+            env=ONE_GPU,
         )
         for model in args.models
     ]
@@ -411,7 +416,7 @@ def run(
     passed: set[str] = set()
     for stage in plan_stages(args):
         entry: dict[str, Any] = {"name": stage.name, "status": "skipped", "started_at": _now()}
-        entry.update(seconds=None, result=None, error=None)
+        entry.update(seconds=None, env=dict(stage.env), result=None, error=None)
         missing = [name for name in stage.needs if name not in passed]
         left = deadline - clock()
         if missing:
@@ -447,6 +452,7 @@ def run_child(
     result_file.parent.mkdir(parents=True, exist_ok=True)
     command = [stage.python, _script_path(), *stage.argv, "--out", str(result_file)]
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
+    env.update(stage.env)
     if hf_home is not None:
         env["HF_HOME"] = str(hf_home)
     # A session of its own, so a kill also reaches every process the stage started.
@@ -653,6 +659,28 @@ def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def render_prompts(tokenizer: Any, chats: Sequence[list[dict[str, str]]]) -> list[str]:
+    """Each chat as the text the model is prompted with, Qwen3's thinking turned off.
+
+    Every stack gets this same text: TRL 0.22, Unsloth's, has no ``chat_template_kwargs``
+    and would prompt with thinking on. A template that ignores the switch fails the stage,
+    rather than bench a model that thinks before it answers.
+    """
+
+    def render(chat: list[dict[str, str]], thinking: bool) -> str:
+        text = tokenizer.apply_chat_template(
+            chat, add_generation_prompt=True, tokenize=False, enable_thinking=thinking
+        )
+        if not isinstance(text, str):
+            raise TypeError(f"apply_chat_template returned {type(text).__name__}, not text")
+        return text
+
+    prompts = [render(chat, False) for chat in chats]
+    if chats and prompts[0] == render(chats[0], True):
+        raise RuntimeError("the chat template ignores enable_thinking: thinking can't be off")
+    return prompts
+
+
 def sql_block_reward(
     prompts: list[Any], completions: list[Any], **kwargs: Any
 ) -> list[float | None]:
@@ -676,6 +704,12 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
     from trl import GRPOConfig, GRPOTrainer
 
     marks: list[float] = []
+    scored: list[int] = []  # completions in each batch TRL scored
+
+    @functools.wraps(sql_block_reward)  # TRL names the reward's metrics after it
+    def reward(prompts: list[Any], completions: list[Any], **kwargs: Any) -> list[float | None]:
+        scored.append(len(completions))
+        return sql_block_reward(prompts, completions, **kwargs)
 
     class StepTimer(TrainerCallback):
         def on_train_begin(self, *args: Any, **kwargs: Any) -> None:
@@ -689,6 +723,7 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
     start = time.perf_counter()
     model, tokenizer, peft_config = (_unsloth_model if args.stack == "unsloth" else _hf_model)(args)
     load_seconds = time.perf_counter() - start
+    prompts = render_prompts(tokenizer, spike_prompts(args.prompts))
 
     fields = GRPOConfig.__dataclass_fields__
     config: dict[str, Any] = {
@@ -709,8 +744,6 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
         "use_cpu": not on_gpu,
         "optim": "adamw_8bit" if on_gpu else "adamw_torch",
     }
-    if "chat_template_kwargs" in fields:
-        config["chat_template_kwargs"] = {"enable_thinking": False}
     if "max_prompt_length" in fields:
         # TRL before 0.28 cuts prompts to 512 tokens unless told otherwise.
         config["max_prompt_length"] = MAX_PROMPT_TOKENS
@@ -718,9 +751,9 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
         config.update(use_vllm=True, vllm_mode="colocate")
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=[sql_block_reward],
+        reward_funcs=[reward],
         args=GRPOConfig(**config),
-        train_dataset=Dataset.from_list([{"prompt": p} for p in spike_prompts(args.prompts)]),
+        train_dataset=Dataset.from_list([{"prompt": prompt} for prompt in prompts]),
         processing_class=tokenizer,
         peft_config=peft_config,
         callbacks=[StepTimer()],
@@ -738,6 +771,10 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
     trainer.train()
     train_seconds = time.perf_counter() - start
     steps = [round(b - a, 3) for a, b in itertools.pairwise(marks)]
+    done = trainer.state.global_step
+    history = trainer.state.log_history
+    length = "completions/mean_length"  # TRL logs it for every step
+    lengths = [entry[length] for entry in history if length in entry]
     settings = {key: value for key, value in config.items() if key not in ("output_dir", "seed")}
     settings["lora_rank"] = args.lora_rank
     # Unsloth's fast_inference generates with its own colocated vLLM.
@@ -748,7 +785,12 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
         "device": args.device,
         "quant": args.quant,
         "settings": settings,
-        "completions_per_step": args.batch_size * args.grad_accum,
+        "planned_completions_per_step": args.batch_size * args.grad_accum,
+        # What TRL generated and scored: a Trainer that sees two GPUs doubles it.
+        "completions_per_step": sum(scored) / done if done else None,
+        "n_gpu": trainer.args.n_gpu,
+        "thinking_off": True,  # render_prompts saw to it
+        "mean_completion_length": statistics.mean(lengths) if lengths else None,
         "versions": versions(),
         "load_seconds": round(load_seconds, 3),
         "train_seconds": round(train_seconds, 3),
@@ -756,7 +798,7 @@ def grpo_stage(args: argparse.Namespace) -> dict[str, Any]:
         "step_seconds": steps,
         "median_step_seconds": statistics.median(steps[1:]) if len(steps) > 1 else None,
         "memory": cuda_memory() if on_gpu else None,
-        "log_history": trainer.state.log_history,
+        "log_history": history,
     }
 
 

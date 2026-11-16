@@ -67,7 +67,7 @@ their pins conflict (question 3). The stages, in order:
 | `download:<model>` | 4, 5 | Seconds and bytes to fetch Qwen3 1.7B and 4B, and the commit fetched |
 | `install:<stack>` | 3 | Seconds to install each stack, venv size, `uv pip freeze` of the venv's own packages, the installer used |
 | `vllm:<model>` | 4 | Load seconds, tokens per second on 100 prompts, greedy, fp16, up to 256 tokens a reply, device memory |
-| `grpo:<stack>:<model>` | 5 | Seconds per step over 10 steps, peak memory, TRL's log, for 4-bit LoRA with 6 generations of up to 256 tokens |
+| `grpo:<stack>:<model>` | 5 | Seconds per step over 10 steps, peak memory, TRL's log, for 4-bit LoRA with 6 generations of up to 256 tokens; the GPUs the trainer saw (`n_gpu`), the completions TRL scored a step, the mean completion length |
 | `limit-probe` (own kernel) | 6 | A heartbeat rewritten every 30 s until the session is killed |
 
 The prompts are 100 made-up text-to-SQL questions in Forge's p1 format over a six-table
@@ -75,6 +75,15 @@ schema, so they carry no Spider text; the report gives their token counts. The G
 reward is a cheap check for a closed sql block, so the timing is the trainer's and not
 the SQL executor's. The GRPO batch is plan section 3.10's: 6 completions a device and 4
 accumulation steps, so a step trains on 24 completions from 4 prompts.
+
+A T4 session has two GPUs, and a Trainer that sees both in one process doubles its batch,
+so every bench runs with `CUDA_VISIBLE_DEVICES=0`, as the jobs use the first GPU
+(ADR-0005); the env stage still sees both. A GRPO bench records the GPUs its trainer
+counted (`n_gpu`) and the completions TRL scored a step, counted by the reward, beside
+the planned 24 (`planned_completions_per_step`). Each GRPO bench prompts with the same
+text: the chats are rendered before training with Qwen3's thinking off, since Unsloth's
+TRL 0.22 has no `chat_template_kwargs`, and a template that ignores the switch fails the
+stage. The result says thinking was off and gives the mean completion length.
 
 The stacks are candidates, each pinned in the script and none verified on a T4:
 
@@ -254,6 +263,9 @@ For Qwen3 1.7B and 4B, 4-bit, 6 generations, up to 256 completion tokens, 10 ste
 - Unsloth with fast inference (`grpo:unsloth:<model>`): whether it runs, then the same
   numbers. Not measured yet.
 - Does fp16 training stay finite over the 10 steps (`log_history`)? Not measured yet.
+- Did each bench train on one GPU and 24 completions a step (`grpo:<stack>:<model>`,
+  `n_gpu` and `completions_per_step`), and how long were the replies with thinking off
+  (`mean_completion_length`)? Not measured yet.
 
 ## 6. The 12-hour limit
 

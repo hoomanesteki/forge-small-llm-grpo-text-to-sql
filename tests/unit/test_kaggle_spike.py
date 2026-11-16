@@ -26,6 +26,7 @@ import yaml
 from forge.data import prompts as forge_prompts
 from forge.ops.kaggle import METADATA_FILE, check_kernel_metadata
 from tests.spike import THROUGHPUT, throughput
+from tests.tiny_hf import CHATML, QWEN3, byte_tokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCH = ["grpo-bench", "--out", "o", "--work-dir", "w", "--model", "m"]
@@ -160,6 +161,10 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     assert bench.needs == ("install:trl", f"download:{large}")
     assert bench.removes == str(venv)
     assert by_name[f"grpo:trl:{small}"].removes is None
+    # Each bench sees one GPU of a T4 x2 session, and the env stage both.
+    for name in (f"grpo:trl:{large}", f"grpo:unsloth:{small}", f"vllm:{small}"):
+        assert by_name[name].env == (("CUDA_VISIBLE_DEVICES", "0"),), name
+    assert by_name["env"].env == by_name["install:trl"].env == ()
     assert by_name["install:trl"].python == "/usr/bin/python3"
     # Each bench's arguments parse as its child command, with the run's settings.
     child = spike.parse_args([*bench.argv, "--out", "x.json"])
@@ -232,6 +237,9 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
     for stage in report["stages"]:
         assert set(stage) >= {"name", "status", "started_at", "seconds", "result", "error"}
     assert report["stages"][0]["result"] == {"stage": "env"}
+    envs = {s["name"]: s["env"] for s in report["stages"]}
+    assert envs["env"] == {}
+    assert envs["grpo:unsloth:m/small"] == {"CUDA_VISIBLE_DEVICES": "0"}
     # Each stack's venv is gone once its last bench is over.
     assert not (venvs / "unsloth").exists()
 
@@ -293,6 +301,35 @@ def test_run_child_returns_the_stage_result(fakes: Path, tmp_path: Path) -> None
     outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0)
     assert outcome.status == "ok", outcome.error
     assert outcome.result["labels"] == {"HF_TOKEN": {"readable": True}}
+
+
+@pytest.mark.phase(3)
+def test_run_child_gives_the_stage_its_environment(
+    fakes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The stand-in for kaggle_secrets records the environment the child sees.
+    seen = tmp_path / "seen.json"
+    names = ("CUDA_VISIBLE_DEVICES", "TOKENIZERS_PARALLELISM")
+    (fakes / "kaggle_secrets.py").write_text(
+        textwrap.dedent(
+            f"""\
+            import json, os
+            with open({str(seen)!r}, "w") as out:
+                json.dump({{name: os.environ.get(name) for name in {names!r}}}, out)
+            class UserSecretsClient:
+                def get_secret(self, label):
+                    return "x"
+            """
+        )
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")  # a T4 x2 session's two GPUs
+    stage = spike.Stage("secrets", sys.executable, ("secrets",), env=spike.ONE_GPU)
+    outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0)
+    assert outcome.status == "ok", outcome.error
+    assert json.loads(seen.read_text()) == {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "TOKENIZERS_PARALLELISM": "false",
+    }
 
 
 FAKE_VLLM = textwrap.dedent(
@@ -519,6 +556,23 @@ def test_prompts_follow_forges_format() -> None:
     assert len({p[1]["content"] for p in prompts}) == 100  # no question repeats
     assert spike.spike_prompts(100) == prompts
     assert [m["role"] for m in prompts[0]] == ["system", "user"]
+
+
+@pytest.mark.phase(3)
+def test_grpo_prompts_are_rendered_with_thinking_off() -> None:
+    # Every stack trains on the same text: TRL 0.22, Unsloth's, has no
+    # chat_template_kwargs, so it can't be left to the trainer.
+    chats = spike.spike_prompts(3)
+    prompts = spike.render_prompts(byte_tokenizer(QWEN3), chats)
+    assert len(prompts) == 3
+    for prompt, chat in zip(prompts, chats, strict=True):
+        assert prompt.startswith("<|im_start|>system\n" + spike.SYSTEM_PROMPT)
+        assert chat[1]["content"] in prompt
+        assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    # A template that ignores the switch fails the stage instead of benching with
+    # thinking on.
+    with pytest.raises(RuntimeError, match="ignores enable_thinking"):
+        spike.render_prompts(byte_tokenizer(CHATML), chats)
 
 
 def _requirement_lines(path: Path) -> list[str]:
