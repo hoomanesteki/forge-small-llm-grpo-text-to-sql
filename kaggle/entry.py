@@ -21,8 +21,9 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
 - secrets: ``HF_TOKEN`` and ``WANDB_API_KEY`` from Kaggle Secrets (or Colab's) when they
   are attached, without the line breaks and outer spaces huggingface_hub drops. No value
   is ever printed or written: every stage result in status.json, the error, the
-  traceback and a failed run's ``error.txt`` go through ``_redact``. The job goes on
-  without them.
+  traceback, a failed run's ``error.txt`` and every log record, such as the run store's
+  warning on a Hub error it tries again, go through ``_redact``. The job goes on without
+  them.
 - preflight: the job on ``PREFLIGHT_EXAMPLES`` examples through the same path, in a run
   of its own under ``preflight/``, so a broken job fails in minutes. The job then runs on
   the model the preflight loaded: a vLLM engine holds most of the GPU's memory while it
@@ -62,6 +63,7 @@ import argparse
 import importlib
 import importlib.metadata
 import json
+import logging
 import os
 import platform
 import shutil
@@ -443,6 +445,9 @@ def main(
     # Outside any checkout, so a manifest's commit is FORGE_CODE_SHA's: the wheel's own.
     kernel.work.mkdir(parents=True, exist_ok=True)
     os.chdir(kernel.work)
+    # Before any stage, so no log record a stage makes escapes it; the secrets stage adds
+    # what it redacts.
+    record_factory = _redact_logs(kernel.secrets)
     previous = signal.signal(signal.SIGTERM, _stop)
     try:
         for name in STAGES:
@@ -458,6 +463,7 @@ def main(
         status["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         signal.signal(signal.SIGTERM, previous)
+        logging.setLogRecordFactory(record_factory)
         _close_manifest(kernel.run_dir)
         # A failed run keeps its traceback beside its manifest, the job's or the preflight's.
         for error in kernel.work.glob(f"*/*/{ERROR_FILE}"):
@@ -550,6 +556,37 @@ def _redact(text: str, secrets: Iterable[str]) -> str:
     for secret in secrets:
         text = text.replace(secret, "***")
     return text
+
+
+def _redact_logs(secrets: Sequence[str]) -> Callable[..., logging.LogRecord]:
+    """Have every log record made from now on carry no secret in ``secrets``, whichever
+    logger makes it and whichever handler prints it, Python's last resort on stderr
+    included; returns the record factory it replaces, for ``main`` to put back.
+
+    The factory every logger makes its records with formats each one, redacts its text and
+    keeps its traceback only as redacted text, so no handler formats the raw arguments.
+    """
+    make = logging.getLogRecordFactory()
+    formatter = logging.Formatter()
+
+    def redacted(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = make(*args, **kwargs)
+        try:
+            text = record.getMessage()
+        # A record whose arguments don't fit its format, which a handler would report
+        # with the arguments, any secret among them; the format alone is kept.
+        except Exception as exc:
+            text = f"{record.msg} (not formatted: {type(exc).__name__})"
+        record.msg, record.args = _redact(text, secrets), None
+        if record.exc_info:
+            record.exc_text = _redact(formatter.formatException(record.exc_info), secrets)
+            record.exc_info = None
+        if record.stack_info:
+            record.stack_info = _redact(record.stack_info, secrets)
+        return record
+
+    logging.setLogRecordFactory(redacted)
+    return make
 
 
 def _redact_file(path: Path, secrets: Sequence[str]) -> None:
