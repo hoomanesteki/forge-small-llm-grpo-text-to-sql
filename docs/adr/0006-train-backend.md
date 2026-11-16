@@ -68,10 +68,11 @@ ValidationError: 1 validation error for ModelConfig
   against 32.9 s for 4B, with about 130 s of load), but on trl 0.22.2 and transformers
   4.57.6, which this record's condition, an Unsloth release on TRL 1.16 or later, still
   rules out.
-- Training jobs install the measured `trl` stack, and evaluation jobs keep the vLLM stack,
-  `kaggle/requirements-gpu.txt` (the spike's `trl-vllm` list, whose vLLM 0.33.0 generated
-  in fp16 on the T4). FG-398 makes the kernel install the list its job needs; until it
-  lands, `kaggle/requirements-gpu.txt` is the eval stack and every kernel installs it.
+- Training jobs install the measured `trl` stack, `kaggle/requirements-train-gpu.txt`,
+  and evaluation jobs keep the vLLM stack, `kaggle/requirements-gpu.txt` (the spike's
+  `trl-vllm` list, whose vLLM 0.33.0 generated in fp16 on the T4). Since FG-398 the
+  kernel installs the list its job needs, and no training job gets vLLM; unit tests keep
+  each file the same as its spike stack.
 - One GPU a job: a session has two T4s, and every bench used one.
 - On the CPU (CI and the laptop) the same TRL backend trains in fp32 with `use_cpu=True`
   and a tiny model.
@@ -86,8 +87,8 @@ ValidationError: 1 validation error for ModelConfig
   nothing about hundreds of steps on a real one. Unsloth patches some of those cases;
   plain TRL does not, so GRPO jobs watch for NaN and infinite losses.
 - The CPU smoke and the T4 job share one backend, one TRL version and one set of configs.
-- Training and evaluation need two package lists, which FG-398 ships side by side in the
-  code dataset.
+- Training and evaluation need two package lists, which the code dataset holds side by
+  side (FG-398).
 - Plan sections 3.12 and 3.13 still name Unsloth for GPU training; they change to match
   this record at Gate 3.
 

@@ -14,7 +14,9 @@ Every Forge kernel is a private Python script. The template in
 the GPU and the machine shape.
 
 A GPU job mounts two private datasets: ``<owner>/forge-code``, the wheel built at one
-commit with ``requirements-gpu.txt`` and ``GIT_SHA``, and ``<owner>/forge-spider``, the
+commit with ``GIT_SHA`` and both GPU package lists, ``requirements-gpu.txt`` for
+evaluation jobs and ``requirements-train-gpu.txt`` for training jobs (ADR-0006), and
+``<owner>/forge-spider``, the
 Spider files ``spider.sha256`` lists, with that file. ``KaggleClient`` runs the kaggle CLI
 as an argument list, never through a shell, and reads what it prints as well as its exit
 code: ``datasets create`` and ``version`` report a refused upload and still exit 0, and so
@@ -287,8 +289,11 @@ OWNER_ENV = "FORGE_KAGGLE_USER"
 DATASET_METADATA_FILE = "dataset-metadata.json"
 GIT_SHA_FILE = "GIT_SHA"
 CHECKSUM_FILE = "spider.sha256"
-# Relative to the repo root; git ignores build/.
+# Relative to the repo root; git ignores build/. The GPU packages an evaluation job
+# installs, vLLM's stack, and those a training job installs, the trl stack without vLLM.
 REQUIREMENTS = Path("kaggle") / "requirements-gpu.txt"
+TRAIN_REQUIREMENTS = Path("kaggle") / "requirements-train-gpu.txt"
+REQUIREMENTS_FILES = (REQUIREMENTS, TRAIN_REQUIREMENTS)
 CODE_BUNDLE = Path("build") / "kaggle-code"
 DATA_BUNDLE = Path("build") / "kaggle-data"
 # kagglesdk's DatabundleVersionStatus names, lowercased as `kaggle datasets status` prints
@@ -610,7 +615,7 @@ class Published:
 
 
 def build_code_bundle(root: Path, owner: str, *, run: Runner = run_command) -> CodeBundle:
-    """Write ``build/kaggle-code``: the wheel built at HEAD, the pinned GPU requirements,
+    """Write ``build/kaggle-code``: the wheel built at HEAD, both pinned GPU package lists,
     ``GIT_SHA`` and the dataset metadata, and nothing else.
 
     A tree with uncommitted changes is refused before anything is built: the wheel would
@@ -623,9 +628,10 @@ def build_code_bundle(root: Path, owner: str, *, run: Runner = run_command) -> C
             "the working tree has uncommitted changes; commit them first, so the code "
             "dataset holds a commit CI can test"
         ) from exc
-    unpinned = unpinned_requirements((root / REQUIREMENTS).read_text(encoding="utf-8"))
-    if unpinned:
-        raise ValueError(f"{REQUIREMENTS} must pin each package with ==, not {unpinned}")
+    for requirements in REQUIREMENTS_FILES:
+        unpinned = unpinned_requirements((root / requirements).read_text(encoding="utf-8"))
+        if unpinned:
+            raise ValueError(f"{requirements} must pin each package with ==, not {unpinned}")
     out = _fresh_dir(root / CODE_BUNDLE)
     _check(
         run, ["uv", "build", str(root), "--wheel", "--out-dir", str(out), "--no-create-gitignore"]
@@ -633,7 +639,8 @@ def build_code_bundle(root: Path, owner: str, *, run: Runner = run_command) -> C
     built = sorted(path.name for path in out.iterdir())
     if len(built) != 1 or not built[0].endswith(".whl"):
         raise KaggleError(f"uv build should leave one wheel in {out}, but left {built}")
-    shutil.copyfile(root / REQUIREMENTS, out / REQUIREMENTS.name)
+    for requirements in REQUIREMENTS_FILES:
+        shutil.copyfile(root / requirements, out / requirements.name)
     (out / GIT_SHA_FILE).write_text(f"{sha}\n", encoding="utf-8")
     _write_json(out / DATASET_METADATA_FILE, dataset_metadata(f"{owner}/{CODE_SLUG}", "MIT"))
     return CodeBundle(out, built[0], sha)

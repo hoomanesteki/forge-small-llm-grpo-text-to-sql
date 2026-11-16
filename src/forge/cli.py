@@ -830,11 +830,12 @@ def _kaggle_owner() -> str:
 def kaggle_publish_code() -> None:
     """Publish the wheel built at HEAD as the private dataset <owner>/forge-code.
 
-    build/kaggle-code gets the wheel, kaggle/requirements-gpu.txt and GIT_SHA, and goes up
+    build/kaggle-code gets the wheel, kaggle/requirements-gpu.txt (evaluation jobs' GPU
+    packages), kaggle/requirements-train-gpu.txt (training jobs') and GIT_SHA, and goes up
     as a new version noted with the SHA, or as the first one. The owner is
     FORGE_KAGGLE_USER, else the Kaggle credentials' username. A dirty tree is refused.
     """
-    from forge.ops.kaggle import KaggleClient, KaggleError, publish_code
+    from forge.ops.kaggle import REQUIREMENTS_FILES, KaggleClient, KaggleError, publish_code
     from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound, repo_root
 
@@ -852,7 +853,8 @@ def kaggle_publish_code() -> None:
     ) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"bundle {bundle.path}: {bundle.wheel}, requirements-gpu.txt, GIT_SHA")
+    lists = ", ".join(path.name for path in REQUIREMENTS_FILES)
+    typer.echo(f"bundle {bundle.path}: {bundle.wheel}, {lists}, GIT_SHA")
     action = "created" if published.created else "uploaded a new version of"
     typer.echo(f"{action} {published.ref} at {bundle.git_sha}")
     typer.echo(published.output)

@@ -188,6 +188,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
     for rel in (
         "kaggle/requirements-gpu.txt",
+        "kaggle/requirements-train-gpu.txt",
         "kaggle/kernel-metadata.template.json",
         "kaggle/entry.py",
         "kaggle/spike/throughput.py",

@@ -46,22 +46,26 @@ A GPU job runs the code and reads the data from two private Kaggle datasets, bot
    again later; and when the last version failed or was deleted, it uploads the files again
    as a new version.
 2. `uv run forge kaggle publish-code`, on a clean tree, for each commit a job runs. It builds
-   the wheel into `build/kaggle-code/` with `kaggle/requirements-gpu.txt` and `GIT_SHA`, then
-   uploads it as a new version of `<owner>/forge-code` noted with the SHA, creating the
-   dataset the first time.
+   the wheel into `build/kaggle-code/` with both GPU package lists,
+   `kaggle/requirements-gpu.txt` and `kaggle/requirements-train-gpu.txt` (see GPU stack), and
+   `GIT_SHA`, then uploads it as a new version of `<owner>/forge-code` noted with the SHA,
+   creating the dataset the first time.
 
 Both datasets are private: Forge never passes `-u`, and each `dataset-metadata.json` says
 `"isPrivate": true`, so `kaggle datasets metadata --update` keeps them private too.
 
 ## GPU stack
 
-A kernel installs `kaggle/requirements-gpu.txt` over Kaggle's image, after the wheel. vLLM
-decides most of it (FG-306). FG-301 ran it on a T4: vLLM 0.33.0 generated in fp16 on these
-versions, and only GRPO through it failed, at vLLM's load of the 4-bit policy, since vLLM
-0.33.0 has no bitsandbytes. So it is the evaluation stack; training jobs get the spike's
-`trl` stack (ADR-0006) once FG-398 lands, and until then every job installs this list. pip
-took 392 s over the image in the 50-question eval job, where uv takes 96 s for the same
-list into an empty venv (`docs/spikes/kaggle-gpu.md`, question 3).
+A kernel installs one of two package lists over Kaggle's image, after the wheel, chosen by
+its job (ADR-0006): an eval job `kaggle/requirements-gpu.txt`, vLLM's stack, and a training
+job (`--job sft` or `grpo`) `kaggle/requirements-train-gpu.txt`, the `trl` stack, which has
+no vLLM. The install stage's result in `status.json` names the file it installed.
+
+The eval list is vLLM's: vLLM decides most of it (FG-306). FG-301 ran it on a T4: vLLM
+0.33.0 generated in fp16 on these versions, and only GRPO through it failed, at vLLM's load
+of the 4-bit policy, since vLLM 0.33.0 has no bitsandbytes. pip took 392 s over the image in
+the 50-question eval job, where uv takes 96 s for the same list into an empty venv
+(`docs/spikes/kaggle-gpu.md`, question 3).
 
 | Package | Version | Why this one |
 |---|---|---|
@@ -77,6 +81,13 @@ transformers calls Forge makes in a kernel (`apply_chat_template` and `get_chat_
 for prompts, the trainer callback classes for the time guard) were checked against the
 5.20.2 source and do the same for Forge's arguments. A test keeps the file the same as the
 spike's `trl-vllm` stack.
+
+The training list is the spike's `trl` stack, on which FG-301 ran GRPO in 4-bit with fp16
+for Qwen3 1.7B and 4B (question 5): uv.lock's trl 1.18.0, transformers 5.23.0, peft 0.21.3,
+accelerate 1.15.0, datasets 5.2.0 and huggingface-hub 2.4.0, the versions CI tests, and
+bitsandbytes 0.50.2. It pins no torch, so training runs on the image's torch
+2.11.0+cu130, as the spike's did, and no vLLM. pip installed it in 20.0 s into a venv over
+the image's packages (`install:trl`). A test keeps the file the same as that stack.
 
 ## Kaggle jobs
 
@@ -149,8 +160,9 @@ once. Rows already committed keep the dates they were written with.
 In the kernel, `entry.py` runs its stages in order: restore (on a resume, the run's files
 from the last attempt's output, first, so that an attempt failing at any later stage still
 carries the run to the next resume), env (the interpreter, for the log), code (the code
-dataset's `GIT_SHA` must be the pushed commit), install (`pip install --no-deps` the wheel,
-then `requirements-gpu.txt`; it names any package the wheel needs that the image lacks),
+dataset's `GIT_SHA` must be the pushed commit, and it must hold the wheel and both package
+lists), install (`pip install --no-deps` the wheel, then the job's package list, see GPU
+stack; it names any package the wheel needs that the image lacks),
 data (the dataset found by its `spider.sha256`, `database.zip` unpacked if Kaggle left it
 packed, every file checked against the list the installed wheel pins, not the dataset's own
 copy), secrets, preflight (the same job on 5 examples, in `preflight/`), job, and upload

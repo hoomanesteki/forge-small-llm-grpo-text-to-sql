@@ -27,7 +27,7 @@ from forge.core.types import RunManifest
 from forge.data.spider import raw_files
 from forge.eval import run_files
 from forge.eval.config import HOSTS
-from forge.ops import kaggle, manifest, sessions
+from forge.ops import kaggle, kaggle_job, manifest, sessions
 from forge.ops.hub import manifest_bytes
 from tests.fakes import FakeHub
 from tests.kernel import (
@@ -112,7 +112,10 @@ def test_names_match_forges() -> None:
     # The script can't import these before the wheel is in, so it keeps copies.
     assert script.GIT_SHA_FILE == kaggle.GIT_SHA_FILE
     assert script.CHECKSUM_FILE == kaggle.CHECKSUM_FILE
-    assert kaggle.REQUIREMENTS.name == script.REQUIREMENTS_FILE
+    assert (kaggle.REQUIREMENTS.name, kaggle.TRAIN_REQUIREMENTS.name) == (
+        script.EVAL_REQUIREMENTS,
+        script.TRAIN_REQUIREMENTS,
+    )
     assert script.CODE_SHA_ENV == manifest.CODE_SHA_ENV
     assert script.MANIFEST_FILE == run_files.MANIFEST_FILE
     assert script.SESSIONS_FILE == sessions.SESSIONS_FILE
@@ -140,6 +143,7 @@ def test_a_finished_job_runs_every_stage_in_order(
         [*script.PIP, "--no-deps", str(code / WHEEL)],
         [*script.PIP, "-r", str(code / "requirements-gpu.txt")],
     ]
+    assert status["stages"]["install"]["result"]["requirements"] == "requirements-gpu.txt"
     # The preflight runs first, through the same job, and the job sees the kernel's paths.
     assert job.calls == [True, False]
     assert job.env["FORGE_CODE_SHA"] == SHA
@@ -225,6 +229,51 @@ def test_install_names_what_the_image_lacks(
     assert (status["status"], status["stage"]) == ("failed", "install")
     assert "sqlglot>=25.0 is not installed" in status["error"]
     assert "Pin each in kaggle/requirements-gpu.txt" in status["error"]
+
+
+@pytest.mark.phase(3)
+def test_training_jobs_install_the_trl_stack_and_never_vllm(
+    kernel_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every job forge kaggle run pushes this script for has its GPU stack, and only an
+    # evaluation job's has vLLM: FG-301 ran GRPO on the trl stack, and vLLM 0.33.0 failed
+    # to load its 4-bit policy (ADR-0006).
+    entry_jobs = set(kaggle_job.JOBS) - {"spike"}
+    assert set(script.REQUIREMENTS_FILES) == entry_jobs >= set(script.JOBS)
+    assert script.REQUIREMENTS_FILES == {
+        "eval": "requirements-gpu.txt",
+        "sft": "requirements-train-gpu.txt",
+        "grpo": "requirements-train-gpu.txt",
+    }
+    code = kernel_root / "input" / "forge-code"
+    pip: list[list[str]] = []
+    for job in ("sft", "grpo"):
+        # The trainers come with FG-403 and FG-504; the stages before the job are here.
+        monkeypatch.setitem(script.JOBS, job, Job())
+        pip.clear()
+        shutil.rmtree(kernel_root / "working", ignore_errors=True)
+
+        script.main(argv(kernel_root, "--job", job), run=lambda c: pip.append(list(c)))
+
+        status = status_of(kernel_root)
+        assert (status["status"], status["job"]) == ("finished", job), status["error"]
+        assert pip == [
+            [*script.PIP, "--no-deps", str(code / WHEEL)],
+            [*script.PIP, "-r", str(code / "requirements-train-gpu.txt")],
+        ]
+        assert status["stages"]["install"]["result"]["requirements"] == (
+            "requirements-train-gpu.txt"
+        )
+
+    # A code dataset without both lists wasn't made by forge kaggle publish-code.
+    (code / "requirements-train-gpu.txt").unlink()
+    pip.clear()
+    shutil.rmtree(kernel_root / "working")
+    script.main(argv(kernel_root), run=lambda c: pip.append(list(c)))
+    status = status_of(kernel_root)
+    assert (status["status"], status["stage"]) == ("failed", "code")
+    assert status["error"] == f"JobError: {code} has no requirements-train-gpu.txt"
+    assert pip == []
 
 
 @pytest.mark.phase(3)

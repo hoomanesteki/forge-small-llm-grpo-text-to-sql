@@ -62,7 +62,9 @@ def build_inputs(root: Path, data_dir: Path, *, sha: str = SHA, zipped: bool = F
     code.mkdir(parents=True)
     (code / "GIT_SHA").write_text(f"{sha}\n", encoding="utf-8")
     (code / WHEEL).write_bytes(b"PK\x03\x04 a wheel")
-    (code / "requirements-gpu.txt").write_text("trl==1.18.0\n", encoding="utf-8")
+    # What each stack pins does not matter here: pip is stood in for.
+    (code / "requirements-gpu.txt").write_text("vllm==0.33.0\n", encoding="utf-8")
+    (code / "requirements-train-gpu.txt").write_text("trl==1.18.0\n", encoding="utf-8")
     data = Path(shutil.copytree(data_dir, root / "input" / "forge-spider"))
     write_checksums(data)
     (root / PINNED).parent.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,6 @@
 # GPU packages for Forge's evaluation jobs on Kaggle's T4 image, installed over the image's
-# own (ADR-0002, ADR-0006). Until FG-398 gives training jobs the spike's "trl" stack, every
-# kernel job installs this list.
+# own (ADR-0002, ADR-0006). Training jobs install requirements-train-gpu.txt, the spike's
+# "trl" stack, instead, so no training job gets vLLM.
 #
 # vLLM sets the stack (FG-306). vllm 0.33.0 pins torch 2.14.0, whose wheel is built for
 # CUDA 13.0 like the image's (v173 has torch 2.11.0+cu130), and needs transformers

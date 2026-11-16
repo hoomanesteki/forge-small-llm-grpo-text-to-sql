@@ -36,6 +36,8 @@ from forge.ops.manifest import DirtyTreeError
 ROOT = Path(__file__).resolve().parents[2]
 OWNER = "forge-owner"
 WHEEL = "forge-0.1.0-py3-none-any.whl"
+# The GPU package lists the code dataset carries: evaluation's, then training's.
+LISTS = ("requirements-gpu.txt", "requirements-train-gpu.txt")
 # What kaggle 2.2.5 prints for `datasets status` on a dataset that doesn't exist.
 NOT_FOUND = (
     "404 Client Error: Not Found for url: "
@@ -93,12 +95,11 @@ def _git(repo: Path, *args: str) -> str:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    """A committed checkout with the real GPU requirements, ignoring build/ as Forge does."""
+    """A committed checkout with the real GPU package lists, ignoring build/ as Forge does."""
     root = tmp_path / "repo"
     (root / "kaggle").mkdir(parents=True)
-    shutil.copyfile(
-        ROOT / "kaggle" / "requirements-gpu.txt", root / "kaggle" / "requirements-gpu.txt"
-    )
+    for name in LISTS:
+        shutil.copyfile(ROOT / "kaggle" / name, root / "kaggle" / name)
     (root / ".gitignore").write_text("build/\n", encoding="utf-8")
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "test@example.com")
@@ -134,16 +135,15 @@ def test_code_bundle_contains_wheel_and_sha(repo: Path) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     assert bundle.path == repo / CODE_BUNDLE
     assert (bundle.wheel, bundle.git_sha) == (WHEEL, head)
-    assert sorted(p.name for p in bundle.path.iterdir()) == [
-        "GIT_SHA",
-        "dataset-metadata.json",
-        WHEEL,
-        "requirements-gpu.txt",
-    ]
+    assert sorted(p.name for p in bundle.path.iterdir()) == sorted(
+        ["GIT_SHA", "dataset-metadata.json", WHEEL, *LISTS]
+    )
     assert (bundle.path / "GIT_SHA").read_text(encoding="utf-8") == f"{head}\n"
-    requirements = (ROOT / "kaggle" / "requirements-gpu.txt").read_bytes()
-    assert (bundle.path / "requirements-gpu.txt").read_bytes() == requirements
-    assert unpinned_requirements(requirements.decode()) == []
+    # Both GPU stacks go up beside each other: evaluation's and training's (ADR-0006).
+    for name in LISTS:
+        requirements = (ROOT / "kaggle" / name).read_bytes()
+        assert (bundle.path / name).read_bytes() == requirements
+        assert unpinned_requirements(requirements.decode()) == []
     meta = json.loads((bundle.path / "dataset-metadata.json").read_text(encoding="utf-8"))
     assert meta == {
         "id": "forge-owner/forge-code",
@@ -185,6 +185,12 @@ def test_code_bundle_refuses_unpinned_requirements(repo: Path) -> None:
     _git(repo, "commit", "-q", "-am", "loosen")
     fake = FakeCli()
     with pytest.raises(ValueError, match=r"must pin each package with ==, not \['vllm>=0.33'"):
+        build_code_bundle(repo, OWNER, run=fake)
+    # The training stack's list is held to the same rule.
+    _git(repo, "checkout", "-q", "HEAD~1", "--", "kaggle/requirements-gpu.txt")
+    (repo / "kaggle" / "requirements-train-gpu.txt").write_text("peft\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "loosen training")
+    with pytest.raises(ValueError, match=r"requirements-train-gpu.txt must pin .*\['peft'\]"):
         build_code_bundle(repo, OWNER, run=fake)
     assert fake.commands == []
 
@@ -243,7 +249,7 @@ def test_publish_commands(repo: Path, spider_mini: Path, checksums: Path) -> Non
     assert (
         fake.uploaded[0]
         == fake.uploaded[2]
-        == sorted(["GIT_SHA", "dataset-metadata.json", WHEEL, "requirements-gpu.txt"])
+        == sorted(["GIT_SHA", "dataset-metadata.json", WHEEL, *LISTS])
     )
     assert "spider.sha256" in fake.uploaded[1]
 
@@ -469,7 +475,7 @@ def test_publish_code_cli(repo: Path, cli_env: Path, monkeypatch: pytest.MonkeyP
     assert result.exit_code == 0, result.output
     sha = _git(repo, "rev-parse", "HEAD")
     assert result.stdout.splitlines() == [
-        f"bundle {repo / CODE_BUNDLE}: {WHEEL}, requirements-gpu.txt, GIT_SHA",
+        f"bundle {repo / CODE_BUNDLE}: {WHEEL}, {', '.join(LISTS)}, GIT_SHA",
         f"uploaded a new version of forge-owner/forge-code at {sha}",
         CREATED.strip(),
     ]
