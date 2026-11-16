@@ -232,6 +232,20 @@ def strip_leading(sql: str) -> str:
     return ""
 
 
+def comments(sql: str) -> list[str]:
+    """The text of each comment in ``sql``, without its ``--`` or its ``/*`` and ``*/``.
+
+    Comments are found as SQLite's tokenizer finds them: never inside quotes, and a block
+    comment left open runs to the end of the input.
+    """
+    found: list[str] = []
+    for match in _LEXEME.finditer(sql):
+        if match.lastgroup == "comment":
+            text = match.group()
+            found.append(text[2:] if text.startswith("--") else text[2:].removesuffix("*/"))
+    return found
+
+
 def statement_keyword(sql: str) -> str | None:
     """The upper-case keyword that says what the first statement in ``sql`` does.
 

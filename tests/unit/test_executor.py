@@ -12,6 +12,7 @@ import pytest
 from forge.sql.executor import (
     SqliteExecutor,
     classify_error,
+    comments,
     statement_count,
     statement_keyword,
     strip_leading,
@@ -230,6 +231,29 @@ def test_strip_leading() -> None:
     }
     for sql, stripped in cases.items():
         assert strip_leading(sql) == stripped, sql
+
+
+@pytest.mark.phase(5)
+def test_comments() -> None:
+    cases: dict[str, list[str]] = {
+        "SELECT 1": [],
+        "SELECT 1 -- note": [" note"],
+        "-- only a comment\n": [" only a comment"],
+        "SELECT /* a */ 1 /* b */;": [" a ", " b "],
+        "SELECT 1 --a\n--b": ["a", "b"],
+        "SELECT 1; -- after": [" after"],
+        "/**/": [""],
+        # Left open, a block comment runs to the end, as SQLite reads it.
+        "SELECT 1 /* never closed": [" never closed"],
+        "/*/": ["/"],
+        "SELECT '-- no', \"/* nor */\", [-- this], `/* or */`": [],
+        "SELECT 4/2 - -1": [],
+    }
+    for sql, found in cases.items():
+        assert comments(sql) == found, sql
+    # SQLite agrees that the open comment is one: the query runs.
+    with closing(sqlite3.connect(":memory:")) as conn:
+        assert conn.execute("SELECT 1 /* never closed").fetchall() == [(1,)]
 
 
 @pytest.mark.phase(1)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from forge.sql.extract import extract_sql
+from forge.sql.extract import drop_thinking, extract_sql
 
 
 @pytest.mark.phase(1)
@@ -110,6 +110,14 @@ def test_think_block_is_ignored() -> None:
         "<think>\nSELECT another_draft FROM t\n</think>"
     )
     assert extract_sql(reply) == "SELECT name FROM singer"
+
+
+@pytest.mark.phase(5)
+def test_drop_thinking_keeps_the_rest_of_the_reply() -> None:
+    reply = "<think>\nplan\n</think>\n```sql\nSELECT 1\n```\n<think>a</think>done"
+    assert drop_thinking(reply) == "\n```sql\nSELECT 1\n```\ndone"
+    # An unclosed block is not a think block; extract_sql's rules read the text as it is.
+    assert drop_thinking("<think>\nSELECT 1") == "<think>\nSELECT 1"
 
 
 @pytest.mark.phase(1)

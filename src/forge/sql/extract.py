@@ -29,9 +29,14 @@ _SQL_BLOCK = re.compile(r"```sql\b(.*?)```", re.DOTALL | re.IGNORECASE)
 _QUERY_LINE = re.compile(r"\s*(?:select|with)\b", re.IGNORECASE)
 
 
+def drop_thinking(text: str) -> str:
+    """``text`` without its ``<think>...</think>`` blocks (rule 1)."""
+    return _THINK_BLOCK.sub("", text)
+
+
 def extract_sql(text: str) -> str | None:
     """The reply's SQL query, or ``None`` when it has none."""
-    text = _THINK_BLOCK.sub("", text)
+    text = drop_thinking(text)
     blocks = _SQL_BLOCK.findall(text)
     if blocks:
         return _clean(blocks[-1])
