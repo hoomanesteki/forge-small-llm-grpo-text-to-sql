@@ -20,7 +20,8 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
   of its own under ``preflight/``, so a broken job fails in minutes.
 - job: the job itself, its files in ``<work>/runs/<run_id>/``. On a resume, the earlier
   attempt's files come from its kernel's output, mounted under the input folder.
-- upload: that folder to the Hub run store, only when there is an ``HF_TOKEN``.
+- upload: that folder to the Hub run store (``forge.ops.hub``, which tries again on
+  network errors), only when there is an ``HF_TOKEN``.
 
 Whatever happens, a ``finally`` marks a manifest still ``running`` as failed and writes
 ``runs/<run_id>/status.json``: the stage reached, how the job ended (finished, failed or
@@ -305,17 +306,11 @@ def upload_stage(kernel: Kernel) -> str:
     token = os.environ.get("HF_TOKEN")
     if not token:
         return "skipped: no HF_TOKEN, so the kernel output is the only copy"
-    from huggingface_hub import HfApi
+    from forge.ops.hub import HubRunStore
 
     repo = kernel.args.run_store
     try:
-        HfApi(token=token).upload_folder(
-            repo_id=repo,
-            repo_type="model",
-            folder_path=kernel.run_dir,
-            path_in_repo=f"runs/{kernel.args.run_id}",
-            commit_message=f"Add run {kernel.args.run_id}",
-        )
+        HubRunStore(repo, token=token).put_folder(kernel.args.run_id, kernel.run_dir)
     # The run is complete in the kernel output whatever the Hub says, so a failed upload
     # is recorded rather than turned into a failed job.
     except Exception as exc:

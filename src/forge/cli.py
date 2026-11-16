@@ -389,7 +389,13 @@ def eval_run(
         str | None,
         typer.Option("--run-id", help="Name the run, or resume the run of that name."),
     ] = None,
-    store: Annotated[StoreName, typer.Option(help="Where the run's files go.")] = "local",
+    store: Annotated[
+        StoreName,
+        typer.Option(
+            help="local keeps the run's files in runs/ only; hub also puts them in the Hub run "
+            "store (FORGE_RUN_STORE) when the run ends, and resumes a run from it."
+        ),
+    ] = "local",
     # Left out of the manifest: how many processes run the SQL changes no score.
     workers: Annotated[
         int | None,
@@ -410,7 +416,9 @@ def eval_run(
     runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml and
     eval/<split>-generations.jsonl and -scores.jsonl. With --retry 1,
     eval/<split>-first-tries.jsonl keeps the first reply of each retried sample, and the
-    generations file holds the reply each score is for. Exits 1 if the run fails.
+    generations file holds the reply each score is for. With --store hub the folder also
+    goes to the Hub run store when the run ends, finished or failed, and a --run-id that
+    runs/ lacks is fetched from it to resume. Exits 1 if the run fails.
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
@@ -476,6 +484,8 @@ def eval_run(
         f"backend {backend}, model {model}" + (f", adapter {adapter}" if adapter else "")
     )
     typer.echo(f"platform {run.manifest.platform}")
+    if run.stored:
+        typer.echo(f"run store {run.stored}: runs/{run.manifest.run_id}")
     if run.resumed:
         typer.echo(f"resumed: {run.resumed} scores were stored by an earlier attempt")
     if len(scores) > run.resumed:
@@ -1084,6 +1094,118 @@ def kaggle_output(run_id: RunIdArgument) -> None:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"run {run_id}: {run_dir}; the kernel's log and the rest in {run_dir / 'kernel'}")
+
+
+runs_app = typer.Typer(
+    help="The run store: runs' files off the machine that made them, mirrored into runs/.",
+    no_args_is_help=True,
+)
+app.add_typer(runs_app, name="runs")
+RunStoreName = Literal["local", "hub"]
+PullSource = Literal["hub", "kaggle"]
+StoreOption = Annotated[
+    RunStoreName,
+    typer.Option(
+        "--store",
+        help="hub, the Hub run store FORGE_RUN_STORE names, or local, runs/ (FORGE_RUNS_DIR).",
+    ),
+]
+RunArgument = Annotated[str, typer.Argument(help="The run's id, such as forge runs list prints.")]
+
+
+def _runs_errors() -> tuple[type[Exception], ...]:
+    """What a run store command can raise: OSError for a missing run or file and for the
+    Hub's errors (StoreUnavailable once its retries are spent), ValueError for a bad run
+    id or a corrupt manifest."""
+    from forge.ops.paths import RepoRootNotFound
+
+    return (OSError, RepoRootNotFound, ValueError)
+
+
+@runs_app.command("list")
+def runs_list(store: StoreOption = "hub") -> None:
+    """Print the id of each run the store holds, oldest first: ids start with their date."""
+    from forge.ops.hub import open_store
+
+    try:
+        where = open_store(store)
+        ids = where.runs()
+    except _runs_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    for run_id in ids:
+        typer.echo(run_id)
+    typer.echo(f"{len(ids)} run{'' if len(ids) == 1 else 's'} in {where}", err=True)
+
+
+@runs_app.command("show")
+def runs_show(run_id: RunArgument, store: StoreOption = "hub") -> None:
+    """Print the run's manifest, what made it and how it ended, and its latest checkpoint."""
+    from forge.ops.hub import describe, open_store
+
+    try:
+        where = open_store(store)
+        lines = describe(where.get_manifest(run_id), where.latest_checkpoint(run_id))
+    except _runs_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    for line in lines:
+        typer.echo(line)
+
+
+@runs_app.command("pull")
+def runs_pull(
+    run_id: RunArgument,
+    store: Annotated[
+        PullSource,
+        typer.Option(
+            "--store",
+            help="hub, the Hub run store FORGE_RUN_STORE names, or kaggle, the output of the "
+            "run's last kernel, as forge kaggle output fetches it.",
+        ),
+    ] = "hub",
+) -> None:
+    """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR).
+
+    Each file or folder at the top of the run that the store holds replaces the local one,
+    and what only runs/<run_id>/ holds, such as kernels.json, stays.
+    """
+    if store == "kaggle":
+        kaggle_output(run_id)
+        return
+    from forge.ops.hub import LocalRunStore, hub_store
+    from forge.ops.paths import runs_dir
+
+    try:
+        hub, local = hub_store(), LocalRunStore(runs_dir())
+        hub.pull(run_id, local.root / run_id)
+        manifest = local.get_manifest(run_id)
+    except _runs_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"run {run_id}: {local.root / run_id}, from {hub}")
+    typer.echo(f"{manifest.kind} run, {manifest.status}")
+
+
+@runs_app.command("push")
+def runs_push(run_id: RunArgument) -> None:
+    """Make the Hub run store's copy of the run what runs/<run_id>/ holds.
+
+    For a run whose upload failed, or one that came back through forge kaggle output. Its
+    manifest must be there. Files the store has and the folder lacks are deleted, so push
+    a run only from a folder that holds all of it, such as one forge runs pull filled.
+    """
+    from forge.ops.hub import LocalRunStore, hub_store
+    from forge.ops.paths import runs_dir
+
+    try:
+        hub, local = hub_store(), LocalRunStore(runs_dir())
+        manifest = local.get_manifest(run_id)
+        path = hub.put_folder(run_id, local.root / run_id, replace=True)
+    except _runs_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"run {run_id} ({manifest.kind}, {manifest.status}): uploaded to {hub} as {path}")
 
 
 if __name__ == "__main__":

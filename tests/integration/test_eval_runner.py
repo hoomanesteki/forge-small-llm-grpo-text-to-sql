@@ -403,7 +403,6 @@ def test_later_options_are_refused_up_front(spider_mini: Path, runs: Path) -> No
     for options, message in (
         (["--backend", "vllm"], "the vllm backend is not available yet: it comes with FG-306"),
         (["--backend", "llamacpp"], "comes with FG-702"),
-        (["--store", "hub"], "--store hub is available after FG-304"),
         (["--n", "2"], "needs a temperature above 0"),
         (["--run-id", "../escape"], "names a folder"),
     ):
