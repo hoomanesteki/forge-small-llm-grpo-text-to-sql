@@ -177,19 +177,22 @@ def test_hub_adapter_is_fetched_at_its_revision_before_the_model_loads(
 
 
 @pytest.mark.phase(3)
-def test_a_thinking_template_goes_through_chat_with_thinking_off(
+def test_a_thinking_template_is_rendered_by_render_chat_with_thinking_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vllm = FakeVllm(_sql_reply, tokenizer=VocabTokenizer(QWEN3_TEMPLATE)).install(monkeypatch)
     VllmBackend("Qwen/Qwen3-1.7B").generate(PROMPTS, GenParams())
+    # As any other template is, so a Qwen3 prompt is the hf backend's too, token for token
+    # (tests/smoke/test_prompt_rendering.py); vLLM's own chat rendering is never used.
     [(method, call)] = vllm.calls
-    assert method == "chat" and call["chat_template_kwargs"] == {THINKING_FLAG: False}
+    assert method == "generate" and "chat_template_kwargs" not in call
     assert call["use_tqdm"] is False and call["lora_request"] is None
-    # vLLM rendered each chat with the flag off and the assistant turn opened.
+    # Each chat rendered with the flag off and the assistant turn opened.
     assert [kwargs for _, kwargs in vllm.tokenizer.calls] == [
         {"tokenize": False, "add_generation_prompt": True, THINKING_FLAG: False}
     ] * 2
     assert [chat for chat, _ in vllm.tokenizer.calls] == [list(p.messages) for p in PROMPTS]
+    assert vllm.prompts == [render_chat(VocabTokenizer(), p.messages) for p in PROMPTS]
 
 
 @pytest.mark.phase(3)

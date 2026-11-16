@@ -126,15 +126,18 @@ class FakeVllm:
     """vLLM as ``VllmBackend`` imports it, once ``install`` puts it in ``sys.modules``.
 
     ``engines`` holds the keyword arguments of each ``LLM`` made, ``calls`` each request as
-    (method, keyword arguments), and ``prompts`` each prompt as the engine decoded it.
-    ``reply`` answers a prompt; ``reverse`` returns each prompt's samples last first.
+    (method, keyword arguments), ``prompt_ids`` each prompt's token ids and ``prompts``
+    each prompt as the engine decoded them. ``reply`` answers a prompt; ``reverse`` returns
+    each prompt's samples last first. ``tokenizer`` is what the engine's ``get_tokenizer``
+    returns: a ``VocabTokenizer``, or a real one.
     """
 
     reply: VllmReply
-    tokenizer: VocabTokenizer = field(default_factory=VocabTokenizer)
+    tokenizer: Any = field(default_factory=VocabTokenizer)
     reverse: bool = False
     engines: list[dict[str, Any]] = field(default_factory=list)
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    prompt_ids: list[list[int]] = field(default_factory=list)
     prompts: list[str] = field(default_factory=list)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeVllm:
@@ -148,44 +151,26 @@ class FakeVllm:
 
 
 class FakeLLM:
-    """``vllm.LLM``: renders and encodes a chat as vLLM does, then asks its ``FakeVllm``."""
+    """``vllm.LLM`` for prompts of token ids, which it decodes and asks its ``FakeVllm`` to
+    answer. It has no ``chat``: Forge renders every prompt itself."""
 
     def __init__(self, vllm: FakeVllm, **kwargs: Any) -> None:
         vllm.engines.append(kwargs)
         self.vllm = vllm
 
-    def get_tokenizer(self) -> VocabTokenizer:
+    def get_tokenizer(self) -> Any:
         return self.vllm.tokenizer
-
-    def chat(
-        self, messages: list[list[dict[str, str]]], sampling_params: list[Any], **kwargs: Any
-    ) -> list[FakeRequestOutput]:
-        tokenizer = self.vllm.tokenizer
-        options = kwargs.get("chat_template_kwargs") or {}
-        texts = [
-            tokenizer.apply_chat_template(
-                chat, tokenize=False, add_generation_prompt=True, **options
-            )
-            for chat in messages
-        ]
-        # vLLM leaves special tokens to the template when it encodes a chat.
-        ids = [tokenizer.encode(str(text), add_special_tokens=False) for text in texts]
-        return self._answer("chat", ids, sampling_params, kwargs)
 
     def generate(
         self, prompts: list[dict[str, list[int]]], sampling_params: list[Any], **kwargs: Any
     ) -> list[FakeRequestOutput]:
-        ids = [prompt["prompt_token_ids"] for prompt in prompts]
-        return self._answer("generate", ids, sampling_params, kwargs)
-
-    def _answer(
-        self, method: str, ids: list[list[int]], sampling: list[Any], kwargs: dict[str, Any]
-    ) -> list[FakeRequestOutput]:
-        self.vllm.calls.append((method, {"sampling_params": sampling, **kwargs}))
+        self.vllm.calls.append(("generate", {"sampling_params": sampling_params, **kwargs}))
         tokenizer = self.vllm.tokenizer
         outputs = []
-        for prompt_ids, params in zip(ids, sampling, strict=True):
+        for prompt, params in zip(prompts, sampling_params, strict=True):
+            prompt_ids = prompt["prompt_token_ids"]
             text = tokenizer.decode(prompt_ids)
+            self.vllm.prompt_ids.append(prompt_ids)
             self.vllm.prompts.append(text)
             samples = []
             for i in range(params.kwargs["n"]):

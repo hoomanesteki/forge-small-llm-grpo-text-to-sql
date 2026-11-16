@@ -158,14 +158,15 @@ row.
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the
 GPU's memory, and LoRA (rank up to 64) only when the config names an `adapter`, a folder or
-a Hub repo fetched at its `@revision`. Qwen3 prompts go through `LLM.chat` with thinking off;
-other templates are rendered by `render_chat`, as on the laptop. Decoding takes only the
-config's settings, never a checkpoint's `generation_config.json` defaults, and each question
-has a seed of its own. The preflight and the job share one engine, loaded once, since a
-second might not fit beside the first. `forge eval run --backend vllm` on the laptop is
-refused: its manifest would call a GPU run `local-cpu` (ADR-0016). A config with
-`quantization: bitsandbytes` loads the weights in 4-bit, for a reference model too big for
-the T4 in fp16; the manifest's config then records it.
+a Hub repo fetched at its `@revision`. Every prompt is rendered by `render_chat`, Qwen3's
+with thinking off, and sent as the token ids the hf backend gives its model on the laptop,
+never through vLLM's own `LLM.chat`. Decoding takes only the config's settings, never a
+checkpoint's `generation_config.json` defaults, and each question has a seed of its own.
+The preflight and the job share one engine, loaded once, since a second might not fit
+beside the first. `forge eval run --backend vllm` on the laptop is refused: its manifest
+would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: bitsandbytes`
+loads the weights in 4-bit, for a reference model too big for the T4 in fp16; the
+manifest's config then records it.
 
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
