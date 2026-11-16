@@ -42,6 +42,13 @@ NOT_FOUND = (
     "https://api.kaggle.com/v1/datasets.DatasetApiService/GetDatasetStatus\n\n"
     "The resource was not found. Check the spelling of the reference you passed.\n"
 )
+# What the live API answers for a slug in the owner's own namespace that holds no dataset:
+# it refuses rather than says not found, since it tells no one which datasets exist.
+NO_ACCESS = (
+    "403 Client Error: Forbidden for url: "
+    "https://api.kaggle.com/v1/datasets.DatasetApiService/GetDatasetStatus\n\n"
+    "You don't have access to this resource.\n"
+)
 CREATED = "Your private Dataset is being created. Please check progress at https://kaggle.test\n"
 
 
@@ -349,6 +356,9 @@ def test_kaggle_failures_are_errors(tmp_path: Path) -> None:
         )
 
     assert answer(1, stderr=NOT_FOUND).dataset_exists("forge-owner/forge-code") is False
+    # The live API refuses a slug no dataset holds; the first publish must create it.
+    assert answer(1, stdout=NO_ACCESS).dataset_exists("forge-owner/forge-code") is False
+    assert answer(1, stdout=NO_ACCESS).dataset_status("forge-owner/forge-code") is None
     # Anything but not found, such as missing credentials, stops the publish.
     with pytest.raises(
         KaggleError, match=r"kaggle datasets status forge-owner/forge-code exited 1"
