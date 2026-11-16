@@ -759,14 +759,15 @@ def ledger_add(
     purpose: str = typer.Option(...),
     gpu: str = typer.Option("T4"),
     cost: float = typer.Option(0.0, help="cash spent in USD"),
-    on: str = typer.Option("", help="session date, YYYY-MM-DD (default today)"),
+    on: str = typer.Option("", help="session date in UTC, YYYY-MM-DD (default today in UTC)"),
 ) -> None:
     """Add a row by hand, for sessions the CLI didn't launch (for example Colab)."""
     from datetime import date
 
+    from forge.ops.clock import utc_today
     from forge.ops.ledger import LedgerRow, append
 
-    day = date.fromisoformat(on) if on else date.today()
+    day = date.fromisoformat(on) if on else utc_today()
     append(LedgerRow(day, platform, gpu, hours, run_id, purpose, cost))
     typer.echo(f"added {hours:.2f} h on {platform} for {run_id}")
 

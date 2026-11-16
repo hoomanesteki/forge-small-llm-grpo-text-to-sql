@@ -89,8 +89,9 @@ uv run forge kaggle output <run_id>    # the kernel's output into runs/<run_id>/
    kernel mounts that version by number, with `<owner>/forge-spider`, which must exist
    (`forge kaggle publish-data`).
 4. The estimate must fit what the ledger (`forge ledger summary`) leaves of the week's 30
-   hours, and what `kaggle quota -v` says is left when it answers. `--allow-over-budget`
-   pushes anyway; the eval run's manifest config then holds `allow_over_budget: true`.
+   hours, over the last seven UTC days, and what `kaggle quota -v` says is left when it
+   answers. `--allow-over-budget` pushes anyway; the eval run's manifest config then holds
+   `allow_over_budget: true`.
 5. It prints the estimate and asks, unless `--yes`.
 6. It writes `build/kaggle-kernel/<run_id>/`: `kaggle/entry.py` with the job's arguments
    in `KERNEL_ARGV`, and private GPU metadata with internet. It pushes with
@@ -104,6 +105,12 @@ The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the k
 `<owner>/forge-<run_id>`. A run id that was pushed before is refused. `--resume` pushes the
 run again from the same commit with the same options, as `<owner>/forge-<run_id>-<n>`,
 mounting the last attempt's kernel so the eval carries on from its stored files.
+
+Dates are UTC everywhere Forge writes one: a run id's, a ledger row's, a
+`docs/dev-usage.md` row's, and the last day of `forge ledger summary`'s week. `forge ledger
+add` takes today's UTC date unless `--on` names another. West of UTC, a job pushed in the
+evening is dated the next day in all of them, and this week's window counts its hours at
+once. Rows already committed keep the dates they were written with.
 
 In the kernel, `entry.py` runs its stages in order: env (the interpreter, for the log),
 code (the code dataset's `GIT_SHA` must be the pushed commit), install (`pip install

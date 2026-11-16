@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shutil
 import subprocess
+import time
 import types
-from collections.abc import Sequence
-from datetime import date
+from collections.abc import Iterator, Sequence
+from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +21,7 @@ from typer.testing import CliRunner
 
 from forge import cli
 from forge.eval.config import EvalConfig
-from forge.ops import kaggle, kaggle_job
+from forge.ops import clock, kaggle, kaggle_job
 from forge.ops.dev_usage import log_dev_use, read_uses
 from forge.ops.kaggle import KaggleClient, KaggleError, check_kernel_metadata
 from forge.ops.kaggle_job import (
@@ -32,6 +34,7 @@ from forge.ops.kaggle_job import (
     plan_job,
     write_kernel,
 )
+from forge.ops.ledger import read_rows, summary
 from tests.kernel import WHEEL
 from tests.spike import entry, load_script
 
@@ -184,9 +187,15 @@ def _eval(repo: Path, *extra: str) -> Any:
     return _run("--job", "eval", "--config", str(repo / "configs/eval/job.yaml"), *extra)
 
 
-def _spent(repo: Path, hours: float) -> None:
+def _today() -> date:
+    """Today's UTC date, which run ids and log rows take, whatever the machine's zone."""
+    return datetime.now(UTC).date()
+
+
+def _spent(repo: Path, hours: float, on: date | None = None) -> None:
     ledger = Path(repo.parent / "ledger.md")
-    row = f"| {date.today().isoformat()} | kaggle | T4 | {hours:.2f} | earlier-run | test | 0.00 |"
+    day = (on or _today()).isoformat()
+    row = f"| {day} | kaggle | T4 | {hours:.2f} | earlier-run | test | 0.00 |"
     ledger.write_text(f"# Compute ledger\n\n| a |\n|---|\n{row}\n", encoding="utf-8")
 
 
@@ -244,7 +253,7 @@ def test_refuses_over_budget(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     # Allowed, the job goes, and its run's config says it was over budget.
     result = _eval(repo, "--yes", "--allow-over-budget")
     assert result.exit_code == 0, result.output
-    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
     argv = _baked_argv(fake.pushed[0]["entry.py"])
     options = json.loads(argv[argv.index("--options") + 1])
     assert options == {"model": "gold", "backend": "fake", "limit": 5, "allow_over_budget": True}
@@ -269,7 +278,7 @@ def test_run_pushes_the_job_and_records_its_kernel(
     result = _eval(repo, "--yes")
 
     assert result.exit_code == 0, result.output
-    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
     kernel = f"{OWNER}/forge-{run_id}"
     assert f"code {OWNER}/forge-code/1 at {head[:7]}, data {OWNER}/forge-spider" in result.stdout
     assert "estimate 0.50 GPU h" in result.stdout
@@ -446,12 +455,12 @@ def test_dev_job_needs_a_reason_and_its_push_logs_the_look(
     result = _run("--job", "eval", "--config", str(dev), "--reason", "baseline", "--yes")
 
     assert result.exit_code == 0, result.output
-    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
     # The kernel gets the reason it needs to load dev, and the push logs the look here.
     argv = _baked_argv(fake.pushed[0]["entry.py"])
     options = json.loads(argv[argv.index("--options") + 1])
     assert options == {"model": "gold", "backend": "fake", "split": "dev", "reason": "baseline"}
-    assert read_uses(dev_log) == [(date.today().isoformat(), run_id, "baseline")]
+    assert read_uses(dev_log) == [(_today().isoformat(), run_id, "baseline")]
     assert "dev look 1 of 6 logged in docs/dev-usage.md" in result.stdout
 
     # Once the six looks are spent, a dev job is refused before anything is uploaded.
@@ -483,7 +492,7 @@ def test_spike_job_pushes_the_throughput_script(
     assert (meta["code_file"], meta["dataset_sources"]) == ("throughput.py", [])
     assert _baked_argv(fake.pushed[0]["throughput.py"]) == ["run"]
     assert fake.ran("kernels", "push")[0][-2:] == ["-t", "8100"]  # 1.5 h and half again
-    run_id = f"{date.today():%Y-%m-%d}-throughput-spike-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-throughput-spike-{head[:7]}"
     assert _record(repo, run_id)["job"] == "spike"
     # The same kernel scripts/kaggle_spike.py bundles, so FG-301's steps still meet.
     bundler = load_script(ROOT / "scripts" / "kaggle_spike.py", "forge_spike_bundler")
@@ -522,7 +531,7 @@ def test_emit_notebook_valid(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert f"{OWNER}/forge-code/1" in fetch and f"{OWNER}/forge-spider" in fetch
     assert run == "main()"
     notebook = load_script_text(code, repo.parent / "notebook_entry.py")
-    run_id = f"{date.today():%Y-%m-%d}-gold-eval-{head[:7]}"
+    run_id = f"{_today():%Y-%m-%d}-gold-eval-{head[:7]}"
     config = repo / "configs" / "eval" / "job.yaml"
     plan = plan_job("eval", config, owner=OWNER, sha=head, runs_root=repo / "runs")
     assert plan.run_id == run_id
@@ -654,3 +663,74 @@ def test_run_outside_a_checkout_is_one_error_line(
     assert result.exit_code == 1, result.output
     assert f"error: {plain} is not in a git checkout" in result.stderr
     assert isinstance(result.exception, SystemExit)
+
+
+# 19:30 on a Sunday evening in Honolulu, ten hours west of UTC, is already Monday in UTC.
+EVENING = datetime(2026, 11, 16, 5, 30, tzinfo=UTC)
+LOCAL_DAY, UTC_DAY = date(2026, 11, 15), date(2026, 11, 16)
+
+
+class _Evening(datetime):
+    """A clock stopped at ``EVENING``."""
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        local = EVENING.astimezone().replace(tzinfo=None)
+        return EVENING.astimezone(tz) if tz is not None else local
+
+
+@pytest.fixture
+def far_west_evening(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The machine ten hours west of UTC, its clocks stopped at ``EVENING``: the local date
+    is the day before the UTC one. The zone is put back afterwards."""
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "HST10"  # POSIX: needs no zone database
+    time.tzset()
+    # Both clocks a date can come from: the UTC one and, through time.time, the local one.
+    monkeypatch.setattr(clock, "datetime", _Evening)
+    monkeypatch.setattr(time, "time", EVENING.timestamp)
+    try:
+        yield
+    finally:
+        if before is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
+
+
+@pytest.mark.phase(3)
+def test_dates_follow_utc_far_west_of_it(
+    repo: Path, dev_log: Path, far_west_evening: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert (date.today(), clock.utc_today()) == (LOCAL_DAY, UTC_DAY)
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    dev = repo.parent / "dev.yaml"
+    dev.write_text("model: gold\nbackend: fake\nsplit: dev\nops: {est_gpu_hours: 0.5}\n")
+    push = ["--job", "eval", "--config", str(dev), "--reason", "baseline", "--yes"]
+    # Hours logged on today's UTC date count in this week's window, so the push is checked
+    # against them.
+    _spent(repo, 29.8, on=UTC_DAY)
+
+    refused = _run(*push)
+
+    assert refused.exit_code == 1, refused.output
+    assert "ledger: 0.20 of 30 h left this week" in refused.stdout
+    assert fake.ran("kernels") == []
+
+    pushed = _run(*push, "--allow-over-budget")
+
+    assert pushed.exit_code == 0, pushed.output
+    run_id = f"{UTC_DAY:%Y-%m-%d}-gold-eval-{head[:7]}"
+    assert _record(repo, run_id)["kernels"][0]["over_budget"] is True
+    # The dev look the push spends is dated as its run id is.
+    assert read_uses(dev_log) == [(UTC_DAY.isoformat(), run_id, "baseline")]
+    # So is a row added by hand, and the window counts it with the others.
+    by_hand = ["--platform", "kaggle", "--hours", "0.1", "--purpose", "the push, by hand"]
+    added = CliRunner().invoke(cli.app, ["ledger", "add", *by_hand, "--run-id", run_id])
+    assert added.exit_code == 0, added.output
+    assert [row.date for row in read_rows(repo.parent / "ledger.md")] == [UTC_DAY, UTC_DAY]
+    week = summary()
+    assert week.quota_hours_window == pytest.approx(29.9)
+    assert "of 30 (remaining 0.10)" in week.render()

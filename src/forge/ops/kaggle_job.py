@@ -54,6 +54,7 @@ from forge.eval.config import (
     read_config_sections,
     read_ops,
 )
+from forge.ops.clock import utc_today
 from forge.ops.dev_usage import MAX_DEV_USES, count_dev_uses, log_dev_use
 from forge.ops.kaggle import (
     CODE_SLUG,
@@ -200,7 +201,7 @@ def plan_job(
         raise JobRefused(f"--job {job} comes with {LATER_JOBS[job]}")
     if job not in JOBS:
         raise ValueError(f"job must be one of {', '.join(JOBS)}, got {job!r}")
-    day = today or datetime.now(UTC).date()
+    day = today or utc_today()
     options: dict[str, Any]
     if job == "spike":
         if preflight:
