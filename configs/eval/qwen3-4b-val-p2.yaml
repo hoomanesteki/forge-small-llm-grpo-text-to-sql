@@ -1,5 +1,5 @@
 # FG-307 baseline: Qwen3-4B on the whole val split with the p2 prompt, which adds sample
-# rows to the schema. Run for the top candidate of the p1 runs only (ADR-0007). The model is
+# rows to the schema. Run for the model ADR-0012 chooses only (ADR-0007). The model is
 # configs/models.yaml's candidates.qwen3-4b, pinned to the same commit.
 model: Qwen/Qwen3-4B@1cfa9a7208912126459214e8b04321603b3df60c
 backend: vllm

@@ -314,7 +314,8 @@ Push them in this order, from one clean commit that passed `make smoke`:
 
 1. The candidates on val with p1: `qwen3-1-7b-val`, `qwen3-4b-val` and
    `qwen2-5-coder-1-5b-val`.
-2. The top candidate by val official EX with p2: its `<name>-val-p2` (ADR-0007).
+2. The model ADR-0012's rule chooses from step 1's runs, with p2: its `<name>-val-p2`
+   (ADR-0007). The rule also needs FG-301's GRPO memory check, so this waits for it.
 3. The reference on val, in 4-bit: `qwen3-8b-val`.
 4. I6's repeat: `qwen2-5-coder-1-5b-val-100`, the first 100 val questions again.
 5. The model ADR-0012's rule chooses, and the reference, on dev, once each:
