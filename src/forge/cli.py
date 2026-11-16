@@ -1086,8 +1086,8 @@ def kaggle_run(
         str | None,
         typer.Option(
             help="An eval job's LoRA adapter, for a config that names none: a training run's "
-            "checkpoint, runs/<run_id>/checkpoints/<name>, which the kernel fetches from the "
-            "run store, or a Hub repo@revision."
+            "checkpoint, runs/<run_id>/checkpoints/<name>, which the kernel copies from the "
+            "output of the run's kernel, or a Hub repo@revision."
         ),
     ] = None,
 ) -> None:
@@ -1098,10 +1098,12 @@ def kaggle_run(
     ledger and Kaggle's quota leave this week. It prints the estimate, asks unless --yes,
     pushes the kernel on a T4 and prints the run id, which status, logs, wait and output
     take. A dev job's push spends one of the six dev looks, logged in docs/dev-usage.md as
-    soon as Kaggle accepts it; a --resume of the run is the same look. A source Kaggle
-    could not add is a warning: that version runs without it, recorded like any other.
-    So is a kaggle CLI that fails before it says the kernel was pushed while Kaggle has
-    the new kernel all the same: only the answer was lost.
+    soon as Kaggle accepts it; a --resume of the run is the same look. An eval job's
+    checkpoint --adapter comes from the output of the kernel that trained its run, which
+    the run's kernels.json here names, mounted beside the datasets: a run made anywhere
+    else is refused. A source Kaggle could not add is a warning: that version runs without
+    it, recorded like any other. So is a kaggle CLI that fails before it says the kernel was
+    pushed while Kaggle has the new kernel all the same: only the answer was lost.
     """
     import json
 
@@ -1158,7 +1160,8 @@ def kaggle_run(
         typer.echo(
             f"job {plan.job}: run {plan.run_id} as kernel {plan.kernel}, stopped after "
             f"{plan.timeout_s / 3600:.2f} h at most"
-            + (f", carrying on {plan.kernel_sources[0]}" if plan.kernel_sources else "")
+            + (f", carrying on {plan.resume_source}" if plan.resume_source else "")
+            + (f", its adapter from {plan.adapter_source}" if plan.adapter_source else "")
         )
         if not yes and not typer.confirm("Push it?"):
             typer.echo("nothing pushed")
@@ -1199,9 +1202,15 @@ def kaggle_run(
             err=True,
         )
     if plan.resume and pushed.kernel_source_dropped:
+        # Which kernel source went isn't read from Kaggle's line, so with an adapter's
+        # kernel beside the last attempt's, either may be the one missing.
+        lacks = (
+            "can't restore the run"
+            if plan.adapter_source is None
+            else "may lack the run or its adapter"
+        )
         typer.echo(
-            "warning: this attempt can't restore the run, so a --resume mounts "
-            f"{plan.kernel_sources[0]} again",
+            f"warning: this attempt {lacks}, so a --resume mounts {plan.resume_source} again",
             err=True,
         )
     if looks is not None:

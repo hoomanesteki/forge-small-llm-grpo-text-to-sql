@@ -549,8 +549,9 @@ class PushedKernel:
 
     @property
     def kernel_source_dropped(self) -> bool:
-        """Whether Kaggle dropped a kernel source, which only a resume mounts: without its
-        last attempt's output, this one can't restore the run."""
+        """Whether Kaggle dropped a kernel source: a resume's last attempt, without whose
+        output this one can't restore the run, or the kernel whose output holds an eval
+        job's adapter, without which the job can't load it."""
         return any(_DROPPED_KERNEL.search(line) for line in self.dropped)
 
 

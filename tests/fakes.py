@@ -335,9 +335,11 @@ def sft_run_folder(
 ) -> RunManifest:
     """A finished SFT run in ``runs/<run_id>/`` as a GPU job leaves one, without training:
     its manifest, trained on p1 prompts, and an adapter in each of ``checkpoints`` whose
-    files name the folder, with the digest of each in the manifest's outputs."""
+    files name the folder, with the digest of each in the manifest's outputs. The folder
+    may hold the ``kernels.json`` of the run's push already, as ``forge kaggle run`` left
+    it before ``forge runs pull`` brought the rest."""
     folder = runs / run_id
-    folder.mkdir(parents=True)
+    folder.mkdir(parents=True, exist_ok=True)
     for rel in checkpoints:
         (folder / rel).mkdir(parents=True)
         (folder / rel / "adapter_config.json").write_text(f'{{"from": "{rel}"}}\n')

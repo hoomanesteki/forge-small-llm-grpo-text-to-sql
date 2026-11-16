@@ -4,11 +4,12 @@ An adapter is a local folder or a Hub repo id with an optional ``@revision``
 (``forge.infer.base.split_ref``). A folder that is a training run's checkpoint is
 ``<folder>/<run_id>/checkpoints/<name>``, the name ``final``, ``best`` or
 ``step-NNNNNN`` (plan section 3.9): ``runs/<run_id>/checkpoints/final`` from the repo
-root on a laptop, and the same path in a kernel's work folder, where an eval job fetches
-it from the run store first. ``checkpoint_ref`` is the one parser of that form, for
-``forge kaggle run --adapter`` before a push, for the kernel's fetch and for
-``forge runs promote``, so the three never disagree on a spelling. A trailing ``/``, as
-a shell's completion adds, and a leading ``./`` name the same checkpoint.
+root on a laptop, and the same path in a kernel's work folder, where an eval job copies
+it first from the training run's kernel output, mounted as a kernel source.
+``checkpoint_ref`` is the one parser of that form, for ``forge kaggle run --adapter``
+before a push, for the kernel's copy and for ``forge runs promote``, so the three never
+disagree on a spelling. A trailing ``/``, as a shell's completion adds, and a leading
+``./`` name the same checkpoint.
 
 ``adapter_sha256`` is the digest of an adapter's files, ``ADAPTER_FILES``: the weights
 and the settings PEFT loads them with. An eval run with an adapter records it in its
@@ -47,7 +48,7 @@ class CheckpointRef:
     @property
     def in_runs(self) -> bool:
         """Whether the adapter names it in ``runs/``, from where the command runs: the form
-        a kernel fetches from the run store."""
+        a kernel finds in the training kernel's output, or a notebook in the run store."""
         return self.folder == RUNS
 
     @property

@@ -14,7 +14,8 @@ Before a push, in the plan's order (FG-303):
 4. The command asks to go ahead.
 5. ``write_kernel``: ``kaggle/entry.py`` with the job's arguments written in, and private
    GPU metadata with internet that mounts the code and data datasets and, on a resume,
-   the last attempt's kernel, whose output holds the run so far.
+   the last attempt's kernel, whose output holds the run so far, and for an eval job's
+   checkpoint adapter, the kernel whose output holds that checkpoint.
 6. ``KaggleClient.push_kernel`` with a T4 and a timeout of the estimate and half again, at
    most a session's 12 hours: plan section 5.3 stops a job 50% over its estimate. The
    entry script gets the timeout too, and its eval or SFT job stops at its time guard
@@ -45,10 +46,13 @@ which is how status, logs, wait, output and ``--resume`` find them.
 
 An eval job's ``--adapter`` is checked before anything is pushed (``kernel_adapter``): a
 training run's checkpoint, ``runs/<run_id>/checkpoints/<name>`` as
-``forge.ops.adapters.checkpoint_ref`` reads it, which the kernel fetches from the run
-store and which goes into the options spelled the one way, or a Hub repo id with an
-optional ``@revision``. A folder on this machine the kernel can't fetch is refused, and so
-is a checkpoint of a run this machine knows to have trained another model.
+``forge.ops.adapters.checkpoint_ref`` reads it, which goes into the options spelled the
+one way, or a Hub repo id with an optional ``@revision``. A folder on this machine the
+kernel can't fetch is refused, and so is a checkpoint of a run this machine knows to have
+trained another model. A kernel pushed with the CLI gets no ``HF_TOKEN`` (ADR-0005), so
+the kernel can't read a checkpoint from the run store: it mounts the output of the kernel
+that trained the run, which holds the checkpoint (``adapter_kernel_sources``), and checks
+the files it copies against the digest this machine's copy of the run records.
 
 An ``sft`` job takes a training config (``configs/sft/*.yaml``) whose device may be
 CUDA, and trains it as ``forge train sft`` does, its run's platform the kernel's host. Its
@@ -78,6 +82,7 @@ from typing import Any
 import yaml
 
 from forge.core.ids import make_run_id
+from forge.core.types import RunManifest
 from forge.eval.config import (
     EvalConfig,
     Ops,
@@ -88,7 +93,7 @@ from forge.eval.config import (
 )
 from forge.eval.run_files import MANIFEST_FILE
 from forge.infer.base import split_ref
-from forge.ops.adapters import checkpoint_ref
+from forge.ops.adapters import checkpoint_ref, digest_output
 from forge.ops.clock import utc_today
 from forge.ops.dev_usage import (
     MAX_DEV_USES,
@@ -161,7 +166,17 @@ class JobPlan:
     title: str
     preflight: bool
     resume: bool = False
-    kernel_sources: tuple[str, ...] = ()
+    # On a resume, the last attempt's kernel, whose output holds the run so far.
+    resume_source: str | None = None
+    # For an eval job's checkpoint adapter, the kernel whose output holds it, and the digest
+    # this machine's copy of the training run records for it, when it has one.
+    adapter_source: str | None = None
+    adapter_sha256: str | None = None
+
+    @property
+    def kernel_sources(self) -> tuple[str, ...]:
+        """The kernels whose output the job's kernel mounts."""
+        return tuple(ref for ref in (self.resume_source, self.adapter_source) if ref is not None)
 
     @property
     def timeout_s(self) -> int:
@@ -212,9 +227,9 @@ class Budget:
 
 def kernel_adapter(adapter: str, runs_root: Path, model: str) -> str:
     """The adapter of an eval job, spelled as its kernel loads it, once this machine can
-    tell the kernel will find it: a training run's checkpoint in ``runs/``, which the kernel
-    fetches from the run store, as ``runs/<run_id>/checkpoints/<name>``, or a Hub repo id
-    with an optional ``@revision``, as given.
+    tell it suits the job: a training run's checkpoint in ``runs/``, as
+    ``runs/<run_id>/checkpoints/<name>``, which ``adapter_kernel_sources`` then finds a
+    kernel output for, or a Hub repo id with an optional ``@revision``, as given.
 
     Any other path in ``runs/``, such as a run's own folder, is refused. When
     ``runs_root`` has the checkpoint's run, its manifest or the ``kernels.json`` of its
@@ -226,17 +241,19 @@ def kernel_adapter(adapter: str, runs_root: Path, model: str) -> str:
         raise JobRefused(f"--adapter: {exc}") from None
     if ref is None:
         # A path in runs/ names a run's files, not the Hub repo of an owner called runs, so
-        # the kernel would fetch nothing: refused whatever this machine's runs/ holds.
+        # the kernel would find nothing: refused whatever this machine's runs/ holds.
         if PurePosixPath(adapter).parts[:1] == (RUNS,):
             raise JobRefused(
                 f"--adapter {adapter} is in {RUNS}/ but names no checkpoint; name a checkpoint, "
-                f"{RUNS}/<run_id>/checkpoints/<name>, which the kernel fetches from the run store"
+                f"{RUNS}/<run_id>/checkpoints/<name>, which the kernel finds in the output of "
+                "the kernel that trained the run"
             )
         if Path(adapter).exists():
             raise JobRefused(
                 f"--adapter {adapter} is a folder on this machine, which the kernel can't "
                 "read; name a training run's checkpoint, runs/<run_id>/checkpoints/<name>, "
-                "which it fetches from the run store, or a Hub repo@revision"
+                "which it finds in the output of the kernel that trained the run, or a Hub "
+                "repo@revision"
             )
         try:
             split_ref(adapter)
@@ -246,7 +263,7 @@ def kernel_adapter(adapter: str, runs_root: Path, model: str) -> str:
     if not ref.in_runs:
         raise JobRefused(
             f"--adapter {adapter} is {ref.rel} of run {ref.run_id}, but not in runs/: the "
-            f"kernel fetches it from the run store as runs/{ref.run_id}/{ref.rel}, so name it so"
+            f"kernel looks for it as runs/{ref.run_id}/{ref.rel}, so name it so"
         )
     kind, trained = _trained(runs_root, ref.run_id)
     if kind is not None and kind not in ("sft", "grpo"):
@@ -272,6 +289,73 @@ def _trained(runs_root: Path, run_id: str) -> tuple[str | None, str | None]:
         model = config["run"]["model_ref"] if isinstance(config, dict) else None
         return str(record["job"]), model
     return manifest.kind, manifest.model_ref
+
+
+@dataclass(frozen=True)
+class AdapterSource:
+    """Where a kernel finds a training run's checkpoint, as ``adapter_kernel_sources``
+    looks it up before a push."""
+
+    adapter: str  # runs/<run_id>/checkpoints/<name>
+    kernel: str  # owner/slug[/version] of the kernel whose output holds the checkpoint
+    sha256: str | None  # the digest this machine's copy of the run records for it, if here
+
+
+def adapter_kernel_sources(adapter: str, runs_root: Path) -> AdapterSource:
+    """Where a kernel finds the checkpoint ``adapter`` names, a training run's
+    ``runs/<run_id>/checkpoints/<name>`` as ``kernel_adapter`` spells it.
+
+    A kernel pushed with the CLI gets no ``HF_TOKEN`` (ADR-0005, decision 3 path 2), so the
+    checkpoint can't come from the run store: it comes in the output of the run's last
+    kernel that holds the run, as ``kernels.json`` names it, at its version, which the
+    kernel mounts as a kernel source under its input folder. An eval job's adapter comes
+    this way, and so will the SFT adapter a GRPO job starts from: this is the one lookup
+    for both. When this machine has the run's manifest, the checkpoint must be one the
+    run kept, and ``sha256`` is the digest the manifest records for it, which the kernel
+    holds the folder it copies to.
+
+    Raises ``JobRefused`` for a run made anywhere but on Kaggle, such as a local pilot,
+    whose checkpoints are in no kernel output; a run whose ``kernels.json`` this machine
+    lacks; and a checkpoint the run's manifest says it didn't keep.
+    """
+    ref = checkpoint_ref(adapter)
+    if ref is None or not ref.in_runs:
+        raise ValueError(f"{adapter} is no checkpoint {RUNS}/<run_id>/checkpoints/<name>")
+    run_id = ref.run_id
+    try:
+        manifest: RunManifest | None = LocalRunStore(runs_root).get_manifest(run_id)
+    except RunNotFound:
+        manifest = None
+    if manifest is not None and manifest.platform != "kaggle":
+        raise JobRefused(
+            f"run {run_id} was made on {manifest.platform}, so its checkpoints are in no "
+            "kernel output a kernel could mount; score them where they are"
+        )
+    record = read_record(runs_root, run_id)
+    if record is None:
+        known = "was made on kaggle" if manifest is not None else "is not known here"
+        raise JobRefused(
+            f"run {run_id} {known}, and with no {_record_path(runs_root, run_id)} nothing names "
+            "the kernel whose output holds its checkpoints; push the job from the machine "
+            f"that pushed the run, or forge runs pull {run_id}, which brings the record along"
+        )
+    rel = ref.rel
+    digest = None
+    if manifest is not None:
+        digest = manifest.outputs.get(digest_output(rel))
+        if digest is None:
+            raise JobRefused(
+                f"run {run_id}'s manifest records no digest of {rel}, so the run kept no "
+                "such checkpoint: its outputs name each it kept as adapter_sha256:<checkpoint>"
+            )
+    return AdapterSource(f"{RUNS}/{run_id}/{rel}", kernel_ref(_holding(record)), digest)
+
+
+def _holding(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The run's last push whose kernel output holds the run: not a resume whose own kernel
+    source Kaggle dropped, since that one failed to restore it."""
+    kernels: list[Mapping[str, Any]] = record["kernels"]
+    return [kernel for kernel in kernels if not kernel.get("kernel_source_dropped")][-1]
 
 
 def head_commit(root: Path) -> str:
@@ -312,11 +396,13 @@ def plan_job(
 
     ``preflight`` is on by default for entry jobs. ``reason`` goes with a dev eval job,
     and only with one. ``adapter`` is an eval job's, for a config that names none, so a
-    checkpoint is scored with its base model's config. Raises ``JobRefused`` for a job
-    that can't go yet, a run that clashes with an earlier push, a run id that makes no
-    kernel slug, a resume or a dev job as a notebook, a dev job once the dev looks are
-    spent, ``ValueError`` for a bad config, and ``NotAvailable`` for options a later story
-    builds.
+    checkpoint is scored with its base model's config. The kernel mounts the output that
+    holds a checkpoint adapter (``adapter_kernel_sources``); a notebook mounts nothing, so
+    it fetches the checkpoint from the run store with its Colab ``HF_TOKEN``. Raises
+    ``JobRefused`` for a job that can't go yet, a checkpoint no kernel output holds, a run
+    that clashes with an earlier push, a run id that makes no kernel slug, a resume or a
+    dev job as a notebook, a dev job once the dev looks are spent, ``ValueError`` for a
+    bad config, and ``NotAvailable`` for options a later story builds.
     """
     if job in LATER_JOBS:
         raise JobRefused(f"--job {job} comes with {LATER_JOBS[job]}")
@@ -332,6 +418,7 @@ def plan_job(
         raise JobRefused(f"--adapter is an eval job's, not a {job} job's")
     day = today or utc_today()
     options: dict[str, Any]
+    adapter_source: AdapterSource | None = None
     if job == "spike":
         if preflight:
             raise JobRefused("the spike runs without Forge, so it has no preflight")
@@ -375,6 +462,9 @@ def plan_job(
         check_config(eval_config)
         if eval_config.adapter is not None:
             options["adapter"] = kernel_adapter(eval_config.adapter, runs_root, eval_config.model)
+            if not notebook and checkpoint_ref(options["adapter"]) is not None:
+                adapter_source = adapter_kernel_sources(options["adapter"], runs_root)
+                options["adapter"] = adapter_source.adapter
         if eval_config.split == "dev" and notebook:
             raise JobRefused(
                 "a notebook can run any number of times, so it can't log its dev look; "
@@ -389,7 +479,7 @@ def plan_job(
     run_id = run_id or default_id
     check_run_id(run_id)
     record = read_record(runs_root, run_id)
-    kernel_sources: tuple[str, ...] = ()
+    resume_source = None
     attempt = 1
     if record is not None and not resume:
         carry_on = "" if job == "spike" else "--resume to carry it on, or "
@@ -412,8 +502,7 @@ def plan_job(
                 f"run {run_id} was pushed with other options (its config's, --reason or "
                 "--allow-over-budget); resume it with the same ones"
             )
-        holding = [k for k in record["kernels"] if not k.get("kernel_source_dropped")]
-        kernel_sources = (kernel_ref(holding[-1]),)
+        resume_source = kernel_ref(_holding(record))
         attempt = len(record["kernels"]) + 1
     if job == "spike":
         slug, title = SPIKE_SLUG, SPIKE_TITLE
@@ -442,7 +531,9 @@ def plan_job(
         title=title,
         preflight=preflight is not False and job != "spike",
         resume=resume,
-        kernel_sources=kernel_sources,
+        resume_source=resume_source,
+        adapter_source=adapter_source.kernel if adapter_source is not None else None,
+        adapter_sha256=adapter_source.sha256 if adapter_source is not None else None,
     )
 
 
@@ -585,10 +676,13 @@ def _look_logged(run_id: str) -> bool:
 
 def entry_argv(plan: JobPlan, run_store: str) -> list[str]:
     """The arguments kaggle/entry.py runs ``plan`` with, the push's timeout among them, so
-    the job stops at its time guard before Kaggle ends the session."""
+    the job stops at its time guard before Kaggle ends the session, and the digest its
+    checkpoint adapter must have, when this machine knows it."""
     argv = ["--job", plan.job, "--run-id", plan.run_id, "--code-sha", plan.code_sha]
     argv += ["--options", json.dumps(plan.options, sort_keys=True), "--run-store", run_store]
     argv += ["--timeout-s", str(plan.timeout_s)]
+    if plan.adapter_sha256 is not None:
+        argv += ["--adapter-sha256", plan.adapter_sha256]
     argv.append("--preflight" if plan.preflight else "--no-preflight")
     return [*argv, "--resume"] if plan.resume else argv
 
@@ -729,7 +823,8 @@ def record_push(
         "over_budget": budget.over,
         "kaggle_gpu_hours_left": budget.kaggle_left,
     }
-    # Only a resume mounts a kernel source, so a run's first attempt always holds the run.
+    # Only a resume is marked, since a later resume skips a marked attempt for an earlier
+    # one, and a first attempt has none before it.
     if plan.resume and kernel_source_dropped:
         entry["kernel_source_dropped"] = True
     record["kernels"].append(entry)
