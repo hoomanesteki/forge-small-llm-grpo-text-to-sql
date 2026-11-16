@@ -10,6 +10,8 @@ from __future__ import annotations
 import functools
 import json
 import subprocess
+import sys
+import types
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -182,6 +184,49 @@ def test_entry_loads_dev_once_in_a_dev_job(
         ("run-1", "baseline")
     ]
     assert not dev_log.exists()
+
+
+@pytest.mark.phase(3)
+def test_nothing_the_kernel_writes_or_prints_holds_a_secret(
+    tmp_path: Path,
+    spider_mini: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kernel_env = kernel_folder(tmp_path, monkeypatch)
+    build_inputs(kernel_env, spider_mini)
+
+    class UserSecretsClient:
+        def get_secret(self, label: str) -> str:
+            if label != "HF_TOKEN":
+                raise LookupError(f"no secret {label}")
+            # Pasted with its line break, which huggingface_hub drops before it sends it.
+            return TOKEN + "\n"
+
+    monkeypatch.setitem(
+        sys.modules, "kaggle_secrets", types.SimpleNamespace(UserSecretsClient=UserSecretsClient)
+    )
+    hub = FakeHub()
+    hub.fail["upload_folder"] = [ValueError(f"401 Unauthorized, Authorization: Bearer {TOKEN}")]
+    monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    options = {"model": "gold", "backend": "fake", "limit": 3}
+
+    assert script.main(argv(kernel_env, "--no-preflight", options=options), run=lambda c: None) == 0
+
+    run_dir = kernel_env / "working" / "runs" / "run-1"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert (status["status"], status["stage"]) == ("finished", "upload")
+    assert status["stages"]["upload"]["result"] == (
+        "failed: ValueError: 401 Unauthorized, Authorization: Bearer ***"
+    )
+    assert hub.tokens == [TOKEN]
+    manifest = RunManifest.model_validate_json((run_dir / "manifest.json").read_text())
+    assert manifest.status == "finished"
+    printed = capsys.readouterr()
+    assert TOKEN not in printed.out + printed.err
+    files = [path for path in (kernel_env / "working").rglob("*") if path.is_file()]
+    assert run_dir / "manifest.json" in files and run_dir / "status.json" in files
+    assert [path for path in files if TOKEN.encode() in path.read_bytes()] == []
 
 
 @pytest.mark.phase(3)

@@ -122,10 +122,10 @@ from the last attempt's output, first, so that an attempt failing at any later s
 carries the run to the next resume), env (the interpreter, for the log), code (the code
 dataset's `GIT_SHA` must be the pushed commit), install (`pip install --no-deps` the wheel,
 then `requirements-gpu.txt`; it names any package the wheel needs that the image lacks),
-data (`spider.sha256` found by glob, `database.zip` unpacked if Kaggle left it packed,
-every file checked), secrets, preflight (the same job on 5 examples, in `preflight/`), job,
-and upload (`runs/<run_id>/` to the Hub run store, only with an `HF_TOKEN`; see Run store).
-Whatever
+data (the dataset found by its `spider.sha256`, `database.zip` unpacked if Kaggle left it
+packed, every file checked against the list the installed wheel pins, not the dataset's own
+copy), secrets, preflight (the same job on 5 examples, in `preflight/`), job, and upload
+(`runs/<run_id>/` to the Hub run store, only with an `HF_TOKEN`; see Run store). Whatever
 happens, it writes `runs/<run_id>/status.json` and marks a manifest left `running` as
 failed. It exits 0 even when the job fails, since a kernel that ends in an error might not
 keep its output, so a COMPLETE kernel is not yet a finished job: `forge kaggle wait` reads
@@ -166,9 +166,12 @@ a dev run with `--run-id` when the same model's val run was pushed from the same
 the same day, since both would get the same default id.
 
 Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
-kernel, which only the web editor can do. Without them the job still runs, nothing is
-uploaded, and `forge kaggle output <run_id>` is how its results come back: the run's files
-go to `runs/<run_id>/`, and the log and the preflight to `runs/<run_id>/kernel/`.
+kernel, which only the web editor can do. Each is read without the line breaks and outer
+spaces huggingface_hub drops, and its value becomes `***` in every stage result in
+`status.json`, the error, the traceback and a failed run's `error.txt`. Without them the
+job still runs, nothing is uploaded, and `forge kaggle output <run_id>` is how its results
+come back: the run's files go to `runs/<run_id>/`, and the log and the preflight to
+`runs/<run_id>/kernel/`.
 
 Provenance. A kernel has the wheel but no git checkout, so `entry.py` passes the code
 dataset's `GIT_SHA` in `FORGE_CODE_SHA`, and the manifest's `git_sha` takes it only where

@@ -26,11 +26,20 @@ from forge.eval import run_files
 from forge.eval.config import HOSTS
 from forge.ops import kaggle, manifest, sessions
 from tests.fakes import FakeHub
-from tests.kernel import KERNEL_ENV, SHA, WHEEL, argv, build_inputs, kernel_folder
+from tests.kernel import (
+    KERNEL_ENV,
+    SHA,
+    WHEEL,
+    argv,
+    build_inputs,
+    kernel_folder,
+    write_checksums,
+)
 from tests.spike import ENTRY, entry
 
 script = entry()
 TOKEN = "hf_" + "".join(chr(97 + (i * 7) % 26) for i in range(30))
+PINNED_MISMATCH = "1 Spider files don't match the spider.sha256 forge pins: tables.json ("
 
 
 @pytest.fixture
@@ -63,9 +72,11 @@ class Job:
         self.calls.append(preflight)
         self.env = {name: os.environ.get(name) for name in KERNEL_ENV}
         if self.fail is not None:
-            # As a run that dies after writing its first manifest would leave it.
+            # As a run that dies after writing its first manifest would leave it, with the
+            # traceback run_files writes beside it.
             kernel.run_dir.mkdir(parents=True, exist_ok=True)
             (kernel.run_dir / "manifest.json").write_text(json.dumps({"status": "running"}))
+            (kernel.run_dir / "error.txt").write_text(f"Traceback: {self.fail!r}\n")
             raise self.fail
         return "finished"
 
@@ -101,6 +112,7 @@ def test_names_match_forges() -> None:
     assert script.CODE_SHA_ENV == manifest.CODE_SHA_ENV
     assert script.MANIFEST_FILE == run_files.MANIFEST_FILE
     assert script.SESSIONS_FILE == sessions.SESSIONS_FILE
+    assert run_files.RunPaths(Path("run"), "val").error.name == script.ERROR_FILE
     assert script.HOSTS == HOSTS
     assert set(script.STAGE_FUNCTIONS) == set(script.STAGES)
 
@@ -153,9 +165,10 @@ def test_a_failed_job_still_says_so_and_closes_its_manifest(
     run = kernel_root / "working" / "runs" / "run-1"
     closed = json.loads((run / "manifest.json").read_text())
     assert closed["status"] == "failed" and closed["ended_at"]
-    # The token is in neither the log nor any file the kernel keeps.
+    # The token is in neither the log nor any file the kernel keeps, the traceback too.
     printed = capsys.readouterr()
     assert TOKEN not in printed.out + printed.err
+    assert (run / "error.txt").read_text() == "Traceback: ValueError('bad reply ***')\n"
     assert all(TOKEN not in path.read_text() for path in run.iterdir())
 
 
@@ -244,7 +257,27 @@ def test_zipped_databases_are_unpacked_and_every_file_checked(
     script.main(argv(tmp_path), run=lambda c: None)
     status = status_of(tmp_path)
     assert (status["status"], status["stage"]) == ("failed", "data")
-    assert "1 Spider files don't match spider.sha256: tables.json (" in status["error"]
+    assert PINNED_MISMATCH in status["error"]
+    assert job.calls == []
+
+
+@pytest.mark.phase(3)
+def test_data_is_checked_against_the_list_the_wheel_pins(
+    kernel_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = Job()
+    monkeypatch.setitem(script.JOBS, "eval", job)
+    # Other data with a list of its own that agrees with it: the dataset is consistent
+    # with itself, but not with what forge pins.
+    data = kernel_root / "input" / "forge-spider"
+    (data / "tables.json").write_text("[]\n", encoding="utf-8")
+    write_checksums(data)
+
+    script.main(argv(kernel_root), run=lambda c: None)
+
+    status = status_of(kernel_root)
+    assert (status["status"], status["stage"]) == ("failed", "data")
+    assert PINNED_MISMATCH in status["error"]
     assert job.calls == []
 
 
