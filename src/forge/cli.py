@@ -1413,5 +1413,84 @@ def runs_push(run_id: RunArgument) -> None:
     typer.echo(f"run {run_id} ({manifest.kind}, {manifest.status}): uploaded to {hub} as {path}")
 
 
+train_app = typer.Typer(help="Train LoRA adapters on the train split.", no_args_is_help=True)
+app.add_typer(train_app, name="train")
+
+
+@train_app.command("sft")
+def train_sft(
+    config_file: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            exists=True,
+            dir_okay=False,
+            help="The run's training config, such as configs/sft/tiny-smoke.yaml.",
+        ),
+    ],
+    run_id: Annotated[
+        str | None,
+        typer.Option("--run-id", help="Name the run; by default <date>-<model>-sft-<sha7>."),
+    ] = None,
+    sft_dir: Annotated[
+        Path | None,
+        typer.Option(help="Where the SFT dataset's <hash> folders are kept (default data/sft)."),
+    ] = None,
+    allow_dirty: Annotated[
+        bool,
+        typer.Option(
+            "--allow-dirty", help="Run on uncommitted changes; the manifest's SHA says -dirty."
+        ),
+    ] = False,
+) -> None:
+    """Fine-tune a LoRA adapter on the train split's gold queries, as the config says.
+
+    It trains on the rows forge data build-sft builds for the config's model and prompt
+    version, kept in <sft-dir>/<hash>/. Files go to runs/<run_id>/ (FORGE_RUNS_DIR):
+    manifest.json, config.yaml, metrics.jsonl, checkpoints/step-NNNNNN/ every
+    ops.checkpoint_every steps, and the adapter in checkpoints/final/, which forge eval run
+    --adapter loads. Exits 1 if the run can't start.
+    """
+    from forge.ops.hub import checkpoint_dir
+    from forge.ops.manifest import DirtyTreeError, GitError
+    from forge.ops.paths import RepoRootNotFound
+    from forge.train.backends import BackendUnavailable
+    from forge.train.config import load_train_config
+    from forge.train.sft import run_sft
+
+    try:
+        config = load_train_config(config_file)
+        run = run_sft(config, run_id=run_id, allow_dirty=allow_dirty, sft_root=sft_dir)
+    # OSError covers missing data, a model that can't be found and a run id already used;
+    # ValueError a config no SFT run takes, a device with no platform, and SplitLeak.
+    except (
+        BackendUnavailable,
+        DirtyTreeError,
+        GitError,
+        ImportError,
+        OSError,
+        RepoRootNotFound,
+        ValueError,
+    ) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    manifest = run.manifest
+    trainer = manifest.config["trainer"]
+    sft_data = manifest.config["sft_data"]
+    typer.echo(f"run {manifest.run_id}: {run.root}")
+    typer.echo(f"sft data {run.sft_data}: {sft_data['rows']} rows, hash {sft_data['hash']}")
+    typer.echo(
+        f"platform {manifest.platform}, backend {trainer['backend']} on {trainer['device']} "
+        f"in {trainer['dtype']}"
+    )
+    if run.stopped_at is not None:
+        typer.echo(
+            f"stopped by the time guard after step {run.stopped_at}, so there is no final "
+            f"adapter; its checkpoint is {run.root / checkpoint_dir(run.stopped_at)}"
+        )
+    else:
+        typer.echo(f"adapter {run.adapter}")
+
+
 if __name__ == "__main__":
     app()
