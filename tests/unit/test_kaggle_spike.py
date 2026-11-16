@@ -74,6 +74,7 @@ def test_defaults_measure_the_planned_spike() -> None:
     assert (args.batch_size, args.grad_accum) == (6, 4)
     assert args.stacks == ["trl", "unsloth", "trl-vllm"]
     assert args.vllm is True
+    assert args.bnb_models == ["Qwen/Qwen3-8B"]
     assert args.secret_labels == ["HF_TOKEN"]
     # Inside the story's 1.5 GPU hours, with room for the report to get out.
     assert args.budget_minutes < 90
@@ -133,15 +134,14 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     args = _run_args(tmp_path)
     stages = spike.plan_stages(args, python="/usr/bin/python3")
     names = [stage.name for stage in stages]
-    small, large = "Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B"
+    small, large, reference = "Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B", "Qwen/Qwen3-8B"
+    # The GRPO benches come first, so a vLLM stage that hangs can't take their time, and
+    # the reference is fetched only when vLLM's stack is next.
     assert names == [
         "env",
         "secrets",
         f"download:{small}",
         f"download:{large}",
-        "install:vllm",
-        f"vllm:{small}",
-        f"vllm:{large}",
         "install:trl",
         f"grpo:trl:{small}",
         f"grpo:trl:{large}",
@@ -151,6 +151,11 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
         "install:trl-vllm",
         f"grpo:trl-vllm:{small}",
         f"grpo:trl-vllm:{large}",
+        f"download:{reference}",
+        "install:vllm",
+        f"vllm:{small}",
+        f"vllm:{large}",
+        f"vllm:{reference}:bnb",
     ]
     by_name = {stage.name: stage for stage in stages}
     venv = tmp_path / "work" / "venvs" / "trl"
@@ -177,10 +182,38 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     assert (child.steps, child.num_generations, child.max_completion_length) == (10, 6, 256)
     vllm = spike.parse_args([*by_name[f"vllm:{small}"].argv, "--out", "x.json"])
     assert (vllm.command, vllm.prompts, vllm.max_tokens) == ("vllm-bench", 100, 256)
+    assert vllm.quantization is None
+    # The reference loads in 4-bit with bitsandbytes, last in vLLM's venv, on a few prompts.
+    bnb = by_name[f"vllm:{reference}:bnb"]
+    assert bnb.needs == ("install:vllm", f"download:{reference}")
+    assert bnb.removes == str(tmp_path / "work" / "venvs" / "vllm")
+    assert by_name[f"vllm:{large}"].removes is None
+    assert bnb.env == spike.ONE_GPU
+    child = spike.parse_args([*bnb.argv, "--out", "x.json"])
+    assert (child.model, child.quantization) == (reference, "bitsandbytes")
+    assert child.prompts == spike.BNB_PROMPTS < args.prompts
 
     only = spike.plan_stages(_run_args(tmp_path, "--no-vllm", "--stacks", "trl"), python="py")
     assert [s.name for s in only][-3:] == ["install:trl", f"grpo:trl:{small}", f"grpo:trl:{large}"]
-    assert not any(s.name.startswith("vllm:") for s in only)
+    assert not any(s.name.startswith("vllm:") or reference in s.name for s in only)
+    no_bnb = spike.plan_stages(_run_args(tmp_path, "--bnb-models"), python="py")
+    assert [s.name for s in no_bnb][-1] == f"vllm:{large}"
+    assert f"download:{reference}" not in [s.name for s in no_bnb]
+
+
+@pytest.mark.phase(3)
+def test_bnb_stage_loads_the_reference_model() -> None:
+    # The kernel can't read configs/models.yaml, so the script names FG-307's 4-bit
+    # reference itself, and vLLM's stack carries the bitsandbytes it needs.
+    models = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    four_bit = [
+        entry["repo"]
+        for entry in models["reference"].values()
+        if entry.get("quantization") == "bitsandbytes"
+    ]
+    assert spike.parse_args(["run"]).bnb_models == four_bit == [spike.REFERENCE_MODEL]
+    bnb_pin = [r for r in spike.STACKS["trl-vllm"].requirements if r.startswith("bitsandbytes==")]
+    assert bnb_pin and set(bnb_pin) <= set(spike.STACKS["vllm"].requirements)
 
 
 def _fake_runner(outcomes: dict[str, Any], calls: list[str]) -> Any:
@@ -201,7 +234,7 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
     calls: list[str] = []
     outcomes = {
         "install:trl": spike.Outcome("error", error="RuntimeError: uv pip install exited 1"),
-        "vllm:m/small": spike.Outcome("timeout", error="killed after 60 s, the budget left"),
+        "vllm:m/small": spike.Outcome("timeout", error="killed after 60 s"),
     }
     report = spike.run(args, runner=_fake_runner(outcomes, calls))
 
@@ -216,6 +249,7 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
         "launch",
         "args",
         "stages",
+        "stage_caps_minutes",
     }
     assert (report["schema"], report["story"]) == (spike.REPORT_SCHEMA, "FG-301")
     assert report["finished_at"] is not None
@@ -225,17 +259,20 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
         "env": ("ok", None),
         "secrets": ("ok", None),
         "download:m/small": ("ok", None),
-        "install:vllm": ("ok", None),
-        "vllm:m/small": ("timeout", "killed after 60 s, the budget left"),
         "install:trl": ("error", "RuntimeError: uv pip install exited 1"),
         # Never started: its install failed.
         "grpo:trl:m/small": ("skipped", "needs install:trl"),
         "install:unsloth": ("ok", None),
         "grpo:unsloth:m/small": ("ok", None),
+        "download:Qwen/Qwen3-8B": ("ok", None),
+        "install:vllm": ("ok", None),
+        "vllm:m/small": ("timeout", "killed after 60 s"),
+        "vllm:Qwen/Qwen3-8B:bnb": ("ok", None),
     }
     assert "grpo:trl:m/small" not in calls
+    fields = {"name", "status", "started_at", "seconds", "timeout_seconds", "env", "result"}
     for stage in report["stages"]:
-        assert set(stage) >= {"name", "status", "started_at", "seconds", "result", "error"}
+        assert set(stage) >= {*fields, "error"}
     assert report["stages"][0]["result"] == {"stage": "env"}
     envs = {s["name"]: s["env"] for s in report["stages"]}
     assert envs["env"] == {}
@@ -257,6 +294,35 @@ def test_run_skips_stages_once_out_of_budget(tmp_path: Path) -> None:
     errors = {s["name"]: s["error"] for s in report["stages"]}
     assert errors["secrets"] == errors["install:trl"] == "out of budget (1 min)"
     assert errors["grpo:trl:m/small"] == "needs install:trl, download:m/small"
+
+
+@pytest.mark.phase(3)
+def test_a_hung_stage_costs_only_its_cap(tmp_path: Path) -> None:
+    args = _run_args(tmp_path, "--models", "m/small")
+    now = [0.0]
+    timeouts: dict[str, float] = {}
+
+    def runner(stage: Any, result_file: Path, timeout: float) -> Any:
+        timeouts[stage.name] = timeout
+        if stage.name == "grpo:trl:m/small":
+            now[0] += timeout  # hangs until it is killed
+            return spike.Outcome("timeout", error=f"killed after {timeout:.0f} s")
+        now[0] += 1.0
+        return spike.Outcome("ok", result={})
+
+    report = spike.run(args, runner=runner, clock=lambda: now[0])
+    caps = spike.STAGE_CAPS_MINUTES
+    assert report["stage_caps_minutes"] == caps
+    assert set(caps) == {stage.kind for stage in spike.plan_stages(args)}
+    # Each stage may run for its kind's cap, all well inside the budget.
+    assert max(caps.values()) < args.budget_minutes
+    for stage in report["stages"]:
+        cap = caps[stage["name"].split(":")[0]] * 60
+        assert timeouts[stage["name"]] == stage["timeout_seconds"] == cap, stage["name"]
+    # The hang cost its cap, not the time left, and every stage after it still ran.
+    statuses = {s["name"]: s["status"] for s in report["stages"]}
+    assert statuses.pop("grpo:trl:m/small") == "timeout"
+    assert set(statuses.values()) == {"ok"}
 
 
 @pytest.fixture
@@ -372,6 +438,7 @@ def test_vllm_stage_generates_greedy_fp16(monkeypatch: pytest.MonkeyPatch) -> No
     # A T4 has no bf16, so the weights load in fp16.
     assert llm_kwargs["dtype"] == "half"
     assert llm_kwargs["model"] == "Qwen/Qwen3-1.7B"
+    assert llm_kwargs["quantization"] is None
     assert prompts == 100
     assert sampling["temperature"] == 0.0 and sampling["max_tokens"] == 256
     assert chat_kwargs["chat_template_kwargs"] == {"enable_thinking": False}
@@ -385,6 +452,23 @@ def test_vllm_stage_generates_greedy_fp16(monkeypatch: pytest.MonkeyPatch) -> No
     assert result["completion_tokens_per_second"] == pytest.approx(per_second, rel=0.05)
     assert result["memory"] is None  # no CUDA here
     assert result["samples"][0].startswith("```sql")
+
+
+@pytest.mark.phase(3)
+def test_vllm_stage_loads_bitsandbytes_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    # FG-306 loads a 4-bit reference only if the spike shows vLLM can, as the backend
+    # asks for it: bitsandbytes over fp16 weights.
+    fake = types.ModuleType("vllm")
+    exec(FAKE_VLLM, fake.__dict__)
+    monkeypatch.setitem(sys.modules, "vllm", fake)
+    argv = ["vllm-bench", "--out", "x.json", "--model", "Qwen/Qwen3-8B", "--prompts", "10"]
+    result = spike.vllm_stage(spike.parse_args([*argv, "--quantization", "bitsandbytes"]))
+
+    (_, llm_kwargs), (_, prompts, _, _) = fake.CALLS
+    assert (llm_kwargs["quantization"], llm_kwargs["dtype"]) == ("bitsandbytes", "half")
+    assert prompts == result["prompts"] == 10
+    assert result["settings"]["quantization"] == "bitsandbytes"
+    assert len(result["samples"]) == 3
 
 
 @pytest.mark.phase(3)
