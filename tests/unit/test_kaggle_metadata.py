@@ -9,6 +9,7 @@ import pytest
 from forge.ops.kaggle import (
     ARGV_LINE,
     GPU_MACHINE_SHAPE,
+    MAX_KERNEL_NAME,
     METADATA_FILE,
     bake_argv,
     check_kernel_metadata,
@@ -128,6 +129,32 @@ def test_render_refuses_a_missing_value() -> None:
         render_kernel_metadata(load_template(ROOT), values)
     with pytest.raises(ValueError, match="title 'Forge spike' slugifies to 'forge-spike'"):
         render_kernel_metadata(load_template(ROOT), {**VALUES, "title": "Forge spike"})
+
+
+@pytest.mark.phase(3)
+def test_kernel_names_past_kaggles_limit_are_refused() -> None:
+    # FG-303's first push: the default run id made a 57-character title, and Kaggle
+    # answered 400 Bad Request; FG-301 then saved 50 characters and got the 400 at 51.
+    run_id = "2026-11-16-qwen2-5-coder-1-5b-instruct-eval-c8f4b41"
+    refused = _rendered(id=f"forge-owner/forge-{run_id}", title=f"Forge {run_id}")
+    assert check_kernel_metadata(refused) == [
+        f"slug 'forge-{run_id}' has 57 characters, and Kaggle refuses a kernel's over 50",
+        f"title 'Forge {run_id}' has 57 characters, and Kaggle refuses a kernel's over 50",
+    ]
+    assert MAX_KERNEL_NAME == 50
+    word = "a" * 44
+    assert check_kernel_metadata(_rendered(id=f"o/forge-{word}", title=f"Forge {word}")) == []
+    over = check_kernel_metadata(_rendered(id=f"o/forge-{word}b", title=f"Forge {word}b"))
+    assert [problem.split(" has ")[1] for problem in over] == [
+        "51 characters, and Kaggle refuses a kernel's over 50"
+    ] * 2
+    # The lower bound kaggle 2.2.5 checks itself stays.
+    assert check_kernel_metadata(_rendered(title="Spk")) == [
+        "title must be at least 5 characters, got 'Spk'"
+    ]
+    with pytest.raises(ValueError, match="57 characters"):
+        values = {**VALUES, "slug": f"forge-{run_id}", "title": f"Forge {run_id}"}
+        render_kernel_metadata(load_template(ROOT), values)
 
 
 @pytest.mark.phase(3)

@@ -4,6 +4,7 @@ for: the checks before a push, the kernel it renders, and what it records."""
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -25,7 +26,14 @@ from forge.eval.config import EvalConfig
 from forge.ops import clock, kaggle, kaggle_job
 from forge.ops.dev_usage import log_dev_use, read_uses
 from forge.ops.hub import manifest_bytes
-from forge.ops.kaggle import KaggleClient, KaggleError, check_kernel_metadata
+from forge.ops.kaggle import (
+    MAX_KERNEL_NAME,
+    KaggleClient,
+    KaggleError,
+    check_kernel_metadata,
+    title_slug,
+    valid_slug,
+)
 from forge.ops.kaggle_job import (
     COLAB_DIRS,
     KERNEL_BUILD,
@@ -33,6 +41,7 @@ from forge.ops.kaggle_job import (
     SPIKE_SLUG,
     SPIKE_TITLE,
     entry_argv,
+    kernel_name,
     plan_job,
     write_kernel,
 )
@@ -453,6 +462,86 @@ def test_a_resume_skips_an_attempt_whose_kernel_source_kaggle_dropped(
     # The kernel to follow is still the latest pushed, which is the one running.
     status = CliRunner().invoke(cli.app, ["kaggle", "status", "r1"])
     assert status.stdout.startswith(f"{OWNER}/forge-r1-4/1: COMPLETE")
+
+
+@pytest.mark.phase(3)
+def test_kernel_names_fit_kaggles_limit_and_follow_the_run_id() -> None:
+    # A name that fits is the run id's own, as it always was.
+    assert kernel_name("first") == ("forge-first", "Forge first")
+    assert kernel_name("first", 2) == ("forge-first-2", "Forge first 2")
+    fits = "-".join(["ab"] * 14) + "-cd"  # 44 characters, so a title of 50
+    assert len(fits) == 44
+    assert kernel_name(fits) == (f"forge-{fits}", f"Forge {fits}")
+    # A longer one keeps the run id up to a dash, then a hash of all of it.
+    default = "2026-11-16-qwen2-5-coder-1-5b-instruct-eval-c8f4b41"
+    assert kernel_name(default) == (
+        f"forge-2026-11-16-qwen2-5-coder-1-5b-{_digest(default)}",
+        f"Forge 2026-11-16-qwen2-5-coder-1-5b-{_digest(default)}",
+    )
+    one_word = "x" * 80
+    assert kernel_name(one_word)[0] == f"forge-{'x' * 35}-{_digest(one_word)}"
+    # A resume's suffix can take a name that fit past the limit.
+    assert kernel_name(fits, 2)[0] == f"forge-{fits[:32]}-{_digest(fits)}-2"
+    for run_id in (fits, default, one_word, f"{fits}-d", "-".join(["a1"] * 30)):
+        for attempt in (1, 2, 10, 1000):
+            slug, title = kernel_name(run_id, attempt)
+            assert len(slug) <= MAX_KERNEL_NAME and len(title) <= MAX_KERNEL_NAME, (slug, title)
+            assert valid_slug(slug) and title_slug(title) == slug, (slug, title)
+            assert slug.endswith(f"-{attempt}") == (attempt > 1)
+    # Run ids that begin alike, cut to the same start, still name kernels of their own.
+    assert len({kernel_name(f"{default}-{i}")[0] for i in range(100)}) == 100
+
+
+def _digest(run_id: str) -> str:
+    return hashlib.sha256(run_id.encode()).hexdigest()[:8]
+
+
+@pytest.mark.phase(3)
+def test_a_run_id_past_kaggles_limit_is_pushed_and_resumed_under_a_shorter_kernel(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    config = repo.parent / "smoke.yaml"
+    shutil.copyfile(ROOT / "configs" / "eval" / "smoke-kaggle-50-val.yaml", config)
+
+    # FG-303's 50-question job: its default run id made a 57-character title, which Kaggle
+    # refused with a 400 once the code dataset had been checked.
+    first = _run("--job", "eval", "--config", str(config), "--yes")
+
+    assert first.exit_code == 0, first.output
+    run_id = f"{_today():%Y-%m-%d}-qwen2-5-coder-1-5b-instruct-eval-{head[:7]}"
+    assert len(f"Forge {run_id}") == 57
+    stem = f"{_today():%Y-%m-%d}-qwen2-5-coder-1-5b-{_digest(run_id)}"
+    kernel = f"{OWNER}/forge-{stem}"
+    meta = json.loads(fake.pushed[0]["kernel-metadata.json"])
+    assert (meta["id"], meta["title"]) == (kernel, f"Forge {stem}")
+    assert check_kernel_metadata(meta) == []
+    # The run keeps its id: the kernel runs it, and kernels.json maps it to the kernel.
+    argv = _baked_argv(fake.pushed[0]["entry.py"])
+    assert argv[argv.index("--run-id") + 1] == run_id
+    assert f"run {run_id}: kernel {kernel}, version 1" in first.stdout
+    assert f"next: forge kaggle wait {run_id}" in first.stdout
+    status = CliRunner().invoke(cli.app, ["kaggle", "status", run_id])
+    assert status.stdout.startswith(f"{kernel}/1: COMPLETE")
+
+    resumed = _run("--job", "eval", "--config", str(config), "--yes", "--resume")
+
+    assert resumed.exit_code == 0, resumed.output
+    meta = json.loads(fake.pushed[1]["kernel-metadata.json"])
+    assert (meta["id"], meta["title"]) == (f"{kernel}-2", f"Forge {stem} 2")
+    assert meta["kernel_sources"] == [f"{kernel}/1"]
+    assert check_kernel_metadata(meta) == []
+    argv = _baked_argv(fake.pushed[1]["entry.py"])
+    assert (argv[argv.index("--run-id") + 1], argv[-1]) == (run_id, "--resume")
+    assert [k["kernel"] for k in _record(repo, run_id)["kernels"]] == [kernel, f"{kernel}-2"]
+    # Every command that follows the run finds its latest kernel by the run id.
+    for command in ("status", "logs", "output"):
+        followed = CliRunner().invoke(cli.app, ["kaggle", command, run_id])
+        assert followed.exit_code == 0, followed.output
+    assert [c[3] for c in fake.ran("kernels", "status")] == [f"{kernel}/1", f"{kernel}-2/1"]
+    assert [c[3] for c in fake.ran("kernels", "logs")] == [f"{kernel}-2/1"]
+    assert fake.ran("kernels", "output")[-1][3] == f"{kernel}-2/1"
 
 
 @pytest.mark.phase(3)
