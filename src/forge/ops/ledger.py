@@ -14,6 +14,11 @@ uploading included.
 has ended, on any platform with a GPU, and only once a run id: the check and the append
 share one lock. ``audit`` is invariant I7: every run on a budget platform has a row, a
 row names its run's platform, and the cash spent stays within ``CASH_LIMIT_USD``.
+
+Every date here is a UTC date, as run ids are (``forge.ops.clock``): a pulled row takes
+the UTC day its run started, ``forge ledger add`` today's UTC date unless told another,
+and ``summary``'s window ends on today's UTC date. A row's date and its run id's date
+then agree, and a session that ended in the evening west of UTC counts this week at once.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from forge.core.types import RunManifest
+from forge.ops.clock import utc_today
 from forge.ops.logfile import locked_append
 from forge.ops.paths import ledger_path
 
@@ -256,7 +262,9 @@ class Summary:
 
 
 def summary(window_days: int = 7, path: Path | None = None, today: date | None = None) -> Summary:
-    today = today or date.today()
+    """The ledger's totals, with the Kaggle hours of the ``window_days`` UTC days that end
+    on ``today``, by default today's UTC date."""
+    today = today or utc_today()
     start = today - timedelta(days=window_days - 1)
     rows = read_rows(path)
     from forge.ops.dotenv import forge_env
