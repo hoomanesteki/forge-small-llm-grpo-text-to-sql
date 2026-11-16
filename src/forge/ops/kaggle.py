@@ -23,7 +23,10 @@ does ``kernels push`` for a push error. A push is refused only when Kaggle says 
 that names no version (kaggle 2.2.5 prints one when the server sends none). When
 ``kernels push`` says a source could not be added, Kaggle has still saved and started
 that version, without the source, so the push is returned with those lines in
-``PushedKernel.dropped`` rather than refused.
+``PushedKernel.dropped`` rather than refused. A CLI that exits with an error before it
+says the kernel was pushed may only have lost Kaggle's answer, a timeout among them, after
+Kaggle saved the kernel, so ``push_kernel`` asks Kaggle whether it has a kernel no earlier
+push made before it calls the push failed.
 """
 
 from __future__ import annotations
@@ -440,12 +443,20 @@ class KaggleClient:
             raise KaggleError(f"kaggle downloaded no {name} from {ref} into {folder}")
         return path
 
-    def push_kernel(self, folder: Path, *, timeout_s: int, gpu: bool) -> PushedKernel:
+    def push_kernel(
+        self, folder: Path, *, timeout_s: int, gpu: bool, new_kernel: bool = False
+    ) -> PushedKernel:
         """Push and start the kernel ``folder`` holds; returns its id, its version and
         the sources Kaggle dropped from it, if any.
 
-        Raises ``KaggleError`` only for a push Kaggle never started: one it refused, or a
-        CLI that failed before it said the kernel was pushed.
+        A CLI that fails before it says the kernel was pushed may have lost the answer to
+        a push Kaggle saved. With ``new_kernel``, for a kernel no earlier push made, Kaggle
+        is then asked whether it has the kernel (``kaggle kernels status``): if it does,
+        the push was made, and is returned with no version, so the kernel's latest is
+        followed, and with ``lost`` set to the CLI's error. A push to a kernel an earlier
+        push made is not checked, since the status names no version and so can't tell
+        this push's from the one before. Raises ``KaggleError`` for a push Kaggle refused,
+        one whose kernel it doesn't have, or one it couldn't be asked about, which says so.
         """
         accelerator = ["--accelerator", GPU_MACHINE_SHAPE] if gpu else []
         command = [self.executable, "kernels", "push", "-p", str(folder), *accelerator]
@@ -454,7 +465,21 @@ class KaggleClient:
         if _PUSH_REFUSED.search(output):
             raise KaggleError(f"{_display(command)} was refused: {_tail(output)}")
         if result.returncode != 0 and not _PUSHED.search(output):
-            raise _failed(command, result)
+            failure = _failed(command, result)
+            if not new_kernel:
+                raise failure
+            sent = _pushed_id(folder)
+            try:
+                saved = self.find_kernel(sent)
+            except KaggleError as exc:
+                raise KaggleError(
+                    f"{failure}; whether Kaggle saved {sent} all the same is unknown, since "
+                    f"asking failed too ({exc}): check kaggle kernels status {sent} before "
+                    "pushing again"
+                ) from exc
+            if saved is None:
+                raise failure
+            return PushedKernel(sent, None, output.strip(), lost=str(failure))
         url = _KERNEL_URL.search(output)
         kernel = "/".join(url.groups()) if url else None
         version = _PUSHED_VERSION.search(output)
@@ -465,12 +490,22 @@ class KaggleClient:
     def kernel_status(self, kernel: str) -> KernelStatus:
         """The worker state of ``kernel`` (``owner/slug[/version]``), as kagglesdk names it."""
         command = [self.executable, "kernels", "status", kernel]
-        output = _check(self.run, command)
-        state = _KERNEL_STATUS.search(output)
-        if state is None or state.group(1) not in KERNEL_STATES:
-            raise KaggleError(f"{_display(command)} printed {_tail(output)!r}")
-        failure = _FAILURE.search(output)
-        return KernelStatus(state.group(1), failure.group(1).strip() if failure else None)
+        return _kernel_state(command, _check(self.run, command))
+
+    def find_kernel(self, kernel: str) -> KernelStatus | None:
+        """The worker state of ``kernel``, or None when Kaggle has no such kernel; raises
+        on any other failure."""
+        command = [self.executable, "kernels", "status", kernel]
+        result = _run(self.run, command)
+        if result.returncode == 0:
+            return _kernel_state(command, result.stdout)
+        # kaggle 2.2.5 prints a 404 as "404 Client Error: Not Found ...", and turns a 403,
+        # which Kaggle may answer for a private slug it holds nothing at, into "Cannot
+        # access kernel ... (Permission 'kernels.get' was denied)".
+        text = _output(result).lower()
+        if "404 client error" in text or "permission 'kernels.get' was denied" in text:
+            return None
+        raise _failed(command, result)
 
     def kernel_logs(self, kernel: str) -> str:
         return _check(self.run, [self.executable, "kernels", "logs", kernel])
@@ -505,6 +540,7 @@ class PushedKernel:
     version: int | None  # None when the CLI named none: the kernel's latest is this push
     output: str
     dropped: tuple[str, ...] = ()  # the CLI's lines naming sources it could not add
+    lost: str | None = None  # the CLI's error, when Kaggle had the kernel all the same
 
     @property
     def kernel_source_dropped(self) -> bool:
@@ -704,6 +740,23 @@ def _fresh_dir(path: Path) -> Path:
 
 def _write_json(path: Path, data: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _kernel_state(command: list[str], output: str) -> KernelStatus:
+    state = _KERNEL_STATUS.search(output)
+    if state is None or state.group(1) not in KERNEL_STATES:
+        raise KaggleError(f"{_display(command)} printed {_tail(output)!r}")
+    failure = _FAILURE.search(output)
+    return KernelStatus(state.group(1), failure.group(1).strip() if failure else None)
+
+
+def _pushed_id(folder: Path) -> str:
+    """The kernel ``folder``'s metadata names: the one ``kernels push`` sent."""
+    meta = json.loads((folder / METADATA_FILE).read_text(encoding="utf-8"))
+    kernel = meta.get("id") if isinstance(meta, dict) else None
+    if not isinstance(kernel, str):
+        raise ValueError(f"{folder / METADATA_FILE} names no kernel id")
+    return kernel
 
 
 def _run(run: Runner, command: list[str]) -> subprocess.CompletedProcess[str]:

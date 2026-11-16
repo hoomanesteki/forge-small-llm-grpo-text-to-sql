@@ -55,6 +55,24 @@ OWNER = "forge-owner"
 CONFIG = "model: gold\nbackend: fake\nlimit: 5\nops:\n  est_gpu_hours: 0.5\n"
 NOT_FOUND = "404 Client Error: Not Found\n\nThe resource was not found.\n"
 QUOTA = "resource,used,remaining,total,refreshAt\r\nGPU,3.50h,26.50h,30.00h,2026-11-21T00:00\r\n"
+# What kaggle 2.2.5 prints for an error it has no handler for, as a push whose answer
+# never came back: the error, then its advice.
+LOST = (
+    "ReadTimeout: HTTPSConnectionPool(host='api.kaggle.com', port=443): Read timed out.\n\n"
+    "If this is unexpected, you can re-run with `kaggle --debug [command]` to see the full\n"
+    "traceback.\n"
+)
+# kernels status for a kernel Kaggle doesn't have: kaggle 2.2.5's message for a 403, and
+# a 404 as it prints one.
+DENIED = (
+    "Cannot access kernel '{kernel}' (Permission 'kernels.get' was denied). The most likely "
+    "cause is a wrong kernel slug.\n"
+)
+NO_KERNEL = (
+    "404 Client Error: Not Found for url: "
+    "https://api.kaggle.com/v1/kernels.KernelsApiService/GetKernelSessionStatus\n\n"
+    "The resource was not found. Check the spelling of the reference you passed.\n"
+)
 script = entry()
 
 
@@ -64,7 +82,9 @@ def _done(command: list[str], code: int = 0, stdout: str = "", stderr: str = "")
 
 class FakeKaggle:
     """Stands in for uv and kaggle: a code dataset whose versions each hold a GIT_SHA, the
-    data dataset, the GPU quota, and kernels that go through ``states``."""
+    data dataset, the GPU quota, and kernels that go through ``states``. With
+    ``push_failure`` a push exits 1 with it, having saved the kernel or not as ``saves``
+    says, and status answers for a kernel Kaggle doesn't have as kaggle 2.2.5 does."""
 
     def __init__(self, *code_versions: str, data: bool = True) -> None:
         self.code_versions = list(code_versions)
@@ -72,6 +92,9 @@ class FakeKaggle:
         self.pending = 0  # status calls that still show the last upload in processing
         self.quota = QUOTA
         self.push_output: str | None = None
+        self.push_failure: str | None = None
+        self.saves = True
+        self.missing: set[str] = set()  # kernels whose push failed before Kaggle saved them
         self.states = ["COMPLETE"]
         self.outputs: dict[str, str] = {}
         self.pushed: list[dict[str, str]] = []
@@ -101,10 +124,17 @@ class FakeKaggle:
             return _done(command, stdout=self.quota)
         if verb == ["kernels", "push"]:
             folder = Path(command[command.index("-p") + 1])
-            self.pushed.append({p.name: p.read_text(encoding="utf-8") for p in folder.iterdir()})
             kernel = json.loads((folder / "kernel-metadata.json").read_text())["id"]
+            if self.push_failure is not None and not self.saves:
+                self.missing.add(kernel)
+                return _done(command, 1, stderr=self.push_failure)
+            self.pushed.append({p.name: p.read_text(encoding="utf-8") for p in folder.iterdir()})
+            if self.push_failure is not None:
+                return _done(command, 1, stderr=self.push_failure)
             return _done(command, stdout=self.push_output or _pushed(kernel))
         if verb == ["kernels", "status"]:
+            if "/".join(command[3].split("/")[:2]) in self.missing:
+                return _done(command, 1, stderr=DENIED.format(kernel=command[3]))
             state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
             return _done(command, stdout=f'{command[3]} has status "KernelWorkerStatus.{state}"\n')
         if verb == ["kernels", "logs"]:
@@ -739,6 +769,59 @@ def test_a_push_kaggle_started_logs_its_look_and_is_recorded_whatever_fails(
 
 
 @pytest.mark.phase(3)
+def test_a_dev_push_whose_answer_was_lost_spends_its_look_once_kaggle_has_the_kernel(
+    repo: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    dev = repo.parent / "dev.yaml"
+    dev.write_text("model: gold\nbackend: fake\nsplit: dev\nops: {est_gpu_hours: 0.5}\n")
+
+    def push(run_id: str) -> Any:
+        args = ("--job", "eval", "--config", str(dev), "--reason", "baseline", "--yes")
+        return _run(*args, "--run-id", run_id)
+
+    # The CLI fails after Kaggle saved the kernel: Kaggle has it, so it runs and may read
+    # dev. The push is recorded, its look logged, and the lost answer is a warning.
+    fake.push_failure = LOST
+    made = push("lost1")
+
+    assert made.exit_code == 0, made.output
+    kernel = f"{OWNER}/forge-lost1"
+    assert "warning: kaggle kernels push -p " in made.stderr
+    assert "exited 1: ReadTimeout: HTTPSConnectionPool" in made.stderr
+    assert f"but Kaggle has {kernel}, so the push was made and only its answer was lost" in (
+        made.stderr
+    )
+    assert "dev look 1 of 6 logged in docs/dev-usage.md" in made.stdout
+    assert f"run lost1: kernel {kernel}, its latest version" in made.stdout
+    assert read_uses(dev_log) == [(_today().isoformat(), "lost1", "baseline")]
+    entry = _record(repo, "lost1")["kernels"][0]
+    assert (entry["kernel"], entry["version"]) == (kernel, None)
+    status = CliRunner().invoke(cli.app, ["kaggle", "status", "lost1"])
+    assert status.exit_code == 0 and status.stdout.startswith(f"{kernel}: COMPLETE")
+
+    # Kaggle has no such kernel: the push never started, so it fails and spends nothing.
+    fake.saves = False
+    failed = push("lost2")
+
+    assert failed.exit_code == 1, failed.output
+    assert "exited 1: ReadTimeout: HTTPSConnectionPool" in failed.stderr
+    assert "warning" not in failed.stderr and "unknown" not in failed.stderr
+    assert not (repo / "runs" / "lost2").exists()
+    assert read_uses(dev_log) == [(_today().isoformat(), "lost1", "baseline")]
+    # Each failed push asked about its own new kernel once.
+    assert [c[3] for c in fake.ran("kernels", "status")] == [kernel, kernel, f"{kernel[:-1]}2"]
+
+    # The spike's one kernel was made by an earlier push, so a status can't tell its new
+    # version from the last: a failed spike push fails as before, without asking.
+    spike = str(repo / "configs/spike/throughput.yaml")
+    refused = _run("--job", "spike", "--config", spike, "--yes")
+    assert refused.exit_code == 1 and "exited 1: ReadTimeout" in refused.stderr
+    assert len(fake.ran("kernels", "status")) == 3
+
+
+@pytest.mark.phase(3)
 def test_bad_kernel_slugs_and_notebook_resumes_are_refused_before_any_upload(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1113,6 +1196,60 @@ def test_a_push_kaggle_never_started_says_how_it_failed() -> None:
     with pytest.raises(KaggleError, match="exited 1: Connection reset") as raised:
         answer("", 1, "Connection reset\n").push_kernel(Path("k"), timeout_s=60, gpu=True)
     assert "refused" not in str(raised.value)
+
+
+@pytest.mark.phase(3)
+def test_a_push_whose_answer_was_lost_is_made_only_if_kaggle_has_its_kernel(
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "kernel"
+    folder.mkdir()
+    (folder / "kernel-metadata.json").write_text(json.dumps({"id": "o/forge-x"}))
+
+    def client(code: int, stdout: str = "", stderr: str = "") -> tuple[KaggleClient, list[Any]]:
+        commands: list[list[str]] = []
+
+        def run(args: Sequence[str]) -> Any:
+            commands.append(list(args))
+            if list(args)[1:3] == ["kernels", "push"]:
+                return _done(list(args), 1, stderr=LOST)
+            return _done(list(args), code, stdout, stderr)
+
+        return KaggleClient(run=run, executable="kaggle"), commands
+
+    def push(kaggle: KaggleClient) -> Any:
+        return kaggle.push_kernel(folder, timeout_s=60, gpu=True, new_kernel=True)
+
+    # Kaggle has the kernel: the push was made, and only its answer was lost.
+    saved, commands = client(0, 'o/forge-x has status "KernelWorkerStatus.QUEUED"\n')
+    pushed = push(saved)
+    assert (pushed.kernel, pushed.version, pushed.dropped) == ("o/forge-x", None, ())
+    assert pushed.lost is not None
+    assert pushed.lost.startswith(f"kaggle kernels push -p {folder} --accelerator NvidiaTeslaT4")
+    assert "exited 1: " in pushed.lost and "Read timed out." in pushed.lost
+    assert commands[1] == ["kaggle", "kernels", "status", "o/forge-x"]
+    # Kaggle has no such kernel, whichever way kaggle 2.2.5 says so: it fails as before.
+    for answer in (DENIED.format(kernel="o/forge-x"), NO_KERNEL):
+        with pytest.raises(KaggleError, match="exited 1: ReadTimeout") as raised:
+            push(client(1, stderr=answer)[0])
+        assert "unknown" not in str(raised.value) and "refused" not in str(raised.value)
+    # Kaggle can't be asked: the push fails, saying it may have been saved after all.
+    with pytest.raises(KaggleError) as unknown:
+        push(client(1, stderr="ConnectionError: Connection reset by peer\n")[0])
+    message = str(unknown.value)
+    assert "exited 1: ReadTimeout" in message
+    assert "whether Kaggle saved o/forge-x all the same is unknown" in message
+    assert "Connection reset by peer" in message
+    assert message.endswith("check kaggle kernels status o/forge-x before pushing again")
+    # A kernel an earlier push made isn't asked about.
+    earlier, commands = client(0, 'o/forge-x has status "KernelWorkerStatus.QUEUED"\n')
+    with pytest.raises(KaggleError, match="exited 1: ReadTimeout"):
+        earlier.push_kernel(folder, timeout_s=60, gpu=True)
+    assert [command[1:3] for command in commands] == [["kernels", "push"]]
+    # find_kernel tells a missing kernel from any other failure.
+    assert client(1, stderr=NO_KERNEL)[0].find_kernel("o/forge-x") is None
+    with pytest.raises(KaggleError, match="exited 1: 500 Server Error"):
+        client(1, stderr="500 Server Error: Internal Server Error\n")[0].find_kernel("o/k")
 
 
 def _baked_argv(source: str) -> list[str]:

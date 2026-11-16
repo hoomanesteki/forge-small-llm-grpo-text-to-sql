@@ -995,6 +995,8 @@ def kaggle_run(
     take. A dev job's push spends one of the six dev looks, logged in docs/dev-usage.md as
     soon as Kaggle accepts it; a --resume of the run is the same look. A source Kaggle
     could not add is a warning: that version runs without it, recorded like any other.
+    So is a kaggle CLI that fails before it says the kernel was pushed while Kaggle has
+    the new kernel all the same: only the answer was lost.
     """
     import json
 
@@ -1056,7 +1058,9 @@ def kaggle_run(
             typer.echo("nothing pushed")
             raise typer.Exit(1)
         folder = jobs.write_kernel(root, plan, code=code, data=data, run_store=run_store)
-        pushed = client.push_kernel(folder, timeout_s=plan.timeout_s, gpu=True)
+        pushed = client.push_kernel(
+            folder, timeout_s=plan.timeout_s, gpu=True, new_kernel=plan.new_kernel
+        )
     except _kaggle_job_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -1072,7 +1076,14 @@ def kaggle_run(
             err=True,
         )
         raise typer.Exit(1)
-    typer.echo(pushed.output)
+    if pushed.lost is not None:
+        typer.echo(
+            f"warning: {pushed.lost}; but Kaggle has {kernel}, so the push was made and only "
+            "its answer was lost",
+            err=True,
+        )
+    else:
+        typer.echo(pushed.output)
     for line in pushed.dropped:
         typer.echo(f"warning: {line}", err=True)
     if pushed.dropped:
