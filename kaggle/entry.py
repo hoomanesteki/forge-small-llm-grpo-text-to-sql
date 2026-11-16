@@ -34,7 +34,8 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
   would end the session (``forge.ops.timeguard.eval_deadline``, counted from the kernel's
   start), as ``stopped_time_guard``, and its run is uploaded and resumed like any other.
 - upload: that folder to the Hub run store (``forge.ops.hub``, which tries again on
-  network errors), only when there is an ``HF_TOKEN``.
+  network errors), only when there is an ``HF_TOKEN``, and only when the store's copy
+  holds no session this one lacks (``forge.ops.run_copies.put_run``).
 
 A dev job's ``load_dev`` logs its look in ``dev-usage.md`` in the output folder, since a
 kernel has no checkout; the repo's ``docs/dev-usage.md`` got the row when ``forge kaggle
@@ -385,11 +386,14 @@ def upload_stage(kernel: Kernel) -> str:
     if not token:
         return "skipped: no HF_TOKEN, so the kernel output is the only copy"
     from forge.ops.hub import HubRunStore
+    from forge.ops.run_copies import put_run
 
     repo = kernel.args.run_store
     _record_session(kernel, _now())
     try:
-        HubRunStore(repo, token=token).put_folder(kernel.args.run_id, kernel.run_dir)
+        # Refused when the store's copy holds a session this one lacks, such as a laptop's
+        # attempt since the output this kernel resumed from.
+        put_run(HubRunStore(repo, token=token), kernel.run_dir)
     # The run is complete in the kernel output whatever the Hub says, so a failed upload
     # is recorded rather than turned into a failed job.
     except Exception as exc:

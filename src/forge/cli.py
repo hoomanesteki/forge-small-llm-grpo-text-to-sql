@@ -437,9 +437,9 @@ def eval_run(
     eval/<split>-generations.jsonl and -scores.jsonl. With --retry 1,
     eval/<split>-first-tries.jsonl keeps the first reply of each retried sample, and the
     generations file holds the reply each score is for. With --store hub the folder also
-    goes to the Hub run store when the run ends, finished or failed, and a --run-id that
-    runs/ lacks is fetched from it to resume. Exits 1 unless the run finishes: when it
-    fails, or when --deadline-minutes stops it.
+    goes to the Hub run store when the run ends, finished or failed, and the store's copy
+    of a --run-id is fetched to resume when runs/ has none or an older one. Exits 1 unless
+    the run finishes: when it fails, or when --deadline-minutes stops it.
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
@@ -1311,15 +1311,17 @@ def runs_push(run_id: RunArgument) -> None:
 
     For a run whose upload failed, or one that came back through forge kaggle output. Its
     manifest must be there. Files the store has and the folder lacks are deleted, so push
-    a run only from a folder that holds all of it, such as one forge runs pull filled.
+    a run only from a folder that holds all of it, such as one forge runs pull filled. A
+    store whose copy holds a session the folder lacks keeps it, and the push is refused.
     """
     from forge.ops.hub import LocalRunStore, hub_store
     from forge.ops.paths import runs_dir
+    from forge.ops.run_copies import put_run
 
     try:
         hub, local = hub_store(), LocalRunStore(runs_dir())
         manifest = local.get_manifest(run_id)
-        path = hub.put_folder(run_id, local.root / run_id, replace=True)
+        path = put_run(hub, local.root / run_id, replace=True)
     except _runs_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
