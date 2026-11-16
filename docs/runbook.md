@@ -312,6 +312,9 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
   When neither's do, two machines carried the run on from one point and each holds work the
   other lacks, so `forge eval run` refuses to resume it and no upload replaces either. Keep the
   store's with `forge runs pull <run_id>`, or evaluate again under a new `--run-id`.
+- A run made on this machine, such as a `local-mps` pilot, has nothing to pull:
+  `uv run forge ledger record <run_id>` writes its rows the same way, one for each session
+  that has ended, from `runs/<run_id>/` (`FORGE_RUNS_DIR`), so its hours are never typed.
 - The end of an eval run and a push replace the store's copy: files it has that the folder lacks
   are deleted, such as the `error.txt` of an attempt that failed. The kernel's upload stage only
   adds, since a kernel that failed early may hold part of a run. None of them uploads over a
