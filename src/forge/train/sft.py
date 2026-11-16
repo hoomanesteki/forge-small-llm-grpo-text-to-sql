@@ -11,12 +11,16 @@ One run, in order (plan FG-403; the starting values are ADR-0010's):
    and saved to ``<sft_root>/<hash>/``, which keeps a folder already built with that hash,
    as ``forge data build-sft`` builds it. The trainer reads the saved copy once its rows
    hash to its name, opened in memory so the trainer's tokenizing writes no cache files
-   beside it.
+   beside it. A row longer than ``max_length`` tokens, prompt and reply as TRL encodes
+   them, is left out (``fit_rows``): TRL would cut its reply, and the model would learn a
+   query without its end. With ``subset_rows`` the run trains on that many of the rest,
+   those whose ids hash lowest with the run's seed (``subset``), so the same seed draws
+   the same rows on any machine.
 4. The manifest, ``running``. Its config is what can change the adapter: the run, data,
-   LoRA and SFT sections, the rows' hash and count (``sft_data``), and the backend, device
-   and dtype it trains with (``trainer``), all under the config hash. Its data manifest
-   hash is the Spider files'. The ops section changes no weight, so it stays out, as an
-   eval run's does.
+   LoRA and SFT sections, the rows' hash and count, how many were over ``max_length`` and
+   how many it trains on (``sft_data``), and the backend, device and dtype it trains with
+   (``trainer``), all under the config hash. Its data manifest hash is the Spider files'.
+   The ops section changes no weight, so it stays out, as an eval run's does.
 5. Training, with the callbacks every job has (``forge.train.callbacks``): a checkpoint
    in the run every ``ops.checkpoint_every`` steps, the time guard, counted from when the
    run starts, and the trainer's logs in ``metrics.jsonl``.
@@ -34,12 +38,13 @@ evaluated (FG-404). An SFT run can't be resumed yet, so a run id names one run.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import shutil
 import tempfile
 import time
 import traceback
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -58,7 +63,7 @@ from forge.ops.manifest import EndStatus, Platform, accelerator, build_manifest,
 from forge.ops.paths import runs_dir
 from forge.ops.timeguard import Clock
 from forge.train.backends import TrainBackend, select_backend
-from forge.train.config import TrainConfig
+from forge.train.config import SftConfig, TrainConfig
 from forge.train.sft_data import SftMeta, SftRow, build_sft_dataset, save_sft, sft_hash
 
 log = logging.getLogger(__name__)
@@ -100,14 +105,29 @@ def platform_for(device: str) -> Platform:
     )
 
 
-def manifest_config(config: TrainConfig, meta: SftMeta, backend: TrainBackend) -> dict[str, Any]:
+@dataclass(frozen=True)
+class FitRows:
+    """The rows a run trains on, and how many of the saved ones were too long."""
+
+    rows: Dataset
+    over_max_length: int
+
+
+def manifest_config(
+    config: TrainConfig, meta: SftMeta, fit: FitRows, backend: TrainBackend
+) -> dict[str, Any]:
     """What an SFT run's manifest records and hashes, as the module docstring lists it."""
     sections: dict[str, Any] = config.model_dump(
         mode="json", include={"run", "data", "lora", "sft"}
     )
     return {
         **sections,
-        "sft_data": {"hash": meta.hash, "rows": meta.counts.rows},
+        "sft_data": {
+            "hash": meta.hash,
+            "rows": meta.counts.rows,
+            "over_max_length": fit.over_max_length,
+            "trained": len(fit.rows),
+        },
         "trainer": {
             "backend": backend.name,
             "device": backend.device,
@@ -169,10 +189,10 @@ def run_sft(
         seed=config.run.seed,
     )
     folder, meta = _build_rows(config, tokenizer, root, sft_root)
-    rows = open_rows(folder, meta)
+    fit = fit_rows(open_rows(folder, meta), tokenizer, config.sft, seed=config.run.seed)
     manifest = build_manifest(
         "sft",
-        manifest_config(config, meta, backend),
+        manifest_config(config, meta, fit, backend),
         model_ref=config.run.model_ref,
         seed=config.run.seed,
         run_id=run_id,
@@ -187,12 +207,18 @@ def run_sft(
     except FileExistsError as exc:
         raise RunExists(f"run {run_id} was started in {run_dir} meanwhile") from exc
     manifest = _start(run_dir, manifest, store)
-    log.info("sft %s: %d rows from %s, on %s", run_id, meta.counts.rows, folder, platform)
+    log.info("sft %s: %d rows from %s, on %s", run_id, len(fit.rows), folder, platform)
     adapter: Path | None = None
     try:
         with tempfile.TemporaryDirectory(prefix=f"forge-sft-{run_id}-") as work:
             trained = backend.sft(
-                model, tokenizer, rows, config.sft, callbacks, output_dir=work, seed=config.run.seed
+                model,
+                tokenizer,
+                fit.rows,
+                config.sft,
+                callbacks,
+                output_dir=work,
+                seed=config.run.seed,
             )
             if guard.stopped_at is None:
                 adapter = Path(shutil.copytree(trained, run_dir / FINAL))
@@ -221,6 +247,63 @@ def open_rows(folder: Path, meta: SftMeta) -> Dataset:
             "the next run builds it again"
         )
     return loaded
+
+
+def row_tokens(tokenizer: ChatTokenizer, row: Mapping[str, Any]) -> int:
+    """A row's tokens, prompt and reply, as TRL's ``SFTTrainer`` encodes them to train on."""
+    encoded = tokenizer.apply_chat_template(
+        [*row["prompt"], *row["completion"]], tokenize=True, return_dict=True
+    )
+    return len(encoded["input_ids"])
+
+
+def subset(example_ids: Sequence[str], size: int, seed: int) -> list[int]:
+    """The positions of the ``size`` ids that hash lowest with ``seed``, in their order.
+
+    A hash, not a random draw, so the rows depend neither on a library's generator nor on
+    the order of the rows.
+    """
+
+    def rank(position: int) -> str:
+        return hashlib.sha256(f"{seed}:{example_ids[position]}".encode()).hexdigest()
+
+    return sorted(sorted(range(len(example_ids)), key=rank)[:size])
+
+
+def fit_rows(rows: Dataset, tokenizer: ChatTokenizer, cfg: SftConfig, *, seed: int) -> FitRows:
+    """The rows a run trains on: those that fit in ``cfg.max_length`` tokens, or
+    ``cfg.subset_rows`` of them, as the module docstring says.
+
+    Raises ``ValueError`` when no row fits, or when the subset is larger than what does.
+    """
+    lengths = [row_tokens(tokenizer, row) for row in rows]
+    kept = [index for index, length in enumerate(lengths) if length <= cfg.max_length]
+    if not kept:
+        raise ValueError(
+            f"all {len(lengths)} SFT rows are over max_length {cfg.max_length} tokens; the "
+            f"shortest has {min(lengths, default=0)}"
+        )
+    over = len(lengths) - len(kept)
+    if over:
+        log.warning(
+            "sft: %d of %d rows are over max_length %d tokens and left out",
+            over,
+            len(lengths),
+            cfg.max_length,
+        )
+    if cfg.subset_rows is not None:
+        if cfg.subset_rows > len(kept):
+            raise ValueError(
+                f"subset_rows {cfg.subset_rows} is more than the {len(kept)} rows that fit "
+                f"in max_length {cfg.max_length}"
+            )
+        ids = rows["example_id"]
+        drawn = subset([ids[index] for index in kept], cfg.subset_rows, seed)
+        kept = [kept[position] for position in drawn]
+    if len(kept) == len(lengths):
+        return FitRows(rows, over)
+    # In memory, as open_rows reads them, so selecting writes no index file beside them.
+    return FitRows(rows.select(kept, keep_in_memory=True), over)
 
 
 def _build_rows(

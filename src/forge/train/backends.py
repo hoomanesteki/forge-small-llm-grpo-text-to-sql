@@ -210,6 +210,9 @@ def sft_settings(cfg: SftConfig) -> dict[str, Any]:
         "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
         "max_length": cfg.max_length,
         "logging_steps": cfg.logging_steps,
+        # transformers 5.23 names it activation_checkpointing and takes this older name as
+        # an alias, so the same call works with a kernel's older transformers.
+        "gradient_checkpointing": cfg.gradient_checkpointing,
         # The loss is on the reply alone, from forge.train.sft_data's prompt-completion rows.
         "completion_only_loss": True,
     }
