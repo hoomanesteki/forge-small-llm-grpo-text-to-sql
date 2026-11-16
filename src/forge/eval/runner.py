@@ -345,10 +345,14 @@ def model_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
         hf = HfBackend(config.model, adapter_ref=config.adapter, device=config.device)
         return hf, chat_token_counter(hf.tokenizer)
     if config.backend == "vllm":
-        from forge.infer.vllm_backend import VllmBackend
+        from forge.infer.vllm_backend import GPU_MEMORY_UTILIZATION, VllmBackend
 
+        memory = config.gpu_memory_utilization
         vllm = VllmBackend(
-            config.model, adapter_ref=config.adapter, quantization=config.quantization
+            config.model,
+            adapter_ref=config.adapter,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION if memory is None else memory,
+            quantization=config.quantization,
         )
         return vllm, chat_token_counter(vllm.tokenizer)
     raise ValueError(f"backend {config.backend} loads no model of its own")

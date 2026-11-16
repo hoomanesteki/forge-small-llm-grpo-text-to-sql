@@ -45,6 +45,8 @@ REQUIREMENTS = "kaggle/requirements-gpu.txt"
 # The plan loads 4-bit bitsandbytes weights, and only for a reference model past 4B.
 QUANTIZATIONS = ("bitsandbytes",)
 ADAPTER_NAME = "adapter"
+# The share of the GPU's memory the engine takes unless an eval config sets another.
+GPU_MEMORY_UTILIZATION = 0.85
 
 
 class VllmBackend:
@@ -57,7 +59,7 @@ class VllmBackend:
         model_ref: str,
         *,
         adapter_ref: str | None = None,
-        gpu_memory_utilization: float = 0.85,
+        gpu_memory_utilization: float = GPU_MEMORY_UTILIZATION,
         max_model_len: int = 2048,
         max_lora_rank: int = 64,
         quantization: str | None = None,

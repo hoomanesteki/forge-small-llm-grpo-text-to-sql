@@ -397,6 +397,10 @@ def eval_run(
         QuantizationName | None,
         typer.Option(help="Load vllm's model in 4-bit with bitsandbytes, for a model past 4B."),
     ] = None,
+    gpu_memory_utilization: Annotated[
+        float | None,
+        typer.Option(help="The share of the GPU's memory vllm's engine takes; 0.85 if unset."),
+    ] = None,
     run_id: Annotated[
         str | None,
         typer.Option("--run-id", help="Name the run, or resume the run of that name."),
@@ -466,6 +470,7 @@ def eval_run(
         temperature=temperature,
         retry=retry,
         quantization=quantization,
+        gpu_memory_utilization=gpu_memory_utilization,
         run_id=run_id,
         store=store,
     )
