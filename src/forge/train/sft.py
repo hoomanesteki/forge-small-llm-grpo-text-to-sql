@@ -44,7 +44,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import shutil
 import tempfile
 import time
@@ -64,6 +63,7 @@ from forge.data.spider import resolve_data_dir
 from forge.eval.config import Host, check_run_id
 from forge.eval.metrics import summarize
 from forge.eval.run_files import read_run, write_atomic
+from forge.ops.adapters import checkpoint_ref
 from forge.ops.hub import (
     BEST,
     FINAL,
@@ -98,8 +98,6 @@ PROMOTION_FILE = "best.json"
 PROMOTION_METRIC = "official EX on val"
 # A LoRA adapter as PEFT saves one, which forge eval run --adapter loads.
 ADAPTER_FILES = ("adapter_config.json", "adapter_model.safetensors")
-# An eval run's adapter that is a run's checkpoint: <...>/<run_id>/checkpoints/<name>.
-_RUN_CHECKPOINT = re.compile(r"(?:.*/)?(?P<run>[^/]+)/(?P<rel>checkpoints/[^/]+)/?")
 # Settings an eval run's config may hold that change no score.
 _SCORELESS = ("adapter", "allow_over_budget")
 LOCAL_PLATFORMS: Mapping[str, Platform] = {"cpu": "local-cpu", "mps": "local-mps"}
@@ -436,9 +434,9 @@ def checkpoint_scores(
 
     Each eval run must be finished, on val, of the SFT run's model with one of its
     checkpoints as the adapter (``<...>/<run_id>/checkpoints/<name>``, wherever its folder
-    was), with an official verdict on every score and the others' settings, so the scores
-    differ by checkpoint alone. Raises ``ValueError`` when one isn't, and as ``read_run``
-    does for a run that can't be read.
+    was, as ``forge.ops.adapters.checkpoint_ref`` reads it), with an official verdict on
+    every score and the others' settings, so the scores differ by checkpoint alone. Raises
+    ``ValueError`` when one isn't, and as ``read_run`` does for a run that can't be read.
     """
     if not eval_run_ids:
         raise ValueError(f"name the eval runs of run {run_id}'s checkpoints, one at least")
@@ -456,12 +454,12 @@ def checkpoint_scores(
                 f"run {eval_id} evaluated {split}; checkpoints are chosen on val, and dev is "
                 "for reported numbers (ADR-0004)"
             )
-        found = _RUN_CHECKPOINT.fullmatch(manifest.adapter_ref or "")
-        if found is None or found["run"] != run_id:
+        found = checkpoint_ref(manifest.adapter_ref or "")
+        if found is None or found.run_id != run_id:
             raise ValueError(
                 f"run {eval_id}'s adapter is {manifest.adapter_ref}, no checkpoint of run {run_id}"
             )
-        rel = found["rel"]
+        rel = found.rel
         if manifest.model_ref != trained.model_ref:
             raise ValueError(
                 f"run {eval_id} evaluated {manifest.model_ref}, and run {run_id} trained "

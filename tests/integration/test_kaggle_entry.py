@@ -431,6 +431,29 @@ def test_sft_jobs_time_guard_stops_before_the_pushs_timeout(
 
 
 @pytest.mark.phase(4)
+def test_entry_reads_an_adapter_as_forge_kaggle_run_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel_env = kernel_folder(tmp_path, monkeypatch)
+    hub = FakeHub()
+    monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    checkpoint = "runs/2026-11-20-qwen3-4b-sft-abc1234/checkpoints/final"
+    hub.files[f"{checkpoint}/adapter_model.safetensors"] = b"final"
+    kernel = script.Kernel(script.parse_args(argv(kernel_env)), lambda command: None, {})
+
+    # A job pushed with a shell's trailing slash: fetched to the folder its path names.
+    script._fetch_adapter(kernel, f"{checkpoint}/")
+    assert (kernel.work / checkpoint / "adapter_model.safetensors").read_bytes() == b"final"
+    # A checkpoint outside runs/ is no folder the kernel can fetch, and a Hub adapter is the
+    # backend's to load.
+    with pytest.raises(script.JobError, match=f"push the job with --adapter {checkpoint}$"):
+        script._fetch_adapter(kernel, f"/content/working/{checkpoint}")
+    script._fetch_adapter(kernel, "org/adapter@abc123")
+    assert [name for name, _ in hub.calls if name == "snapshot_download"] == ["snapshot_download"]
+
+
+@pytest.mark.phase(4)
 def test_entry_fetches_a_checkpoint_adapter_from_the_run_store(
     tmp_path: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

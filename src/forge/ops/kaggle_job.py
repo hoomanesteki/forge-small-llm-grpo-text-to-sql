@@ -35,6 +35,13 @@ and it can't fetch a kernel's output, so it resumes nothing.
 The kernel's slug, ``forge-<run_id>`` with ``-<attempt>`` on a resume, must be one Kaggle
 takes; ``plan_job`` checks it with the run id, before any dataset is published.
 
+An eval job's ``--adapter`` is checked before anything is pushed (``kernel_adapter``): a
+training run's checkpoint, ``runs/<run_id>/checkpoints/<name>`` as
+``forge.ops.adapters.checkpoint_ref`` reads it, which the kernel fetches from the run
+store and which goes into the options spelled the one way, or a Hub repo id with an
+optional ``@revision``. A folder on this machine the kernel can't fetch is refused, and so
+is a checkpoint of a run this machine knows to have trained another model.
+
 An ``sft`` job takes a training config (``configs/sft/*.yaml``) whose device may be
 CUDA, and trains it as ``forge train sft`` does, its run's platform the kernel's host. Its
 options carry the whole config as it was checked here, defaults filled in, so the kernel
@@ -71,6 +78,8 @@ from forge.eval.config import (
     read_ops,
 )
 from forge.eval.run_files import MANIFEST_FILE
+from forge.infer.base import split_ref
+from forge.ops.adapters import checkpoint_ref
 from forge.ops.clock import utc_today
 from forge.ops.dev_usage import (
     MAX_DEV_USES,
@@ -79,7 +88,7 @@ from forge.ops.dev_usage import (
     log_dev_use,
     read_uses,
 )
-from forge.ops.hub import KERNEL_DIR, KERNELS_FILE, replace_run
+from forge.ops.hub import KERNEL_DIR, KERNELS_FILE, LocalRunStore, RunNotFound, replace_run
 from forge.ops.kaggle import (
     CODE_SLUG,
     DATA_SLUG,
@@ -182,6 +191,62 @@ class Budget:
         ]
 
 
+def kernel_adapter(adapter: str, runs_root: Path, model: str) -> str:
+    """The adapter of an eval job, spelled as its kernel loads it, once this machine can
+    tell the kernel will find it: a training run's checkpoint in ``runs/``, which the kernel
+    fetches from the run store, as ``runs/<run_id>/checkpoints/<name>``, or a Hub repo id
+    with an optional ``@revision``, as given.
+
+    When ``runs_root`` has the checkpoint's run, its manifest or the ``kernels.json`` of
+    its push, the run must have trained ``model``. Raises ``JobRefused`` otherwise.
+    """
+    try:
+        ref = checkpoint_ref(adapter)
+    except ValueError as exc:
+        raise JobRefused(f"--adapter: {exc}") from None
+    if ref is None:
+        if Path(adapter).exists():
+            raise JobRefused(
+                f"--adapter {adapter} is a folder on this machine, which the kernel can't "
+                "read; name a training run's checkpoint, runs/<run_id>/checkpoints/<name>, "
+                "which it fetches from the run store, or a Hub repo@revision"
+            )
+        try:
+            split_ref(adapter)
+        except (FileNotFoundError, ValueError) as exc:
+            raise JobRefused(f"--adapter: {exc}") from None
+        return adapter
+    if not ref.in_runs:
+        raise JobRefused(
+            f"--adapter {adapter} is {ref.rel} of run {ref.run_id}, but not in runs/: the "
+            f"kernel fetches it from the run store as runs/{ref.run_id}/{ref.rel}, so name it so"
+        )
+    kind, trained = _trained(runs_root, ref.run_id)
+    if kind is not None and kind not in ("sft", "grpo"):
+        raise JobRefused(f"run {ref.run_id} is of kind {kind}, which trains no adapter")
+    if trained is not None and trained != model:
+        raise JobRefused(
+            f"run {ref.run_id} trained {trained}, and the job evaluates {model}; evaluate "
+            "the checkpoint with its base model's config"
+        )
+    return ref.path
+
+
+def _trained(runs_root: Path, run_id: str) -> tuple[str | None, str | None]:
+    """The kind of run ``run_id`` and the model it trained, from its manifest in
+    ``runs_root`` or the record of its push, or Nones when this machine has neither."""
+    try:
+        manifest = LocalRunStore(runs_root).get_manifest(run_id)
+    except RunNotFound:
+        record = read_record(runs_root, run_id)
+        if record is None:
+            return None, None
+        config = record["options"].get("config")
+        model = config["run"]["model_ref"] if isinstance(config, dict) else None
+        return str(record["job"]), model
+    return manifest.kind, manifest.model_ref
+
+
 def head_commit(root: Path) -> str:
     """HEAD's commit, once it is clean and has passed ``make smoke``."""
     try:
@@ -281,6 +346,8 @@ def plan_job(
         # Checked here as the kernel will check it, so a bad option costs no GPU time.
         eval_config = EvalConfig(**options, host="kaggle")
         check_config(eval_config)
+        if eval_config.adapter is not None:
+            options["adapter"] = kernel_adapter(eval_config.adapter, runs_root, eval_config.model)
         if eval_config.split == "dev" and notebook:
             raise JobRefused(
                 "a notebook can run any number of times, so it can't log its dev look; "

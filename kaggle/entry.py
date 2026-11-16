@@ -397,11 +397,22 @@ def eval_job(kernel: Kernel, preflight: bool) -> str:
 
 def _fetch_adapter(kernel: Kernel, adapter: str | None) -> None:
     """Fetch the adapter of an eval job from the run store when it names a training run's
-    checkpoint, ``runs/<run_id>/checkpoints/<name>``, that the work folder lacks."""
-    parts = (adapter or "").split("/")
-    if len(parts) != 4 or parts[0] != "runs" or parts[2] != "checkpoints":
+    checkpoint, ``runs/<run_id>/checkpoints/<name>``, that the work folder lacks.
+
+    ``forge.ops.adapters.checkpoint_ref`` reads it, as ``forge kaggle run`` did before the
+    push; a checkpoint anywhere but ``runs/`` is no folder the kernel can fetch.
+    """
+    from forge.ops.adapters import checkpoint_ref
+
+    ref = checkpoint_ref(adapter) if adapter is not None else None
+    if ref is None:
         return
-    target = kernel.work / str(adapter)
+    if not ref.in_runs:
+        raise JobError(
+            f"the adapter {adapter} is a checkpoint outside runs/, which the kernel can't "
+            f"fetch; push the job with --adapter runs/{ref.run_id}/{ref.rel}"
+        )
+    target = kernel.work / ref.path
     if target.is_dir():
         return
     token = os.environ.get("HF_TOKEN")
@@ -412,9 +423,7 @@ def _fetch_adapter(kernel: Kernel, adapter: str | None) -> None:
         )
     from forge.ops.hub import HubRunStore
 
-    HubRunStore(kernel.args.run_store, token=token).get_folder(
-        parts[1], "/".join(parts[2:]), target
-    )
+    HubRunStore(kernel.args.run_store, token=token).get_folder(ref.run_id, ref.rel, target)
     print(f"[forge] adapter {adapter} fetched from {kernel.args.run_store}", flush=True)
 
 
