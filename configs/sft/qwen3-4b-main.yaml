@@ -28,5 +28,8 @@ sft:
   logging_steps: 10
 ops:
   checkpoint_every: 50
+  # The checkpoint half way through the epoch stays beside checkpoints/final: val scores
+  # both, and the better one becomes checkpoints/best (FG-404).
+  keep_checkpoints_at: [0.5]
   time_guard_minutes: 675
   est_gpu_hours: 2.5  # plan section 3.8

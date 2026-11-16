@@ -23,7 +23,9 @@ One run, in order (plan FG-403; the starting values are ADR-0010's):
    The ops section changes no weight, so it stays out, as an eval run's does.
 5. Training, with the callbacks every job has (``forge.train.callbacks``): a checkpoint
    in the run every ``ops.checkpoint_every`` steps, the time guard, counted from when the
-   run starts, and the trainer's logs in ``metrics.jsonl``.
+   run starts, and the trainer's logs in ``metrics.jsonl``. The checkpoint at each share
+   of the run ``ops.keep_checkpoints_at`` names is kept from retention, and the manifest's
+   outputs name it ``kept_at_<share>``, such as ``kept_at_0.5``.
 6. The adapter in ``checkpoints/final``, and the manifest ``finished``. When the time
    guard stopped training, its checkpoint is the run's last, there is no ``final``, and
    the manifest says ``stopped_time_guard``. A run that fails says ``failed``, with the
@@ -58,7 +60,7 @@ from forge.data.prompts import ChatTokenizer, chat_token_counter
 from forge.data.spider import resolve_data_dir
 from forge.eval.config import check_run_id
 from forge.eval.run_files import write_atomic
-from forge.ops.hub import FINAL, METRICS_FILE, LocalRunStore
+from forge.ops.hub import FINAL, METRICS_FILE, LocalRunStore, checkpoint_dir
 from forge.ops.manifest import EndStatus, Platform, accelerator, build_manifest, close, code_sha
 from forge.ops.paths import runs_dir
 from forge.ops.timeguard import Clock
@@ -77,6 +79,8 @@ OUTPUTS: Mapping[str, str] = {
     "adapter": FINAL,
     "error": ERROR_FILE,
 }
+# The manifest's name for a checkpoint ops.keep_checkpoints_at keeps.
+KEPT_OUTPUT = "kept_at_{share:g}"
 LOCAL_PLATFORMS: Mapping[str, Platform] = {"cpu": "local-cpu", "mps": "local-mps"}
 
 
@@ -174,7 +178,7 @@ def run_sft(
     platform = platform_for(backend.device)
     # Imported once the backend is made: Unsloth patches transformers as it is imported,
     # so nothing may import transformers before it.
-    from forge.train.callbacks import TimeGuardCallback, training_callbacks
+    from forge.train.callbacks import CheckpointCallback, TimeGuardCallback, training_callbacks
 
     store = LocalRunStore(runs_root)
     # Made now, so the time guard counts the model's loading too.
@@ -182,6 +186,7 @@ def run_sft(
         config.ops, store, run_id, metrics_path=run_dir / METRICS_FILE, env=env, clock=clock
     )
     guard = next(c for c in callbacks if isinstance(c, TimeGuardCallback))
+    checkpoints = next(c for c in callbacks if isinstance(c, CheckpointCallback))
     model, tokenizer = backend.load(
         config.run.model_ref,
         config.lora,
@@ -224,10 +229,10 @@ def run_sft(
                 adapter = Path(shutil.copytree(trained, run_dir / FINAL))
     except BaseException as exc:
         # KeyboardInterrupt too: a run stopped by hand is failed, not still running.
-        _end(run_dir, manifest, "failed", store, error=exc)
+        _end(run_dir, manifest, "failed", store, checkpoints.kept, error=exc)
         raise
     status: EndStatus = "finished" if guard.stopped_at is None else "stopped_time_guard"
-    final = _end(run_dir, manifest, status, store)
+    final = _end(run_dir, manifest, status, store, checkpoints.kept)
     return SftRun(final, run_dir, folder, adapter, guard.stopped_at)
 
 
@@ -319,8 +324,15 @@ def _build_rows(
     return save_sft(built, sft_root), built.meta
 
 
-def _outputs(run_dir: Path) -> dict[str, str]:
-    return {name: rel for name, rel in OUTPUTS.items() if (run_dir / rel).exists()}
+def _outputs(run_dir: Path, kept: Mapping[float, int] | None = None) -> dict[str, str]:
+    """The run's ``OUTPUTS`` that exist, and the kept checkpoints of ``kept``, a share of
+    the run to its step."""
+    found = {name: rel for name, rel in OUTPUTS.items() if (run_dir / rel).exists()}
+    for share, step in (kept or {}).items():
+        rel = checkpoint_dir(step)
+        if (run_dir / rel).is_dir():
+            found[KEPT_OUTPUT.format(share=share)] = rel
+    return found
 
 
 def _start(run_dir: Path, manifest: RunManifest, store: LocalRunStore) -> RunManifest:
@@ -336,12 +348,13 @@ def _end(
     manifest: RunManifest,
     status: EndStatus,
     store: LocalRunStore,
+    kept: Mapping[float, int],
     *,
     error: BaseException | None = None,
 ) -> RunManifest:
     """Write the run's final manifest, with the traceback beside it when it failed."""
     if error is not None:
         write_atomic(run_dir / ERROR_FILE, "".join(traceback.format_exception(error)).encode())
-    final = close(manifest, status).model_copy(update={"outputs": _outputs(run_dir)})
+    final = close(manifest, status).model_copy(update={"outputs": _outputs(run_dir, kept)})
     store.put_manifest(final)
     return final

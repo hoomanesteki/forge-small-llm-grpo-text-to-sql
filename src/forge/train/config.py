@@ -24,6 +24,8 @@ any model does:
   has no such setting, so it is never passed to TRL.
 - An SFT row longer than ``max_length`` is left out rather than cut, and ``subset_rows``
   trains on a fixed subset of the rest (``forge.train.sft``); neither goes to TRL.
+- ``keep_checkpoints_at`` takes shares of the run's steps above 0 and below 1, each once:
+  the checkpoint at 1, the run's end, is ``checkpoints/final``.
 - ``data.split`` is ``train``: training never reads val or dev (ADR-0004).
 - Unsloth and 4-bit loading need CUDA, so a run on the CPU or MPS asks for neither.
 
@@ -67,6 +69,8 @@ Count = Annotated[int, Strict(), Field(ge=1)]
 Seed = Annotated[int, Strict(), Field(ge=0)]
 Positive = Annotated[float, Strict(), Field(gt=0, allow_inf_nan=False)]
 Fraction = Annotated[float, Strict(), Field(ge=0, lt=1)]
+# A share of a run's steps short of its end, which checkpoints/final is.
+Share = Annotated[float, Strict(), Field(gt=0, lt=1)]
 
 
 class _Section(BaseModel):
@@ -195,9 +199,19 @@ class OpsConfig(_Section):
     """How a job runs, which no result depends on."""
 
     checkpoint_every: Count = 50  # steps between checkpoints pushed to the run store
+    # Shares of the run's steps whose checkpoints retention keeps, beside the latest, for
+    # val to choose from (FG-404); the run's end is checkpoints/final, always kept.
+    keep_checkpoints_at: tuple[Share, ...] = ()
     # A Kaggle session ends at 12 h; 11 h 15 min leaves time for the last save and push.
     time_guard_minutes: Positive = 675.0
     est_gpu_hours: Positive | None = None  # what forge kaggle run budgets for the job
+
+    @field_validator("keep_checkpoints_at")
+    @classmethod
+    def _distinct_shares(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        if len(set(value)) < len(value):
+            raise ValueError(f"each share is kept once, got {list(value)}")
+        return tuple(sorted(value))
 
 
 class TrainConfig(_Section):

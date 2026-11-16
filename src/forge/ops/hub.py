@@ -16,10 +16,11 @@ relative to its folder, such as ``eval/val-scores.jsonl``, in either store.
 ``RunStore`` is plan section 3.5's protocol with four methods more: ``put_folder``, since
 a checkpoint goes up as a folder; ``read_file``, one file of a run; ``runs``, for
 ``forge runs list``; and ``prune_checkpoints``, the retention rule, which keeps the latest
-checkpoints and ``best/`` and deletes the older ``step-NNNNNN`` folders. ``put_folder``
-adds to what the store holds, or with ``replace`` makes it hold the folder's files and no
-others, as a run that ended must: an earlier attempt's ``error.txt`` would otherwise
-outlive it.
+checkpoints, ``best/`` and the steps a job names to keep, such as one half way through a
+run for val to choose from (FG-404), and deletes the other ``step-NNNNNN`` folders.
+``put_folder`` adds to what the store holds, or with ``replace`` makes it hold the
+folder's files and no others, as a run that ended must: an earlier attempt's
+``error.txt`` would otherwise outlive it.
 
 A Hub call that fails on the network (``network_error`` says which failures count) is
 tried again by one layer, so the waits don't multiply, but for one rare case below.
@@ -63,7 +64,7 @@ import re
 import shutil
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
@@ -124,7 +125,9 @@ class RunStore(Protocol):
     def get_manifest(self, run_id: str) -> RunManifest: ...
     def read_file(self, run_id: str, dest: str) -> bytes | None: ...
     def latest_checkpoint(self, run_id: str) -> str | None: ...
-    def prune_checkpoints(self, run_id: str, keep: int = KEEP_CHECKPOINTS) -> list[str]: ...
+    def prune_checkpoints(
+        self, run_id: str, keep: int = KEEP_CHECKPOINTS, *, keep_steps: Collection[int] = ()
+    ) -> list[str]: ...
     def runs(self) -> list[str]: ...
     def pull(self, run_id: str, local_dir: str | Path) -> None: ...
 
@@ -151,12 +154,13 @@ def _latest(names: Iterable[str]) -> str | None:
     return steps[max(steps)] if steps else None
 
 
-def _to_prune(names: Iterable[str], keep: int) -> list[str]:
-    """The step checkpoints retention deletes, oldest first; never ``best/``."""
+def _to_prune(names: Iterable[str], keep: int, keep_steps: Collection[int]) -> list[str]:
+    """The step checkpoints retention deletes, oldest first: never ``best/``, the latest
+    ``keep`` or one of ``keep_steps``."""
     if keep < 1:
         raise ValueError(f"keep must be at least 1, so the latest checkpoint stays; got {keep}")
     steps = _steps(names)
-    return [steps[step] for step in sorted(steps)[:-keep]]
+    return [steps[step] for step in sorted(steps)[:-keep] if step not in keep_steps]
 
 
 def _inside(dest: str, *, root_ok: bool = False) -> str:
@@ -316,9 +320,12 @@ class LocalRunStore:
         """The run's highest ``checkpoints/step-NNNNNN``, or None before its first."""
         return _latest(self._checkpoints(run_id))
 
-    def prune_checkpoints(self, run_id: str, keep: int = KEEP_CHECKPOINTS) -> list[str]:
-        """Delete all but the latest ``keep`` step checkpoints; returns what went."""
-        doomed = _to_prune(self._checkpoints(run_id), keep)
+    def prune_checkpoints(
+        self, run_id: str, keep: int = KEEP_CHECKPOINTS, *, keep_steps: Collection[int] = ()
+    ) -> list[str]:
+        """Delete the step checkpoints but the latest ``keep`` and those of ``keep_steps``;
+        returns what went."""
+        doomed = _to_prune(self._checkpoints(run_id), keep, keep_steps)
         for rel in doomed:
             shutil.rmtree(self._run(run_id) / rel)
         return doomed
@@ -629,10 +636,12 @@ class HubRunStore:
         """The run's highest ``checkpoints/step-NNNNNN``, or None before its first."""
         return _latest(self._checkpoints(run_id))
 
-    def prune_checkpoints(self, run_id: str, keep: int = KEEP_CHECKPOINTS) -> list[str]:
-        """Delete all but the latest ``keep`` step checkpoints, in one commit; returns what
-        went."""
-        doomed = _to_prune(self._checkpoints(run_id), keep)
+    def prune_checkpoints(
+        self, run_id: str, keep: int = KEEP_CHECKPOINTS, *, keep_steps: Collection[int] = ()
+    ) -> list[str]:
+        """Delete the step checkpoints but the latest ``keep`` and those of ``keep_steps``,
+        in one commit; returns what went."""
+        doomed = _to_prune(self._checkpoints(run_id), keep, keep_steps)
         if doomed:
             self._call(
                 self.api.delete_files,

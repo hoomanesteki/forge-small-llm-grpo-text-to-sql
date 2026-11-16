@@ -23,6 +23,7 @@ from forge.train.callbacks import (
     CheckpointCallback,
     MetricsCallback,
     TimeGuardCallback,
+    kept_steps,
     training_callbacks,
     wandb_callback,
 )
@@ -228,11 +229,13 @@ class FakeWandb(TrainerCallback):
     pass
 
 
-def _train(callbacks: Sequence[TrainerCallback], out: Path, steps: int) -> TrainerState:
+def _train(
+    callbacks: Sequence[TrainerCallback], out: Path, steps: int, *, max_steps: int = 100
+) -> TrainerState:
     """Steps as a trainer runs them: each step's end, then the save one asked for, which
     leaves checkpoint-<step> in the output folder."""
     args: Any = SimpleNamespace(output_dir=str(out))
-    state, control = TrainerState(max_steps=100), TrainerControl()
+    state, control = TrainerState(max_steps=max_steps), TrainerControl()
     for callback in callbacks:
         callback.on_train_begin(args, state, control)
     for _ in range(steps):
@@ -267,6 +270,44 @@ def test_checkpoints_every_n_steps_go_to_the_store(tmp_path: Path) -> None:
     assert pushed.read_text() == "step 6"
     with pytest.raises(ValueError, match="every 1 step or more, not every 0"):
         CheckpointCallback(store, RUN, every=0)
+
+
+@pytest.mark.phase(4)
+def test_checkpoints_at_shares_of_the_run_outlive_retention(tmp_path: Path) -> None:
+    # The step each share keeps: the last it covers, never the run's end, which is
+    # checkpoints/final.
+    assert kept_steps([0.5], 486) == {0.5: 243}
+    assert kept_steps([0.25, 0.5], 3) == {0.25: 1, 0.5: 1}
+    assert kept_steps([0.5], 1) == {}
+    with pytest.raises(ValueError, match="a run of 0 steps keeps no checkpoint"):
+        kept_steps([0.5], 0)
+
+    # Half way through an 18-step run, between the cadence's checkpoints, step 9 is saved
+    # and pushed, and pruning keeps it beside the latest two.
+    store = LocalRunStore(tmp_path / "store")
+    checkpoints = CheckpointCallback(store, RUN, every=4, keep_at=[0.5])
+    out = tmp_path / "out"
+    _train([checkpoints], out, 18, max_steps=18)
+    assert checkpoints.kept == {0.5: 9}
+    assert sorted(checkpoints.pushed) == [4, 8, 9, 12, 16]
+    kept = sorted(p.name for p in (store.root / RUN / "checkpoints").iterdir())
+    assert kept == ["step-000009", "step-000012", "step-000016"]
+    assert (store.root / RUN / "checkpoints/step-000009/adapter_model.safetensors").read_text() == (
+        "step 9"
+    )
+
+    # The time guard's pruning keeps it too: a step every 10 s of a minute stops after
+    # step 5, whose push leaves the latest two and the kept step 2.
+    other = LocalRunStore(tmp_path / "other")
+    other.put_manifest(_manifest())
+    clock = Clock()
+    guard = TimeGuardCallback(1, store=other, run_id=RUN, keep_at=[0.1], clock=clock)
+    every = CheckpointCallback(other, RUN, every=1, guard=guard, keep_at=[0.1])
+    state = _train([Ticker(clock, 10), guard, every], tmp_path / "guarded", 20, max_steps=20)
+    assert state.global_step == guard.stopped_at == 5
+    assert guard.kept == every.kept == {0.1: 2}
+    kept = sorted(p.name for p in (other.root / RUN / "checkpoints").iterdir())
+    assert kept == ["step-000002", "step-000004", "step-000005"]
 
 
 @pytest.mark.phase(4)

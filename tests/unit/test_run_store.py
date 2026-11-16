@@ -214,6 +214,26 @@ def test_retention_keeps_latest_two_and_best(store: RunStore, tmp_path: Path) ->
         store.prune_checkpoints(RUN, keep=0)
 
 
+@pytest.mark.phase(4)
+def test_retention_keeps_the_steps_a_job_names(store: RunStore, tmp_path: Path) -> None:
+    # A run's checkpoint half way, which val compares with its final adapter (FG-404).
+    for step in (50, 100, 150, 200):
+        store.put_folder(RUN, _checkpoint(tmp_path, step), checkpoint_dir(step))
+
+    assert store.prune_checkpoints(RUN, keep_steps=[100]) == ["checkpoints/step-000050"]
+    assert store.prune_checkpoints(RUN, keep=1, keep_steps={100}) == ["checkpoints/step-000150"]
+    pulled = tmp_path / "pulled"
+    store.pull(RUN, pulled)
+    assert sorted(p.name for p in (pulled / "checkpoints").iterdir()) == [
+        "step-000100",
+        "step-000200",
+    ]
+    # A kept step is no reason to keep fewer of the latest, nor is it the latest.
+    store.put_folder(RUN, _checkpoint(tmp_path, 250), checkpoint_dir(250))
+    assert store.prune_checkpoints(RUN, keep_steps={100}) == []
+    assert store.latest_checkpoint(RUN) == "checkpoints/step-000250"
+
+
 @pytest.mark.phase(3)
 def test_hub_store_calls_api(tmp_path: Path) -> None:
     fake = FakeHub()

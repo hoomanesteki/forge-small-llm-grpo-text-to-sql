@@ -138,6 +138,12 @@ def test_config_validation(tmp_path: Path) -> None:
         (_sft(sft={"warmup_ratio": 1}), r"sft\.warmup_ratio: Input should be less than 1"),
         (_sft(ops={"time_guard_minutes": float("inf")}), "Input should be a finite number"),
         (_sft(ops={"checkpoint_every": 0}), r"ops\.checkpoint_every: Input should be greater"),
+        (_sft(ops={"keep_checkpoints_at": [1.0]}), r"keep_checkpoints_at\.0: Input should be less"),
+        (
+            _sft(ops={"keep_checkpoints_at": [0.0]}),
+            r"keep_checkpoints_at\.0: Input should be greater",
+        ),
+        (_sft(ops={"keep_checkpoints_at": [0.5, 0.5]}), r"each share is kept once, got \[0\.5,"),
         (_grpo(num_generations=1), r"grpo\.num_generations: Input should be greater than or"),
         (_grpo(max_completion_length=0), r"grpo\.max_completion_length: Input should be greater"),
         (_grpo(beta=-0.1), r"grpo\.beta.*greater than or equal to 0"),
@@ -249,3 +255,16 @@ def test_sft_configs_start_from_adr_0010() -> None:
             assert not config.run.load_in_4bit
             assert sft.per_device_train_batch_size == 1
             assert sft.subset_rows is not None and sft.subset_rows % rows_a_step == 0
+
+
+@pytest.mark.phase(4)
+def test_main_sft_run_keeps_its_half_way_checkpoint() -> None:
+    # FG-404: the main run's checkpoints at 50% and at its end, checkpoints/final, are
+    # evaluated on val and the better one promoted; the pilot shows the setup works, and
+    # its end alone is evaluated.
+    main = load_train_config(ROOT / "configs" / "sft" / "qwen3-4b-main.yaml")
+    pilot = load_train_config(ROOT / "configs" / "sft" / "qwen3-1p7b-pilot.yaml")
+    assert (main.ops.keep_checkpoints_at, pilot.ops.keep_checkpoints_at) == ((0.5,), ())
+    # Shares in any order, kept in order.
+    shares = parse_train_config(_sft(ops={"keep_checkpoints_at": [0.75, 0.25]}))
+    assert shares.ops.keep_checkpoints_at == (0.25, 0.75)
