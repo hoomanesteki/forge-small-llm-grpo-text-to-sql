@@ -16,9 +16,12 @@ commit with ``requirements-gpu.txt`` and ``GIT_SHA``, and ``<owner>/forge-spider
 Spider files ``spider.sha256`` lists, with that file. ``KaggleClient`` runs the kaggle CLI
 as an argument list, never through a shell, and reads what it prints as well as its exit
 code: ``datasets create`` and ``version`` report a refused upload and still exit 0, and so
-does ``kernels push`` for a push error. When ``kernels push`` says a source could not be
-added, Kaggle has still saved and started that version, without the source, so the push
-is returned with those lines in ``PushedKernel.dropped`` rather than refused.
+does ``kernels push`` for a push error. A push is refused only when Kaggle says so, as
+"Kernel push error": any other line means Kaggle saved and started the kernel, even one
+that names no version (kaggle 2.2.5 prints one when the server sends none). When
+``kernels push`` says a source could not be added, Kaggle has still saved and started
+that version, without the source, so the push is returned with those lines in
+``PushedKernel.dropped`` rather than refused.
 """
 
 from __future__ import annotations
@@ -307,9 +310,12 @@ _UPLOAD_REFUSED = re.compile(r"creation error", re.IGNORECASE)
 # kernels push exits 0 after "Kernel push error: ...". It prints "The following are not
 # valid dataset sources and could not be added to the kernel: [...]" (or kernel, tag or
 # competition sources) before "Kernel version N successfully pushed": that version runs.
+# With no version from the server it prints "Kernel version successfully pushed".
 _PUSH_REFUSED = re.compile(r"Kernel push error", re.IGNORECASE)
 _DROPPED = re.compile(r"could not be added", re.IGNORECASE)
-_PUSHED = re.compile(r"Kernel version (\d+) successfully pushed")
+_DROPPED_KERNEL = re.compile(r"kernel sources", re.IGNORECASE)
+_PUSHED = re.compile(r"successfully pushed", re.IGNORECASE)
+_PUSHED_VERSION = re.compile(r"Kernel version (\d+)")
 _KERNEL_URL = re.compile(r"kaggle\.com/code/([^/\s]+)/([^/\s?#]+)")
 # kernels status prints 'owner/slug has status "KernelWorkerStatus.COMPLETE"'.
 _KERNEL_STATUS = re.compile(r'has status "(?:KernelWorkerStatus\.)?([A-Z_]+)"')
@@ -416,17 +422,25 @@ class KaggleClient:
 
     def push_kernel(self, folder: Path, *, timeout_s: int, gpu: bool) -> PushedKernel:
         """Push and start the kernel ``folder`` holds; returns its id, its version and
-        the sources Kaggle dropped from it, if any."""
+        the sources Kaggle dropped from it, if any.
+
+        Raises ``KaggleError`` only for a push Kaggle never started: one it refused, or a
+        CLI that failed before it said the kernel was pushed.
+        """
         accelerator = ["--accelerator", GPU_MACHINE_SHAPE] if gpu else []
         command = [self.executable, "kernels", "push", "-p", str(folder), *accelerator]
-        output = _check(self.run, [*command, "-t", str(timeout_s)])
-        pushed = _PUSHED.search(output)
-        if _PUSH_REFUSED.search(output) or pushed is None:
+        result = _run(self.run, [*command, "-t", str(timeout_s)])
+        output = result.stdout or ""
+        if _PUSH_REFUSED.search(output):
             raise KaggleError(f"{_display(command)} was refused: {_tail(output)}")
+        if result.returncode != 0 and not _PUSHED.search(output):
+            raise _failed(command, result)
         url = _KERNEL_URL.search(output)
         kernel = "/".join(url.groups()) if url else None
+        version = _PUSHED_VERSION.search(output)
         dropped = tuple(line.strip() for line in output.splitlines() if _DROPPED.search(line))
-        return PushedKernel(kernel, int(pushed.group(1)), output.strip(), dropped)
+        number = int(version.group(1)) if version else None
+        return PushedKernel(kernel, number, output.strip(), dropped)
 
     def kernel_status(self, kernel: str) -> KernelStatus:
         """The worker state of ``kernel`` (``owner/slug[/version]``), as kagglesdk names it."""
@@ -468,9 +482,15 @@ class DatasetVersion:
 @dataclass(frozen=True)
 class PushedKernel:
     kernel: str | None  # owner/slug from the URL the CLI printed, when it printed one
-    version: int
+    version: int | None  # None when the CLI named none: the kernel's latest is this push
     output: str
     dropped: tuple[str, ...] = ()  # the CLI's lines naming sources it could not add
+
+    @property
+    def kernel_source_dropped(self) -> bool:
+        """Whether Kaggle dropped a kernel source, which only a resume mounts: without its
+        last attempt's output, this one can't restore the run."""
+        return any(_DROPPED_KERNEL.search(line) for line in self.dropped)
 
 
 @dataclass(frozen=True)
@@ -611,7 +631,8 @@ def publish_data(
     that costs no copy of the data. A dataset whose last version failed or was deleted is
     not there, so the data goes up again as a new version, and one Kaggle is still
     processing raises ``KaggleError`` rather than go up twice. The bundle is a whole copy
-    of Spider, so it is removed once the upload is done, unless ``keep_build``.
+    of Spider, so it is removed once the upload is over, whether or not it worked, unless
+    ``keep_build``.
     """
     ref = f"{owner}/{DATA_SLUG}"
     status = client.dataset_status(ref)
@@ -622,15 +643,19 @@ def publish_data(
             f"{ref} is still being processed ({status}); run forge kaggle publish-data "
             f"again once kaggle datasets status {ref} says ready"
         )
-    bundle = build_data_bundle(root, owner, data_dir, checksums)
-    if status is None:
-        published = Published(ref, True, client.create_dataset(bundle))
-    else:
+    bundle = root / DATA_BUNDLE
+    try:
+        build_data_bundle(root, owner, data_dir, checksums)
+        if status is None:
+            return Published(ref, True, client.create_dataset(bundle))
         note = f"The verified Spider files again, after a {status} version"
-        published = Published(ref, False, client.version_dataset(bundle, note))
-    if not keep_build:
-        shutil.rmtree(bundle)
-    return published
+        return Published(ref, False, client.version_dataset(bundle, note))
+    finally:
+        # A failed upload's copy serves nothing either: a rerun builds its own, or, when
+        # Kaggle took the data before the CLI failed, finds the dataset ready and builds
+        # none, which would leave this copy for good.
+        if not keep_build and bundle.exists():
+            shutil.rmtree(bundle)
 
 
 def _kaggle_json_username(env: Mapping[str, str], home: Path) -> str | None:

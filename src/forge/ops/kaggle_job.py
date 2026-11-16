@@ -19,15 +19,18 @@ Before a push, in the plan's order (FG-303):
    most a session's 12 hours: plan section 5.3 stops a job 50% over its estimate. The
    entry script gets the timeout too, and its eval job stops at the time guard before
    it. Each push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait
-   and output read to find the run's kernel.
+   and output read to find the run's kernel. A resume mounts the last attempt whose
+   output holds the run: not one whose own kernel source Kaggle dropped, since that one
+   failed to restore it.
 
 A dev eval job takes ``--reason``, as ``forge eval run --split dev`` does, and is refused
 once the six dev looks are spent (ADR-0004). The push spends its look: ``log_dev_look``
 writes the row in ``docs/dev-usage.md`` here, where the repo is, since the kernel's own
-log stays in its output, as soon as Kaggle has accepted the push and before anything else
-that could fail. A ``--resume`` of the same run is the same look, so it adds no row and
-goes even once the looks are spent. A notebook can run any number of times, so a dev job
-has none, and it can't fetch a kernel's output, so it resumes nothing.
+log stays in its output, as soon as Kaggle has accepted the push. ``settle_push`` logs it
+and records the push each whatever the other raises, as Kaggle runs the kernel either
+way. A ``--resume`` of the same run is the same look, so it adds no row and goes even
+once the looks are spent. A notebook can run any number of times, so a dev job has none,
+and it can't fetch a kernel's output, so it resumes nothing.
 
 The kernel's slug, ``forge-<run_id>`` with ``-<attempt>`` on a resume, must be one Kaggle
 takes; ``plan_job`` checks it with the run id, before any dataset is published.
@@ -63,7 +66,13 @@ from forge.eval.config import (
 )
 from forge.eval.run_files import MANIFEST_FILE
 from forge.ops.clock import utc_today
-from forge.ops.dev_usage import MAX_DEV_USES, count_dev_uses, log_dev_use, read_uses
+from forge.ops.dev_usage import (
+    MAX_DEV_USES,
+    DevBudgetExceeded,
+    count_dev_uses,
+    log_dev_use,
+    read_uses,
+)
 from forge.ops.hub import KERNEL_DIR, KERNELS_FILE, replace_run
 from forge.ops.kaggle import (
     CODE_SLUG,
@@ -72,6 +81,7 @@ from forge.ops.kaggle import (
     GIT_SHA_FILE,
     KaggleClient,
     KaggleError,
+    PushedKernel,
     bake_argv,
     load_template,
     publish_code,
@@ -79,7 +89,7 @@ from forge.ops.kaggle import (
     valid_slug,
     write_kernel_dir,
 )
-from forge.ops.ledger import Summary
+from forge.ops.ledger import Summary, run_hours
 from forge.ops.manifest import DirtyTreeError, git_sha
 from forge.ops.sessions import SESSIONS_FILE
 
@@ -276,8 +286,8 @@ def plan_job(
                 f"run {run_id} was pushed with other options (its config's, --reason or "
                 "--allow-over-budget); resume it with the same ones"
             )
-        last = record["kernels"][-1]
-        kernel_sources = (f"{last['kernel']}/{last['version']}",)
+        holding = [k for k in record["kernels"] if not k.get("kernel_source_dropped")]
+        kernel_sources = (kernel_ref(holding[-1]),)
         attempt = len(record["kernels"]) + 1
         slug, title = f"{slug}-{attempt}", f"{title} {attempt}"
     if not valid_slug(slug):
@@ -529,12 +539,17 @@ def record_push(
     plan: JobPlan,
     *,
     kernel: str,
-    version: int,
+    version: int | None,
     code: str | None,
     budget: Budget,
+    kernel_source_dropped: bool = False,
     now: datetime | None = None,
 ) -> Path:
-    """Add the push to ``runs/<run_id>/kernels.json``, starting the file on a first push."""
+    """Add the push to ``runs/<run_id>/kernels.json``, starting the file on a first push.
+
+    ``version`` is None when the push named none. A resume whose kernel source Kaggle
+    dropped is marked, so the next resume mounts the attempt before it.
+    """
     path = _record_path(runs_root, plan.run_id)
     record = read_record(runs_root, plan.run_id) or {
         "run_id": plan.run_id,
@@ -543,22 +558,69 @@ def record_push(
         "options": plan.options,
         "kernels": [],
     }
-    record["kernels"].append(
-        {
-            "kernel": kernel,
-            "version": version,
-            "pushed_at": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
-            "code": code,
-            "est_gpu_hours": plan.est_gpu_hours,
-            "timeout_s": plan.timeout_s,
-            "allow_over_budget": plan.allow_over_budget,
-            "over_budget": budget.over,
-            "kaggle_gpu_hours_left": budget.kaggle_left,
-        }
-    )
+    entry = {
+        "kernel": kernel,
+        "version": version,
+        "pushed_at": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
+        "code": code,
+        "est_gpu_hours": plan.est_gpu_hours,
+        "timeout_s": plan.timeout_s,
+        "allow_over_budget": plan.allow_over_budget,
+        "over_budget": budget.over,
+        "kaggle_gpu_hours_left": budget.kaggle_left,
+    }
+    # Only a resume mounts a kernel source, so a run's first attempt always holds the run.
+    if plan.resume and kernel_source_dropped:
+        entry["kernel_source_dropped"] = True
+    record["kernels"].append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def settle_push(
+    runs_root: Path,
+    plan: JobPlan,
+    pushed: PushedKernel,
+    *,
+    kernel: str,
+    code: str | None,
+    budget: Budget,
+) -> tuple[int | None, list[str]]:
+    """Log the dev look a push Kaggle accepted spends, and record the push, each whatever
+    the other raises: the kernel runs either way, so neither may cost the other. Returns
+    ``log_dev_look``'s count and what went wrong, a line for each step that failed."""
+    looks, problems = None, []
+    try:
+        looks = log_dev_look(plan)
+    # An unwritable log, a look another push took first, a reason that breaks a row.
+    except (DevBudgetExceeded, OSError, ValueError) as exc:
+        problems.append(f"its dev look is not logged ({exc})")
+    try:
+        record_push(
+            runs_root,
+            plan,
+            kernel=kernel,
+            version=pushed.version,
+            code=code,
+            budget=budget,
+            kernel_source_dropped=pushed.kernel_source_dropped,
+        )
+    except (OSError, ValueError) as exc:
+        problems.append(f"the push is not in {_record_path(runs_root, plan.run_id)} ({exc})")
+    return looks, problems
+
+
+def kernel_ref(entry: Mapping[str, Any]) -> str:
+    """``owner/slug/version`` of a kernels.json entry, or ``owner/slug`` for a push that
+    named no version, which Kaggle then takes as the kernel's latest."""
+    version = entry.get("version")
+    return f"{entry['kernel']}/{version}" if version is not None else str(entry["kernel"])
+
+
+def version_name(version: int | None) -> str:
+    """A pushed version as the CLI names it."""
+    return f"version {version}" if version is not None else "its latest version"
 
 
 def read_record(runs_root: Path, run_id: str) -> dict[str, Any] | None:
@@ -579,8 +641,7 @@ def last_kernel(runs_root: Path, run_id: str) -> KernelRecord:
             f"no kernel was pushed for run {run_id} from here: "
             f"{_record_path(runs_root, run_id)} is missing"
         )
-    last = record["kernels"][-1]
-    return KernelRecord(f"{last['kernel']}/{last['version']}", str(record["job"]))
+    return KernelRecord(kernel_ref(record["kernels"][-1]), str(record["job"]))
 
 
 def wait_for(
@@ -622,6 +683,29 @@ def read_status(run_dir: Path) -> dict[str, Any]:
     """The job's ``status.json`` in ``run_dir``."""
     data: dict[str, Any] = json.loads((run_dir / STATUS_FILE).read_text(encoding="utf-8"))
     return data
+
+
+def no_run_note(run_dir: Path) -> str:
+    """The ledger's note on kernel output that holds no run, such as a new run's kernel
+    that failed before its job: it gets no row, so the note gives the span its
+    ``status.json`` says the kernel held the GPU, for ``forge ledger add``."""
+    note = "ledger: no row, the output has no manifest; use forge ledger add"
+    if not (run_dir / STATUS_FILE).is_file():
+        return note
+    try:
+        status = read_status(run_dir)
+        if not (status.get("started_at") and status.get("ended_at")):
+            return note  # what an entry script older than the session's span wrote
+        started = datetime.fromisoformat(status["started_at"])
+        ended = datetime.fromisoformat(status["ended_at"])
+        hours = run_hours(started, ended)
+    # Not JSON, not an object, or times that aren't ISO or run backwards.
+    except (AttributeError, TypeError, ValueError) as exc:
+        return f"{note}; its {STATUS_FILE} gives no span it can count ({exc})"
+    return (
+        f"{note}: the kernel held its GPU {hours:.2f} h, from {started.isoformat()} to "
+        f"{ended.isoformat()}, so --hours {hours:.2f} --on {started.astimezone(UTC).date()}"
+    )
 
 
 def fetch_output(client: KaggleClient, kernel: str, run_id: str, runs_root: Path) -> Path:
