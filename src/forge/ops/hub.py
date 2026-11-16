@@ -7,6 +7,7 @@ names (``hoomanesteki/forge-runs`` by default), and ``LocalRunStore`` a folder s
 
     runs/<run_id>/manifest.json, config.yaml, metrics.jsonl, eval/..., samples/...
     runs/<run_id>/checkpoints/step-NNNNNN/   the latest KEEP_CHECKPOINTS are kept
+    runs/<run_id>/checkpoints/final/         the adapter a training run ended with
     runs/<run_id>/checkpoints/best/
 
 In a local store the folder is ``<root>/<run_id>/``. Paths inside a run are POSIX paths
@@ -76,7 +77,9 @@ T = TypeVar("T")
 REPO_TYPE = "model"
 RUNS = "runs"
 CHECKPOINTS = "checkpoints"
+FINAL = f"{CHECKPOINTS}/final"
 BEST = f"{CHECKPOINTS}/best"
+METRICS_FILE = "metrics.jsonl"
 KEEP_CHECKPOINTS = 2
 RETRIES = 3
 BACKOFF_S = 2.0
