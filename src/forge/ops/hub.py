@@ -136,6 +136,14 @@ def checkpoint_dir(step: int) -> str:
     return f"{CHECKPOINTS}/step-{step:06d}"
 
 
+def checkpoint_step(rel: str) -> int | None:
+    """The step of the checkpoint ``rel`` names, a path in a run as ``checkpoint_dir`` writes
+    one, or None for any other path."""
+    folder, _, name = rel.partition("/")
+    match = _STEP.fullmatch(name)
+    return int(match.group(1)) if folder == CHECKPOINTS and match else None
+
+
 def _steps(names: Iterable[str]) -> dict[int, str]:
     """The step checkpoints among folder names in ``checkpoints/``, by step."""
     found = {}
