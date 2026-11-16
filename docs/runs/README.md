@@ -114,12 +114,13 @@ so each needs its tag there once the branch lands. To make one again from its co
 [pending.yaml](pending.yaml) lists the runs a story needs that haven't been made and
 committed yet, what blocks each one, since when, and what it will fill in. FG-404's SFT runs
 are there, each with what blocks it, and FG-491's push of the SFT pilot, adapter and all,
-until the Hugging Face run store exists. FG-307's runs left it when they were committed, the
-reference's dev run last, on 2026-11-17, once ADR-0008's note of that day settled I5 for it,
-and FG-301's spike, FG-302's publish and FG-303's eval job on 2026-11-16.
-`tests/integration/test_artifacts.py` finds a GPU story's runs here by the configs they were
-made from, and skips its checks on them only while the story has an entry in pending.yaml;
-once it has none, a missing run fails. A Kaggle SFT run is committed as FG-491's is, without
-its checkpoints, which the run store keeps, and with the `best.json` that `forge runs
-promote` writes: which checkpoint is `checkpoints/best`, and the val runs whose scores chose
-it (docs/runbook.md, "SFT runs").
+until the Hugging Face run store exists. FG-405's comparison of the main model with and
+without SFT waits there on FG-404's runs, to set beside FG-307's. FG-307's runs left it when
+they were committed, the reference's dev run last, on 2026-11-17, once ADR-0008's note of
+that day settled I5 for it, and FG-301's spike, FG-302's publish and FG-303's eval job on
+2026-11-16. `tests/integration/test_artifacts.py` finds a GPU story's runs here by the
+configs they were made from, and skips its checks on them only while the story has an entry
+in pending.yaml; once it has none, a missing run fails. A Kaggle SFT run is committed as
+FG-491's is, without its checkpoints, which the run store keeps, and with the `best.json`
+that `forge runs promote` writes: which checkpoint is `checkpoints/best`, and the val runs
+whose scores chose it (docs/runbook.md, "SFT runs").
