@@ -63,8 +63,9 @@ BASE = EvalConfig(model="org/model")
             "--backend fake runs no model, so it takes no --device mps",
         ),
         ({"n": 4}, ValueError, "n=4 needs a temperature above 0"),
-        ({"backend": "vllm"}, NotAvailable, "the vllm backend is not available yet"),
-        ({"backend": "llamacpp"}, NotAvailable, "comes with FG-702"),
+        # On the laptop a vLLM run's manifest would say local-cpu (ADR-0016).
+        ({"backend": "vllm"}, ValueError, "backend vllm runs on a CUDA GPU"),
+        ({"backend": "llamacpp"}, NotAvailable, "the llamacpp backend is not available yet"),
     ],
 )
 def test_config_refused_before_anything_runs(
@@ -120,8 +121,10 @@ def test_platform_is_the_host_of_a_kernel_job() -> None:
     assert dataclasses.replace(BASE, host="colab").platform == "colab"
     assert on_kaggle.manifest_config() == BASE.manifest_config()
     check_config(dataclasses.replace(on_kaggle, backend="fake", model="gold"))
-    with pytest.raises(NotAvailable, match="comes with FG-306"):
-        check_config(dataclasses.replace(on_kaggle, backend="vllm"))
+    # A kernel job runs its model on the host's GPU through vLLM (FG-306).
+    on_vllm = dataclasses.replace(on_kaggle, backend="vllm")
+    check_config(on_vllm)
+    check_config(dataclasses.replace(on_vllm, host="colab", adapter="runs/x/best"))
     with pytest.raises(ValueError, match="host must be one of kaggle, colab, got 'modal'"):
         check_config(dataclasses.replace(BASE, host="modal"))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="Apple silicon's GPU, which kaggle has not"):

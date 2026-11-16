@@ -22,11 +22,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Collection, Sequence
-from pathlib import Path
 from typing import Any, Protocol
 
 import torch
-from huggingface_hub.utils import HFValidationError, validate_repo_id
 from peft import PeftModel
 from transformers import (
     AutoModelForCausalLM,
@@ -39,7 +37,7 @@ from transformers import (
 )
 
 from forge.core.types import Generation, GenParams, Prompt
-from forge.infer.base import check_params, render_chat, sample_seed
+from forge.infer.base import check_params, render_chat, sample_seed, split_ref
 from forge.sql.extract import extract_sql
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
@@ -218,24 +216,6 @@ def resolve_dtype(dtype: str | torch.dtype | None) -> torch.dtype:
     if dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {', '.join(DTYPES)}, got {dtype!r}")
     return DTYPES[dtype]
-
-
-def split_ref(ref: str) -> tuple[str, str | None]:
-    """A model or adapter ref as ``from_pretrained`` takes it: a local directory with no
-    revision, or a Hub repo id with the revision after an optional ``@``."""
-    if Path(ref).is_dir():
-        return ref, None
-    repo, at, revision = ref.partition("@")
-    try:
-        validate_repo_id(repo)
-    except HFValidationError:
-        # Otherwise a mistyped local path fails as a malformed repo id.
-        raise FileNotFoundError(
-            f"{ref!r} is neither a directory nor a Hub repo id with an optional @revision"
-        ) from None
-    if at and not revision:
-        raise ValueError(f"{ref!r} has nothing after its '@'; give a revision or drop the '@'")
-    return repo, revision or None
 
 
 def reply_ids(generated: Sequence[int], eos_token_ids: Collection[int]) -> list[int]:

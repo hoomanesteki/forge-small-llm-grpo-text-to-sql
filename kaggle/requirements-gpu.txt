@@ -1,15 +1,22 @@
-# GPU packages for Forge jobs on Kaggle's T4 image, installed on top of the image's own
-# torch and its CUDA build (ADR-0002, ADR-0006). Candidate pins: none has run on a T4 yet.
-# Where uv.lock has the package these are its versions, so a GPU job runs the library
-# code CI tested. kaggle/spike/throughput.py installs and times this list as its "trl"
-# stack, and a unit test keeps the two the same.
+# GPU packages for Forge jobs on Kaggle's T4 image, installed over the image's own
+# (ADR-0002, ADR-0006). Candidate pins: none has run on a T4 yet.
 #
-# vLLM is not here: vllm 0.33.0 pins torch 2.14.0 and transformers < 5.21, which clash
-# with this list. The spike measures it in a venv of its own, and FG-306 decides. The
-# image moved to CUDA 13 in late October 2026, so bitsandbytes' CUDA build is the pin
-# most likely to need a change.
+# vLLM sets the stack (FG-306). vllm 0.33.0 pins torch 2.14.0, whose wheel is built for
+# CUDA 13.0 like the image's (v173 has torch 2.11.0+cu130), and needs transformers
+# >=5.16.1,<5.21, so transformers is 5.20.2, the newest below 5.21. The rest are uv.lock's
+# versions, which take both: trl 1.18.0 needs transformers>=4.56.2, peft 0.21.3 any, and
+# transformers 5.20.2 and datasets 5.2.0 take huggingface-hub>=1.31,<3. CI tests torch
+# 2.15.0 and transformers 5.23.0; the transformers code Forge runs in a kernel
+# (apply_chat_template, get_chat_template and the trainer callback classes) does the same
+# in 5.20.2 for the arguments Forge passes.
+#
+# kaggle/spike/throughput.py installs and times this list as its "trl-vllm" stack, and a
+# unit test keeps the two the same. The image moved to CUDA 13 in late October 2026, so
+# bitsandbytes' CUDA build is the pin most likely to need a change.
+vllm==0.33.0  # unverified until FG-301 runs
+torch==2.14.0  # unverified until FG-301 runs
+transformers==5.20.2  # unverified until FG-301 runs
 trl==1.18.0  # unverified until FG-301 runs
-transformers==5.23.0  # unverified until FG-301 runs
 peft==0.21.3  # unverified until FG-301 runs
 accelerate==1.15.0  # unverified until FG-301 runs
 datasets==5.2.0  # unverified until FG-301 runs

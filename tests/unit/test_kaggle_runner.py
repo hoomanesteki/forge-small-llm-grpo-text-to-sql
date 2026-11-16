@@ -395,7 +395,7 @@ def test_jobs_a_later_story_builds_and_bad_options_are_refused_before_any_upload
     assert result.exit_code == 1 and "error: --job sft comes with FG-403" in result.stderr
 
     for text, message in (
-        ("model: org/m\nbackend: vllm\nops: {est_gpu_hours: 1}\n", "comes with FG-306"),
+        ("model: org/m\nbackend: llamacpp\nops: {est_gpu_hours: 1}\n", "comes with FG-702"),
         ("model: org/m\nbackend: hf\nops: {est_gpu_hours: 1}\n", "backend hf runs on the CPU"),
         ("model: gold\nbackend: fake\n", "sets no ops.est_gpu_hours"),
         ("model: gold\nbackend: fake\nops: {est_gpu_hours: 13}\n", "won't fit a 12 h session"),

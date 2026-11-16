@@ -5,8 +5,8 @@ generations in prompt order, then sample order. Each one carries the SQL that
 ``extract_sql`` finds in its text, its token counts and its latency, so the eval runner
 can treat every backend alike.
 
-``FakeBackend`` stands in for a model in tests, and ``render_chat`` turns a prompt into
-the text a model continues.
+``FakeBackend`` stands in for a model in tests, ``render_chat`` turns a prompt into the
+text a model continues, and ``split_ref`` reads a model or adapter ref.
 """
 
 from __future__ import annotations
@@ -14,7 +14,10 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from huggingface_hub.utils import HFValidationError, validate_repo_id
 
 from forge.core.hashing import canonical_json
 from forge.core.types import Generation, GenParams, Prompt
@@ -91,6 +94,24 @@ def render_chat(tokenizer: ChatTemplateTokenizer, messages: Sequence[Mapping[str
     if not isinstance(text, str):
         raise TypeError(f"apply_chat_template returned {type(text).__name__}, not the prompt text")
     return text
+
+
+def split_ref(ref: str) -> tuple[str, str | None]:
+    """A model or adapter ref as ``from_pretrained`` and vLLM take it: a local directory
+    with no revision, or a Hub repo id with the revision after an optional ``@``."""
+    if Path(ref).is_dir():
+        return ref, None
+    repo, at, revision = ref.partition("@")
+    try:
+        validate_repo_id(repo)
+    except HFValidationError:
+        # Otherwise a mistyped local path fails as a malformed repo id.
+        raise FileNotFoundError(
+            f"{ref!r} is neither a directory nor a Hub repo id with an optional @revision"
+        ) from None
+    if at and not revision:
+        raise ValueError(f"{ref!r} has nothing after its '@'; give a revision or drop the '@'")
+    return repo, revision or None
 
 
 class FakeBackend:
