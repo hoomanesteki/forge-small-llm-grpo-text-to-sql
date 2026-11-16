@@ -82,6 +82,7 @@ from forge.ops.hub import (
     BEST,
     FINAL,
     METRICS_FILE,
+    PROMOTION_FILE,
     LocalRunStore,
     RunStore,
     checkpoint_dir,
@@ -107,8 +108,7 @@ OUTPUTS: Mapping[str, str] = {
 }
 # The manifest's name for a checkpoint ops.keep_checkpoints_at keeps.
 KEPT_OUTPUT = "kept_at_{share:g}"
-# What promote_best writes beside the manifest, and what its scores are.
-PROMOTION_FILE = "best.json"
+# What promote_best's scores are; it writes them in PROMOTION_FILE.
 PROMOTION_METRIC = "official EX on val"
 # Settings an eval run's config may hold that change no score.
 _SCORELESS = ("adapter", "allow_over_budget")

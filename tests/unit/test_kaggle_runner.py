@@ -50,6 +50,7 @@ from forge.ops.kaggle_job import (
 from forge.ops.ledger import read_rows, summary
 from forge.ops.sessions import Session
 from forge.train.config import load_train_config, parse_train_config
+from forge.train.sft import promote_best
 from tests.fakes import sft_run_folder
 from tests.kernel import WHEEL
 from tests.spike import entry, load_script
@@ -865,6 +866,55 @@ def test_an_eval_job_refuses_a_checkpoint_no_kernel_output_holds(
     code = "".join(json.loads(book.read_text())["cells"][2]["source"])
     args = script.parse_args(_baked_argv(code))
     assert (args.options["adapter"], args.adapter_sha256) == (adapter, None)
+
+
+@pytest.mark.phase(4)
+def test_an_eval_job_of_best_pushes_the_checkpoint_best_json_names(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
+    base = ROOT / "configs" / "eval" / "qwen3-4b-val.yaml"
+    run, runs = "2026-11-20-qwen3-4b-sft-abc1234", repo / "runs"
+    half = "checkpoints/step-000242"
+    _train(run)
+    trained = sft_run_folder(runs, run, read_config_file(base)["model"], [half, FINAL])
+
+    def push(run_id: str) -> Any:
+        adapter = f"runs/{run}/checkpoints/best"
+        return _run(
+            *("--job", "eval", "--config", str(base), "--adapter", adapter),
+            *("--run-id", run_id, "--yes"),
+        )
+
+    # Not promoted yet: no kernel output holds best/, and no best.json says what it copies.
+    refused = push("too-early")
+    assert refused.exit_code == 1, refused.output
+    assert f"no kernel output holds checkpoints/best of run {run}" in refused.stderr
+
+    promote_best(run, {half: 0.5, FINAL: 0.4}, runs_root=runs)
+    result = push("best-val")
+
+    assert result.exit_code == 0, result.output
+    # The step's own folder, which the training kernel's output holds, and the digest the
+    # run's manifest records for it.
+    args = script.parse_args(_baked_argv(fake.pushed[-1]["entry.py"]))
+    assert args.options["adapter"] == f"runs/{run}/{half}"
+    assert args.adapter_sha256 == trained.outputs[f"adapter_sha256:{half}"]
+    meta = json.loads(fake.pushed[-1]["kernel-metadata.json"])
+    assert meta["kernel_sources"] == [f"{OWNER}/forge-{run}/1"]
+
+    # A best.json naming another checkpoint than the one best/ holds, or none, is refused.
+    record = runs / run / "best.json"
+    promoted = json.loads(record.read_text())
+    pushes = len(fake.pushed)
+    for checkpoint, message in (
+        (FINAL, f"names {FINAL}, but run {run}'s manifest records sha256"),
+        ("checkpoints/best", f"names no checkpoint of run {run}: 'checkpoints/best'"),
+    ):
+        record.write_text(json.dumps({**promoted, "checkpoint": checkpoint}))
+        refused = push("refused-val")
+        assert refused.exit_code == 1 and message in refused.stderr, refused.stderr
+    assert len(fake.pushed) == pushes
 
 
 @pytest.mark.phase(4)

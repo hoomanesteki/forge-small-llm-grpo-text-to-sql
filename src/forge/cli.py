@@ -1101,9 +1101,10 @@ def kaggle_run(
     soon as Kaggle accepts it; a --resume of the run is the same look. An eval job's
     checkpoint --adapter comes from the output of the kernel that trained its run, which
     the run's kernels.json here names, mounted beside the datasets: a run made anywhere
-    else is refused. A source Kaggle could not add is a warning: that version runs without
-    it, recorded like any other. So is a kaggle CLI that fails before it says the kernel was
-    pushed while Kaggle has the new kernel all the same: only the answer was lost.
+    else is refused, and checkpoints/best goes as the checkpoint its best.json names. A
+    source Kaggle could not add is a warning: that version runs without it, recorded like
+    any other. So is a kaggle CLI that fails before it says the kernel was pushed while
+    Kaggle has the new kernel all the same: only the answer was lost.
     """
     import json
 

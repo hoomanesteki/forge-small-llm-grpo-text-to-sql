@@ -53,7 +53,8 @@ the machine it was taken on, and ``kernels.json``, the kernels ``forge kaggle ru
 pushed for the run, with ``kernel/``, the rest of a kernel's output, unless the copy's
 ``kernels.json`` lists more pushes than this machine's: ``forge runs push`` uploads them,
 so the store may hold an older record. ``HubRunStore.get_folder`` fetches one folder of a
-run, such as the checkpoint a kernel's eval job loads as its adapter.
+run, such as the checkpoint a kernel's eval job loads as its adapter when no kernel output
+it mounts holds it.
 """
 
 from __future__ import annotations
@@ -84,6 +85,8 @@ RUNS = "runs"
 CHECKPOINTS = "checkpoints"
 FINAL = f"{CHECKPOINTS}/final"
 BEST = f"{CHECKPOINTS}/best"
+# What forge runs promote writes beside the manifest: the checkpoint best/ is a copy of.
+PROMOTION_FILE = "best.json"
 METRICS_FILE = "metrics.jsonl"
 KEEP_CHECKPOINTS = 2
 RETRIES = 3

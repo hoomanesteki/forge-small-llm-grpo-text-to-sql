@@ -102,7 +102,18 @@ from forge.ops.dev_usage import (
     log_dev_use,
     read_uses,
 )
-from forge.ops.hub import KERNEL_DIR, KERNELS_FILE, RUNS, LocalRunStore, RunNotFound, replace_run
+from forge.ops.hub import (
+    BEST,
+    FINAL,
+    KERNEL_DIR,
+    KERNELS_FILE,
+    PROMOTION_FILE,
+    RUNS,
+    LocalRunStore,
+    RunNotFound,
+    checkpoint_step,
+    replace_run,
+)
 from forge.ops.kaggle import (
     CODE_SLUG,
     DATA_SLUG,
@@ -296,7 +307,7 @@ class AdapterSource:
     """Where a kernel finds a training run's checkpoint, as ``adapter_kernel_sources``
     looks it up before a push."""
 
-    adapter: str  # runs/<run_id>/checkpoints/<name>
+    adapter: str  # runs/<run_id>/checkpoints/<name>, best spelled as the checkpoint it copies
     kernel: str  # owner/slug[/version] of the kernel whose output holds the checkpoint
     sha256: str | None  # the digest this machine's copy of the run records for it, if here
 
@@ -310,13 +321,16 @@ def adapter_kernel_sources(adapter: str, runs_root: Path) -> AdapterSource:
     kernel that holds the run, as ``kernels.json`` names it, at its version, which the
     kernel mounts as a kernel source under its input folder. An eval job's adapter comes
     this way, and so will the SFT adapter a GRPO job starts from: this is the one lookup
-    for both. When this machine has the run's manifest, the checkpoint must be one the
-    run kept, and ``sha256`` is the digest the manifest records for it, which the kernel
-    holds the folder it copies to.
+    for both. ``best`` is spelled as the checkpoint ``best.json`` names, since ``forge runs
+    promote`` writes ``best/`` on this machine and no kernel output holds it. When this
+    machine has the run's manifest, the checkpoint must be one the run kept, and
+    ``sha256`` is the digest the manifest records for it, which the kernel holds the
+    folder it copies to.
 
     Raises ``JobRefused`` for a run made anywhere but on Kaggle, such as a local pilot,
     whose checkpoints are in no kernel output; a run whose ``kernels.json`` this machine
-    lacks; and a checkpoint the run's manifest says it didn't keep.
+    lacks; a ``best`` this machine has no ``best.json`` for; and a checkpoint the run's
+    manifest says it didn't keep.
     """
     ref = checkpoint_ref(adapter)
     if ref is None or not ref.in_runs:
@@ -339,7 +353,7 @@ def adapter_kernel_sources(adapter: str, runs_root: Path) -> AdapterSource:
             "the kernel whose output holds its checkpoints; push the job from the machine "
             f"that pushed the run, or forge runs pull {run_id}, which brings the record along"
         )
-    rel = ref.rel
+    rel = _promoted(runs_root, run_id, manifest) if ref.rel == BEST else ref.rel
     digest = None
     if manifest is not None:
         digest = manifest.outputs.get(digest_output(rel))
@@ -349,6 +363,30 @@ def adapter_kernel_sources(adapter: str, runs_root: Path) -> AdapterSource:
                 "such checkpoint: its outputs name each it kept as adapter_sha256:<checkpoint>"
             )
     return AdapterSource(f"{RUNS}/{run_id}/{rel}", kernel_ref(_holding(record)), digest)
+
+
+def _promoted(runs_root: Path, run_id: str, manifest: RunManifest | None) -> str:
+    """The checkpoint run ``run_id``'s ``best/`` is a copy of, as its ``best.json`` names
+    it, once the manifest records the same files for both."""
+    path = runs_root / run_id / PROMOTION_FILE
+    if manifest is None or not path.is_file():
+        raise JobRefused(
+            f"no kernel output holds {BEST} of run {run_id}, which forge runs promote writes "
+            f"on the laptop, and this machine has no {path} naming the checkpoint it copies; "
+            f"forge runs pull {run_id}, or promote it, first"
+        )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    chosen = record.get("checkpoint") if isinstance(record, dict) else None
+    if not isinstance(chosen, str) or (chosen != FINAL and checkpoint_step(chosen) is None):
+        raise JobRefused(f"{path} names no checkpoint of run {run_id}: {chosen!r}")
+    best = manifest.outputs.get(digest_output(BEST))
+    copied = manifest.outputs.get(digest_output(chosen))
+    if best != copied:
+        raise JobRefused(
+            f"{path} names {chosen}, but run {run_id}'s manifest records sha256 {best} for "
+            f"{BEST} and {copied} for {chosen}; promote the run again"
+        )
+    return chosen
 
 
 def _holding(record: Mapping[str, Any]) -> Mapping[str, Any]:
