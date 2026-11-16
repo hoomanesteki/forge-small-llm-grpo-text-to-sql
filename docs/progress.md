@@ -68,7 +68,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 |---|---|---|---|---|---|---|
 | FG-501 | Reward functions | 5 | done |  |  | `forge.train.rewards.Rewards(gold, pool, config)`: `execution_reward`, `validity_reward`, `format_reward` (each 0 or 1) and `guard_penalty`, with `weights` [1.0, 0.1, 0.05, 1.0] from the new `rewards` config section, so the gold query in a code block scores 1.15; `non_select` -1.0, `multiple_statements` -0.5, `constant_query` -0.5 and `comment_payload` -0.2, and any guard, or a query that ran but that sqlglot can't read, takes away execution, validity and format. Model SQL runs only in the `SandboxPool`, once a batch for all four functions; gold from `forge.eval.gold_cache`. I3 in `test_invariants.py` |
 | FG-502 | Adversarial reward tests | 3 | done |  |  | `tests/fixtures/adversarial_completions.yaml`: 48 completions on the fixture databases, each with its gold query, its four rewards and their weighted total, 9 of them audit candidates that name the FG-601 detector for their kind (`test_adversarial_cases`); `test_rewards_bounded_property` holds every reward and the total to [-2, 1.2] over 500 generated replies. Fixed in `train/rewards.py`: the constant guard charges a literal answer written over a table, such as `SELECT 3 FROM professor LIMIT 1` |
-| FG-503 | Parallel reward computation and gold cache | 3 | todo |  |  |  |
+| FG-503 | Parallel reward computation and gold cache | 3 | done |  |  | `forge data cache-gold --split train` (or `val`) builds `cache/gold/<split>-<data hash[:12]>.jsonl` through `forge.eval.gold_cache.split_gold`, the one file `forge eval run` reads too, and anything that needs it builds it on first use; `forge.train.rewards.reward_pool()` starts the one pool a run's four rewards share, a worker a CPU up to 4, each query capped at 2 s; `scripts/bench_rewards.py` times 6 prompts of 6 replies, and `test_batch_latency_budget` holds its 20 fixture batches to 1.5 s each (the worst took 25 ms on the laptop). On Linux each `SandboxPool` worker caps `RLIMIT_AS` at 1 GiB past its start, and a query past it comes back as an `other` error while its worker is replaced; macOS doesn't enforce the limit, so the 2 s kill bounds it there. Fixed from FG-501's review: a comment beside a `;` no longer zeroes a right query, and a write among statements sqlglot can't read costs `non_select` |
 | FG-504 | GRPO trainer with CPU smoke | 5 | todo |  |  |  |
 | FG-505 | GRPO dataset, filtering and curriculum | 3 | todo |  |  |  |
 | FG-506 | Training telemetry and alerts | 3 | todo |  |  |  |
@@ -1119,3 +1119,25 @@ Work discovered along the way that is not a plan story.
   `comment_payload`; `constant_query` never fires with `non_select`) or above 1.15. The property
   test's replies mix any text, a soup of fragments, built queries and edited gold queries, and
   reach every guard and a match; `--hypothesis-show-statistics` shows the mix (FG-502).
+- sqlglot 30 reads a comment beside a `;` as an `exp.Semicolon` statement, so
+  `SELECT count(*) FROM professor; -- done`, which eval EX counts as right, scored 0 on all four
+  rewards, `SELECT 3; -- x` escaped the constant penalty, and two queries before a comment cost
+  `non_select`. The rewards drop those nodes, and find a write among several statements by the
+  executor's `statement_keyword` on each piece `split_statements` cuts, so
+  `DELETE FROM t; SELECT 1 /*`, which sqlglot can't read, costs -1.5 rather than -0.5 (FG-503,
+  from FG-501's review).
+- A batch of 36 replies (`scripts/bench_rewards.py`, Apple M4, Python 3.12.13, 4 workers) took a
+  median 10 ms and at worst 25 ms over 20 batches on the fixture, a median 11 ms and at worst 18 ms
+  over 50 on full train, and a median 14 ms there with one worker. Most of it is sqlglot reading the
+  replies in the trainer's process, which has no cap: up to 18 ms a reply for the 1 to 9 kB
+  pathological queries tried. The pool pays off on slow queries; one at the 2 s cap holds its batch
+  for up to 2.25 s, and its worker's restart takes about 0.25 s more, so FG-506 could log timeouts
+  per step (FG-503).
+- With SQLite's heap capped (`PRAGMA hard_heap_limit`, which the macOS test uses in place of
+  `RLIMIT_AS`), an aggregate over an endless CTE stops growing at the cap but runs on to its
+  deadline and then fails with `MemoryError`: a run with a 3 s timeout took 3.0 s. The memory cap
+  bounds memory, and the deadline still bounds time (FG-503).
+- The plan's FG-503 text names `cache/gold/train.pkl`, shipped with the data dataset. The cache is
+  FG-202's JSON lines, which run no code when read, and a Kaggle kernel's `FORGE_CACHE_DIR` is its
+  temp folder, so a GRPO session builds train's file on first use (3.6 s on the laptop) rather than
+  downloading it (FG-503).

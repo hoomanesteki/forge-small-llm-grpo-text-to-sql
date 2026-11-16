@@ -53,23 +53,30 @@ columns, one value a completion, which GRPO passes on with ``remove_unused_colum
 A completion is the reply's text or, in a conversational dataset, a list of messages whose
 first holds it as ``content``. The reply's ``<think>...</think>`` blocks are dropped before
 anything reads it. ``gold`` maps example ids to their gold queries' results, from
-``forge.eval.gold_cache.gold_results``.
+``forge.eval.gold_cache.split_gold("train")``, which reads the file ``forge data
+cache-gold`` builds, or builds it on first use.
 
 Model SQL is untrusted, so it runs only in the ``SandboxPool`` (ADR-0014), with the eval
-runner's timeout and row cap, which the gold cache's results allow for. TRL calls the four
-functions one after another on the same batch, so the batch's queries run once and the
-other three reuse its verdicts. Given the gold results the rewards are pure (I3): the same
-completion of the same example gets the same rewards, unless its query ends so near its
-deadline that one run times out and another doesn't.
+runner's timeout, 2 s a query, and row cap, which the gold cache's results allow for. A run
+keeps one pool for all four functions, ``reward_pool()``: one worker a CPU, at most
+``MAX_REWARD_WORKERS``, started before the first batch so no batch waits on start-ups, and
+each worker's memory capped on Linux. A batch's queries run across its workers at once.
+TRL calls the four functions one after another on the same batch, so the batch's queries
+run once and the other three reuse its verdicts. Given the gold results the rewards are
+pure (I3): the same completion of the same example gets the same rewards, unless its query
+ends so near its deadline that one run times out and another doesn't.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 import sqlglot
@@ -109,6 +116,9 @@ COMMENT_PAYLOAD_CHARS = 40
 _CONSTANT_AGGREGATES = (exp.Min, exp.Max, exp.Avg)
 # The dataset columns the rewards read from TRL's keyword arguments.
 COLUMNS = ("example_id", "db_id", "gold_sql")
+# Kaggle's T4 machines have 4 CPUs. Rewards run between the trainer's steps, while it waits
+# on them, so a worker on each CPU takes none from training.
+MAX_REWARD_WORKERS = 4
 
 _SQL_REPLY = re.compile(r"\s*```sql\b(?P<body>.*?)```\s*", re.DOTALL | re.IGNORECASE)
 
@@ -130,7 +140,8 @@ class Rewards:
     """The reward functions of one GRPO run, as the module docstring describes them.
 
     ``gold`` holds the result of each dataset example's gold query by example id, and
-    ``pool`` runs the completions' queries; the caller owns the pool and closes it.
+    ``pool`` runs the completions' queries, a run's ``reward_pool()``; the caller owns the
+    pool and closes it.
     """
 
     def __init__(
@@ -250,6 +261,35 @@ class Rewards:
                 "of the dataset (forge.eval.gold_cache.gold_results)"
             )
         return gold
+
+
+def reward_workers(cpus: int | None = None) -> int:
+    """The reward pool's size: ``cpus``, by default the CPUs this process may run on, but
+    at most ``MAX_REWARD_WORKERS``."""
+    return max(1, min(MAX_REWARD_WORKERS, available_cpus() if cpus is None else cpus))
+
+
+def available_cpus() -> int:
+    """The CPUs this process may run on: on Linux its affinity mask, which a container's
+    cpuset narrows and ``os.cpu_count`` doesn't see; elsewhere the machine's count."""
+    if sys.platform == "linux":
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
+
+
+def reward_pool(data_dir: Path | None = None, *, workers: int | None = None) -> SandboxPool:
+    """The sandbox pool a run's rewards share, ``reward_workers()`` workers by default,
+    each one started and ready. The caller closes it, as a ``with`` block does.
+
+    Raises ``SandboxError`` when a worker can't start.
+    """
+    pool = SandboxPool(reward_workers() if workers is None else workers, data_dir=data_dir)
+    try:
+        pool.start()
+    except BaseException:
+        pool.close()
+        raise
+    return pool
 
 
 def _verdict(reply: str, sql: str, pred: ExecResult, gold: ExecResult, gold_sql: str) -> Verdict:

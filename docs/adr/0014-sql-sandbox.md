@@ -127,8 +127,9 @@ gold queries they take less than half the time.
   seconds past it, and the evaluator's own deadline is 60 s and its column-permutation
   search on wide results runs in Python (upstream issue #12). The kill bounds all of that,
   and a crash, at the timeout plus the grace.
-- `SqliteExecutor.run_many` starts a pool for every call (about 0.2 s). FG-503 keeps one
-  long-lived pool for a training run; `official_exec_match` accepts it as `pool`.
+- `SqliteExecutor.run_many` starts a pool for every call (about 0.2 s). A training run's
+  rewards share one long-lived pool, `forge.train.rewards.reward_pool()`, started before
+  the first batch (FG-503); `official_exec_match` accepts one as `pool`.
 - Each worker imports what its jobs need at start (`imports`), so module loading doesn't
   count against a job's deadline.
 - Limits are set for Spider. The test-suite databases (FG-508) and BIRD (FG-605) must be
