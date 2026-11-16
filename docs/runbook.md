@@ -381,6 +381,41 @@ its rebuild compares the chart, and copy the folder whole to `docs/runs/`.
 `tests/integration/test_artifacts.py::test_phase3_baseline_reports_present` then checks
 every run is there with its report, I5 on its replies and I6 on step 4 against step 1.
 
+## SFT runs
+
+FG-404 trains the LoRA SFT adapters on Kaggle T4s and picks the main run's on val, about
+4.5 GPU hours in all (plan section 3.8). Push the jobs in this order, from one clean
+commit that passed `make smoke`, with the `HF_TOKEN` secret attached to each kernel: the
+runs go to the run store, and an eval job fetches its checkpoint from there. After each,
+`forge kaggle wait <run_id>`, then `forge runs pull <run_id>`, which adds its ledger row.
+
+1. The pilot, 1 epoch on the small candidate, to show the setup works before the main
+   run: `uv run forge kaggle run --job sft --config configs/sft/qwen3-1p7b-pilot.yaml`.
+2. Its final adapter on val, with that candidate's FG-307 config, so the two runs differ
+   in the adapter alone: `uv run forge kaggle run --job eval --config
+   configs/eval/qwen3-1-7b-val.yaml --adapter runs/<pilot_run_id>/checkpoints/final
+   --run-id <date>-qwen3-1-7b-sft-val-<sha7>`. Then `uv run forge runs promote
+   <pilot_run_id> --eval <that run id>` sets the pilot's `checkpoints/best`, where FG-507's
+   GRPO pilot starts.
+3. The main run, 1 epoch on the chosen model: `uv run forge kaggle run --job sft --config
+   configs/sft/qwen3-4b-main.yaml`. If ADR-0012 chooses another model, the config names it
+   first. It keeps its checkpoint half way (`ops.keep_checkpoints_at: [0.5]`) beside
+   `checkpoints/final`; `forge runs show <run_id>` lists both, the first as `kept_at_0.5`.
+4. Both checkpoints on val, each with `configs/eval/qwen3-4b-val.yaml` and its own
+   `--adapter runs/<main_run_id>/<checkpoint>` and `--run-id`.
+5. `uv run forge runs promote <main_run_id> --eval <half run id> --eval <final run id>`:
+   the higher official EX goes to `checkpoints/best`, the final adapter on a tie.
+
+Render each eval run's report on the laptop (`FORGE_DATA_DIR=data/spider uv run forge
+report run <run_id>`) and copy the folder whole to `docs/runs/`. Copy each SFT run
+without its checkpoints, which stay in the run store: `manifest.json`, `config.yaml`,
+`metrics.jsonl` and `best.json`. Then take FG-404's entries out of
+`docs/runs/pending.yaml`, and `tests/integration/test_artifacts.py::test_phase4_sft_runs_present`
+checks every run, report and ledger row, and each `best/` against its eval runs' scores.
+No step reads dev. If val EX was still rising at the end of the epoch and the budget
+allows, a second epoch is the product owner's call (ADR-0010), recorded in
+`docs/progress.md`.
+
 ## Troubleshooting
 
 - **`ModuleNotFoundError: forge` on macOS.** The venv can come out with the hidden file

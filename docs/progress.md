@@ -58,7 +58,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-401 | SFT dataset builder | 3 | done |  |  | `forge.train.sft_data`: TRL conversational prompt-completion rows (`prompt` from `fit_prompt`, `completion` the gold query in a sql block, `example_id`, `db_id`) from `load_train()` only, checked again by `assert_train_only`; repeats (casefolded, spacing collapsed), `FAILING_GOLD_IDS`, prompts over the limit and prompts that show a gold table without columns are left out and counted; `forge data build-sft --prompt-version --tokenizer [--out]` saves `data/sft/<sha256>/` with `meta.json`; `load_tokenizer` takes `<repo>@<revision>`. Masking checked through `SFTTrainer`'s own preparation with the tiny Qwen2.5 tokenizer |
 | FG-402 | Training backend abstraction and configs | 5 | done |  |  | `forge.train.config`: strict pydantic `LoraConfig`, `SftConfig`, `GrpoConfig`, `OpsConfig` (and `run`, `data`) from one YAML file, refusing unknown or repeated keys, `max_completion_length` over 512, `num_generations` that doesn't divide the generation batch, any split but train, and Unsloth or 4-bit off CUDA; `forge.train.backends`: `TrainBackend`, `TrlBackend` (float32 on CPU; bf16 on MPS from macOS 14, else float32; bf16 on CUDA where the GPU has it, else fp16) and a lazily imported `UnslothBackend`, one trainer builder for both, `max_prompt_length` dropping GRPO rows before TRL, `select_backend`; `forge.train.callbacks`: `CheckpointCallback`, `MetricsCallback` (JSONL), optional W&B, `training_callbacks`. Unsloth itself untried until a GPU job installs it |
 | FG-403 | SFT trainer with CPU smoke | 3 | done |  |  | `forge train sft --config [--run-id] [--sft-dir] [--allow-dirty]` (`forge.train.sft.run_sft`): builds the rows with the model's tokenizer, keeps an existing `data/sft/<hash>/`, reads it in memory once it hashes to its name, trains with the job callbacks and saves `checkpoints/final`; the manifest's config holds the run, data, LoRA and SFT sections, `sft_data.hash` and the trainer's backend, device and dtype, under the config hash. Local runs are `local-cpu` or `local-mps` only. `configs/sft/`: tiny-smoke, pilot-qwen25coder05b-mps, qwen3-1p7b-pilot and qwen3-4b-main, at ADR-0010's values (written here, with `max_length` 2,048). `make smoke` trains 3 steps and evaluates the adapter on 10 val questions |
-| FG-404 | SFT runs on Kaggle | 3 | todo |  |  |  |
+| FG-404 | SFT runs on Kaggle | 3 | blocked: the GPU runs need a phone-verified Kaggle account with an API token and `FORGE_KAGGLE_USER`, both datasets published, a Hugging Face write token as the kernels' `HF_TOKEN` secret with the private run store repo, FG-301's spike and ADR-0012's model choice |  |  | Built and tested on CPU: `ops.keep_checkpoints_at` saves the checkpoints at those shares of a run and keeps them from retention, named `kept_at_<share>` in the manifest (the main config keeps 0.5, beside `checkpoints/final`); `forge.train.sft.promote_best` and `forge runs promote <run_id> --eval ...` copy the checkpoint whose val run has the highest official EX to `checkpoints/best`, the later one on a tie, with `best.json`, in `runs/` and the run store, refusing dev and runs that differ in more than the adapter; `forge kaggle run --job sft` (the checked config in the options, a 2-step preflight, the host as platform, the time guard short of the push's timeout) and `--adapter` for eval jobs, whose kernel fetches a `runs/<run_id>/checkpoints/<name>` adapter from the run store; runbook "SFT runs"; `test_phase4_sft_runs_present` skips while FG-404 is in `docs/runs/pending.yaml`. Pending: its 4 runs there, 4.5 GPU h |
 | FG-405 | SFT results and comparison | 2 | todo |  |  |  |
 | FG-491 | Local SFT pilot on Apple silicon | 3 | done |  | 2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8, 2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8 | `configs/sft/pilot-qwen25coder05b-mps.yaml`: LoRA SFT of the pilot model on `mps` in bf16, `max_length` 1,536 with gradient checkpointing, a row at a time padded to 64 tokens and 16 a step, on 3,168 train rows drawn by hash (`sft.subset_rows`), as a 20-step probe put the epoch past 2.5 h; `forge train sft` leaves out rows over `max_length` rather than letting TRL cut them, and `sft_data` in the manifest counts them and the rows trained; `forge ledger record <run_id>` writes a local run's row from its manifest; the adapter's full val run (FG-291's config with `--adapter`), its report and its comparison with the base pilot are in `docs/runs/`, the training run without weights; val only (ADR-0016). Pending: the adapter's copy in the run store (`docs/runs/pending.yaml`) |
 
@@ -994,3 +994,27 @@ Work discovered along the way that is not a plan story.
   run store until the Hugging Face account exists (FG-491).
 - `docs/runs` now holds a training run, so the tests that read each committed run as an eval
   run (I5 on committed runs, `gpu_story_runs`) take only eval runs (FG-491).
+- Retention kept a run's latest 2 step checkpoints, so the main SFT run's checkpoint half way
+  (step 242 of the 484 that 7,736 rows make at 16 a step) would have gone at step 300.
+  `prune_checkpoints` now takes `keep_steps`, which both training callbacks pass for
+  `ops.keep_checkpoints_at` (FG-404).
+- A kernel's time guard counts `ops.time_guard_minutes` (11 h 15 min) from the job's start,
+  while `forge kaggle run` stops the kernel at its estimate and half again, 3.75 h for the
+  main SFT run. A job that slow is stopped on purpose (plan section 5.3), but Kaggle would
+  stop it without the guard's checkpoint and manifest. The entry script has the push's
+  timeout since FG-392, so a kernel's SFT job counts its guard only up to that timeout,
+  from the kernel's start, less the tenth an eval job keeps back, here for the guard's last
+  save and the upload, when that comes before `ops.time_guard_minutes` (FG-404).
+- The kernel's SFT job keeps its step checkpoints in its own run folder and puts the whole
+  run in the store at the end: an SFT run can't be resumed, so a checkpoint on the Hub before
+  then would serve nothing. GRPO's resume (FG-504) needs the callbacks to push to the Hub
+  store mid-run (FG-404).
+- The run store is one Hub repo of many runs, and vLLM's `LoRARequest` takes a folder or a
+  whole repo, so a kernel's eval job fetches a `runs/<run_id>/checkpoints/<name>` adapter
+  alone with `HubRunStore.get_folder`; such a job needs the `HF_TOKEN` secret (FG-404).
+- An SFT job's preflight trains its own adapter, so the job loads the model again for a fresh
+  one, a minute or two of a 4-bit 4B's kernel time, after `gc.collect()` and
+  `torch.cuda.empty_cache()` give the preflight's memory back (FG-404).
+- `forge kaggle run --adapter` scores a checkpoint with its base model's FG-307 config, so the
+  base and SFT val runs differ in the adapter alone, as `forge report compare` in FG-405 needs
+  and as FG-491's local runs did (FG-404).
