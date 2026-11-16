@@ -33,8 +33,15 @@ def kernel_folder(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in KERNEL_ENV:
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name)
+    root.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(root)
     return root
+
+
+def mount_output(previous: Path, root: Path, slug: str = "forge-run-1") -> Path:
+    """The output of the kernel that ran in ``previous``, mounted under ``root``'s input
+    folder as a resume's kernel source is."""
+    return Path(shutil.copytree(previous / "working", root / "input" / slug))
 
 
 def write_checksums(data: Path) -> None:

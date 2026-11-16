@@ -418,6 +418,17 @@ def eval_run(
             "--allow-dirty", help="Run on uncommitted changes; the manifest's SHA says -dirty."
         ),
     ] = False,
+    # Left out of the manifest too: when an attempt stops changes no score.
+    deadline_minutes: Annotated[
+        float | None,
+        typer.Option(
+            "--deadline-minutes",
+            min=0.0,
+            help="Stop between batches so the run ends within this many minutes from now, a "
+            "tenth kept back for official EX and storing; it then says stopped_time_guard "
+            "and resumes with its --run-id.",
+        ),
+    ] = None,
 ) -> None:
     """Generate, execute and score a split; resume a run by passing its --run-id.
 
@@ -427,7 +438,8 @@ def eval_run(
     eval/<split>-first-tries.jsonl keeps the first reply of each retried sample, and the
     generations file holds the reply each score is for. With --store hub the folder also
     goes to the Hub run store when the run ends, finished or failed, and a --run-id that
-    runs/ lacks is fetched from it to resume. Exits 1 if the run fails.
+    runs/ lacks is fetched from it to resume. Exits 1 unless the run finishes: when it
+    fails, or when --deadline-minutes stops it.
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
@@ -435,6 +447,7 @@ def eval_run(
     from forge.ops.dev_usage import DevBudgetExceeded
     from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound
+    from forge.ops.timeguard import eval_deadline
     from forge.sql.sandbox import SandboxError
 
     config = EvalConfig(
@@ -458,11 +471,14 @@ def eval_run(
         typer.echo(f"scored {done} of {total}", err=True)
 
     try:
+        # From the start, so loading the model counts against it.
+        deadline = None if deadline_minutes is None else eval_deadline(deadline_minutes)
         run = run_eval(
             config,
             allow_dirty=allow_dirty,
             workers=WORKERS if workers is None else workers,
             progress=progress,
+            deadline=deadline,
         )
     # OSError covers missing data (DataNotFound), a model that can't be found and the
     # official evaluator's overall timeout; ValueError a wrong option, a failing gold
@@ -500,6 +516,14 @@ def eval_run(
         typer.echo(f"resumed: {run.resumed} scores were stored by an earlier attempt")
     if len(scores) > run.resumed:
         typer.echo(f"generated {len(scores) - run.resumed} samples in {run.generate_s:.1f} s")
+    if run.manifest.status == "stopped_time_guard":
+        typer.echo(
+            f"error: the deadline stopped run {run.manifest.run_id} with {len(scores)} of "
+            f"{run.questions * n} samples scored; official EX waits for the attempt that "
+            f"finishes it: run again with --run-id {run.manifest.run_id}",
+            err=True,
+        )
+        raise typer.Exit(1)
     for name, hits in (
         ("valid", sum(s.valid for s in scores)),
         ("fast EX", sum(s.ex_fast for s in scores)),
@@ -1104,6 +1128,13 @@ def kaggle_wait(
         upload = stages.get("upload", {}).get("result", "not reached")
         typer.echo(f"job {outcome['status']} at stage {outcome['stage']}; upload: {upload}")
         _log_run(record, "has ended")
+    if outcome["status"] == "stopped_time_guard":
+        typer.echo(
+            "error: the job stopped at its time guard before Kaggle's timeout; carry it on "
+            f"with forge kaggle run --resume --run-id {run_id} and the same --job and --config",
+            err=True,
+        )
+        raise typer.Exit(1)
     if outcome["status"] != "finished":
         typer.echo(f"error: {outcome.get('error') or outcome['status']}", err=True)
         raise typer.Exit(1)
