@@ -14,7 +14,14 @@ from typing import Any
 
 import httpx2
 import pytest
-from huggingface_hub.errors import HfHubHTTPError, RemoteEntryNotFoundError
+from huggingface_hub.errors import (
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+    OfflineModeIsEnabled,
+    RemoteEntryNotFoundError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 
 from forge.core.types import Example
 from forge.sql.executor import SqliteExecutor
@@ -206,16 +213,45 @@ class InlineSandbox:
         return fn(self.executor, *args)
 
 
-def hub_error(status: int, kind: type[HfHubHTTPError] = HfHubHTTPError) -> HfHubHTTPError:
-    """The error huggingface_hub raises when the Hub answers ``status``."""
-    request = httpx2.Request("POST", "https://huggingface.co/api/models/owner/forge-runs")
+# The repo lookup, a request huggingface_hub sends once, so the store retries its failures.
+REPO_URL = "https://huggingface.co/api/models/owner/forge-runs"
+# The file listing, a request huggingface_hub retries itself before it raises.
+TREE_URL = f"{REPO_URL}/tree/main"
+
+
+def hub_error(
+    status: int, kind: type[HfHubHTTPError] = HfHubHTTPError, *, url: str = REPO_URL
+) -> HfHubHTTPError:
+    """The error huggingface_hub raises when the Hub answers ``status`` to ``url``."""
+    request = httpx2.Request("POST", url)
     return kind(f"{status} from the Hub", response=httpx2.Response(status, request=request))
+
+
+def connect_error(url: str) -> httpx2.ConnectError:
+    """The error huggingface_hub raises when the connection for ``url`` is refused."""
+    return httpx2.ConnectError("connection refused", request=httpx2.Request("GET", url))
+
+
+def _unreachable(error: BaseException) -> bool:
+    """Whether huggingface_hub 2.4's downloads report ``error`` as a Hub they can't reach:
+    a refused connection, a timeout, offline mode, and any HTTP error but a missing repo,
+    revision or file, a gated repo and a 401, which they raise as they are."""
+    if isinstance(error, httpx2.ConnectError | httpx2.TimeoutException | OfflineModeIsEnabled):
+        return True
+    passed_on = RepositoryNotFoundError | RevisionNotFoundError | RemoteEntryNotFoundError
+    return (
+        isinstance(error, HfHubHTTPError)
+        and not isinstance(error, passed_on)
+        and error.response.status_code != 401
+    )
 
 
 class FakeHub:
     """``huggingface_hub.HfApi`` as the Hub run store calls it: one repo whose files are
     held in memory, by path. Each call is recorded as (method, keyword arguments), and
-    raises the first error ``fail`` lists for its method, if any, before it does anything."""
+    raises the first error ``fail`` lists for its method, if any, before it does anything.
+    As the real client does, ``hf_hub_download`` and ``snapshot_download`` raise an error
+    that says the Hub can't be reached as a ``LocalEntryNotFoundError`` caused by it."""
 
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
@@ -228,10 +264,16 @@ class FakeHub:
         self.tokens.append(token)
         return self
 
-    def _record(self, method: str, kwargs: dict[str, Any]) -> None:
+    def _record(self, method: str, kwargs: dict[str, Any], *, download: bool = False) -> None:
         self.calls.append((method, kwargs))
         if self.fail.get(method):
-            raise self.fail[method].pop(0)
+            error = self.fail[method].pop(0)
+            if download and _unreachable(error):
+                raise LocalEntryNotFoundError(
+                    "An error happened while trying to locate the file on the Hub. Please "
+                    "check your connection and try again."
+                ) from error
+            raise error
 
     def upload_file(self, **kwargs: Any) -> None:
         self._record("upload_file", kwargs)
@@ -269,7 +311,7 @@ class FakeHub:
             del self.files[name]
 
     def hf_hub_download(self, **kwargs: Any) -> str:
-        self._record("hf_hub_download", kwargs)
+        self._record("hf_hub_download", kwargs, download=True)
         name = kwargs["filename"]
         if name not in self.files:
             raise hub_error(404, RemoteEntryNotFoundError)
@@ -279,7 +321,7 @@ class FakeHub:
         return str(target)
 
     def snapshot_download(self, **kwargs: Any) -> str:
-        self._record("snapshot_download", kwargs)
+        self._record("snapshot_download", kwargs, download=True)
         root = Path(kwargs["local_dir"])
         # Like the real one, it keeps its download metadata inside the folder.
         (root / ".cache" / "huggingface").mkdir(parents=True, exist_ok=True)

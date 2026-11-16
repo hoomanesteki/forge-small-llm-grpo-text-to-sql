@@ -241,9 +241,14 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 - The end of an eval run and a push replace the store's copy: files it has that the folder lacks
   are deleted, such as the `error.txt` of an attempt that failed. The kernel's upload stage only
   adds, since a kernel that failed early may hold part of a run.
-- A Hub call that fails on the network (a dropped connection, a timeout, 408, 429 or 5xx, a
-  failed upload or Xet transfer) is tried 3 more times, 2, 4 and 8 seconds apart. A missing
-  repo or a refused token fails at once.
+- A Hub call that fails on the network (a dropped or refused connection, a timeout, 408, 429
+  or 5xx, downloads included) is tried again by one layer only. huggingface_hub 2.4 tries most
+  of its requests 5 more times itself, 1, 2, 4, 8 and 8 seconds apart; the two it sends once,
+  a commit and the repo lookup that starts a pull, the store tries 3 more times, 2, 4 and 8
+  seconds apart. No failure is retried by both, so a call that keeps failing waits at most
+  14 s between the store's tries and 23 s inside the client's, then says the store is
+  unavailable. A missing run is reported as missing, and a missing
+  repo, a refused token or a refused upload fails at once.
 - The token is `HF_TOKEN` from the environment or `.env`; without one, huggingface_hub uses a
   saved login. Nothing creates the repo: make it private by hand (Accounts, step 2), and
   `forge doctor` checks it.
