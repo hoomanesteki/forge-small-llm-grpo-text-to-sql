@@ -13,7 +13,9 @@ import pytest
 import yaml
 from datasets import Dataset, load_from_disk
 from transformers import TrainerCallback, TrainerControl, TrainerState
+from typer.testing import CliRunner
 
+from forge import cli
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.splits import load_train
@@ -275,3 +277,47 @@ def test_rows_must_hash_to_their_folder(spider_mini: Path, tmp_path: Path) -> No
     # Rows that are not the ones the meta hashed, as a folder edited by hand would hold.
     with pytest.raises(ValueError, match="not to its name; remove the folder"):
         open_rows(folder, p2.meta)
+
+
+@pytest.mark.phase(4)
+def test_train_sft_command(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
+    chosen: list[tuple[str, str]] = []
+
+    def select_backend(name: str, *, device: str, max_seq_length: int) -> FakeBackend:
+        chosen.append((name, device))
+        assert max_seq_length == 2048  # ADR-0010's, not TRL's 1,024
+        return FakeBackend()
+
+    monkeypatch.setattr(sft, "select_backend", select_backend)
+    config = tmp_path / "sft.yaml"
+    config.write_text(
+        f"run: {{kind: sft, model_ref: '{MODEL}', backend: trl, device: cpu}}\n"
+        "sft: {max_steps: 3}\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    args = ["train", "sft", "--config", str(config), "--sft-dir", str(tmp_path / "sft")]
+
+    done = runner.invoke(cli.app, [*args, "--run-id", RUN, "--allow-dirty"])
+
+    assert done.exit_code == 0, done.output
+    assert chosen == [("trl", "cpu")]
+    meta = read_meta(next((tmp_path / "sft").iterdir()))
+    root = tmp_path / "runs" / RUN
+    assert done.stdout.splitlines() == [
+        f"run {RUN}: {root}",
+        f"sft data {tmp_path / 'sft' / meta.hash}: {meta.counts.rows} rows, hash {meta.hash}",
+        "platform local-cpu, backend fake on cpu in float32",
+        f"adapter {root / 'checkpoints' / 'final'}",
+    ]
+    taken = runner.invoke(cli.app, [*args, "--run-id", RUN, "--allow-dirty"])
+    assert taken.exit_code == 1 and f"error: run {RUN} is in {root} already" in taken.stderr
+
+    config.write_text(f"run: {{kind: sft, model_ref: '{MODEL}'}}\nsft: {{max_step: 3}}\n")
+    misspelt = runner.invoke(cli.app, [*args, "--allow-dirty"])
+    assert misspelt.exit_code == 1
+    assert "sft.max_step: Extra inputs are not permitted" in misspelt.stderr
+    assert chosen == [("trl", "cpu")]
