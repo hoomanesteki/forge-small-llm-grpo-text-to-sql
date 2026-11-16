@@ -24,7 +24,7 @@ import pytest
 import yaml
 
 from forge.data import prompts as forge_prompts
-from forge.ops.kaggle import METADATA_FILE, check_kernel_metadata
+from forge.ops.kaggle import METADATA_FILE, bake_argv, check_kernel_metadata
 from tests.spike import THROUGHPUT, throughput
 from tests.tiny_hf import CHATML, QWEN3, byte_tokenizer
 
@@ -110,11 +110,109 @@ def test_kernel_argv_is_used_when_kaggle_passes_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Kaggle starts a script kernel with no arguments; bundling writes them into the script.
+    monkeypatch.delenv(spike.CHILD_ENV, raising=False)
     monkeypatch.setattr(sys, "argv", ["throughput.py"])
     argv = ["limit-probe", "--out-dir", str(tmp_path), "--interval-seconds", "0"]
     monkeypatch.setattr(spike, "KERNEL_ARGV", [*argv, "--max-beats", "1"])
     assert spike.main() == 0
     assert json.loads((tmp_path / spike.PROBE_NAME).read_text())["beats"] == 1
+
+
+@pytest.mark.phase(3)
+def test_launch_report_is_written_before_the_arguments_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An IPython kernel's argv, and baked arguments this script can't take: the report
+    # still says how the kernel was started.
+    launcher = str(tmp_path / "ipykernel_launcher.py")
+    monkeypatch.delenv(spike.CHILD_ENV, raising=False)
+    monkeypatch.setattr(sys, "argv", [launcher, "-f", "/tmp/kernel-4242.json"])
+    baked = ["run", "--out-dir", str(tmp_path / "out"), "--no-such-option"]
+    monkeypatch.setattr(spike, "KERNEL_ARGV", baked)
+    with pytest.raises(SystemExit) as exit_info:
+        spike.main()
+    assert exit_info.value.code == 2
+    assert "--no-such-option" in capsys.readouterr().err
+    report = json.loads((tmp_path / "out" / spike.REPORT_NAME).read_text())
+    assert report["launch"] == {
+        "argv0": launcher,
+        "argv": [launcher, "-f", "/tmp/kernel-4242.json"],
+        "kernel_argv": baked,
+        "file": str(THROUGHPUT),
+        "cwd": os.getcwd(),
+    }
+    assert (report["args"], report["stages"], report["finished_at"]) == (None, [], None)
+
+
+@pytest.mark.phase(3)
+def test_a_child_takes_its_command_line_over_the_baked_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # run_child marks each child, which runs the same baked script with its own arguments.
+    monkeypatch.setenv(spike.CHILD_ENV, "1")
+    argv = ["limit-probe", "--out-dir", str(tmp_path), "--interval-seconds", "0"]
+    monkeypatch.setattr(sys, "argv", ["throughput.py", *argv, "--max-beats", "2"])
+    monkeypatch.setattr(spike, "KERNEL_ARGV", ["run", "--out-dir", str(tmp_path / "run")])
+    assert spike.main() == 0
+    assert json.loads((tmp_path / spike.PROBE_NAME).read_text())["beats"] == 2
+    # A child writes no launch report: the kernel's is the one that counts.
+    assert [p.name for p in tmp_path.iterdir()] == [spike.PROBE_NAME]
+
+
+# Runs the baked script as ipykernel runs a cell: argv is the kernel's own, the code is
+# compiled under a cell's file name that is no file on disk, its source is in linecache,
+# and the namespace is a __main__ module with no __file__.
+IPYKERNEL_DRIVER = """\
+import json, linecache, sys, types
+from pathlib import Path
+
+script, launcher, cell, work = sys.argv[1:]
+source = Path(script).read_text(encoding="utf-8")
+sys.argv = [launcher, "-f", "/tmp/kernel-4242.json"]
+linecache.cache[cell] = (len(source), None, source.splitlines(keepends=True), cell)
+main = types.ModuleType("__main__")
+sys.modules["__main__"] = main
+exec(compile(source, cell, "exec"), main.__dict__)
+ns = main.__dict__
+path = ns["_script_path"](Path(work))
+stage = ns["Stage"]("secrets", sys.executable, ("secrets", "--labels", "HF_TOKEN"))
+outcome = ns["run_child"](stage, Path(work) / "secrets.json", 60.0, script=path)
+print(json.dumps({"script": path, "status": outcome.status, "result": outcome.result}))
+"""
+
+
+@pytest.mark.phase(3)
+def test_ipykernel_launch_runs_the_baked_argv(fakes: Path, tmp_path: Path) -> None:
+    (fakes / "kaggle_secrets.py").write_text(
+        "class UserSecretsClient:\n    def get_secret(self, label):\n        return 'x'\n"
+    )
+    out, work = tmp_path / "out", tmp_path / "work"
+    argv = ["limit-probe", "--out-dir", str(out), "--interval-seconds", "0", "--max-beats", "1"]
+    baked = tmp_path / "kernel" / "throughput.py"
+    baked.parent.mkdir()
+    baked.write_text(bake_argv(THROUGHPUT.read_text(encoding="utf-8"), argv), encoding="utf-8")
+    # A real file named like a script, which must not be taken for this one.
+    launcher = tmp_path / "ipykernel_launcher.py"
+    launcher.write_text("from ipykernel import kernelapp as app\napp.launch_new_instance()\n")
+    cell = tmp_path / "ipykernel_4242" / "2381940622.py"  # never written, as in a kernel
+    driver = [sys.executable, "-c", IPYKERNEL_DRIVER, str(baked), str(launcher), str(cell)]
+    done = subprocess.run(
+        [*driver, str(work)], cwd=tmp_path, capture_output=True, text=True, timeout=120
+    )
+    # The cell ends without raising SystemExit, which a kernel would show as an error.
+    assert done.returncode == 0, done.stderr
+
+    # The baked arguments ran, not the kernel's -f <connection file>.
+    assert json.loads((out / spike.PROBE_NAME).read_text())["beats"] == 1
+    launch = json.loads((out / spike.REPORT_NAME).read_text())["launch"]
+    assert (launch["argv0"], launch["file"], launch["kernel_argv"]) == (str(launcher), None, argv)
+    # With no file to run, the children run the cell's source, written out once.
+    found = json.loads(done.stdout.splitlines()[-1])
+    assert found["script"] == str(work / "throughput.py")
+    assert Path(found["script"]).read_text(encoding="utf-8") == baked.read_text(encoding="utf-8")
+    # The child, marked as one, ran the stage it was given and not the baked probe.
+    assert found["status"] == "ok"
+    assert found["result"]["labels"] == {"HF_TOKEN": {"readable": True}}
 
 
 @pytest.mark.phase(3)
@@ -253,6 +351,7 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
     }
     assert (report["schema"], report["story"]) == (spike.REPORT_SCHEMA, "FG-301")
     assert report["finished_at"] is not None
+    assert report["launch"]["script"] == str(THROUGHPUT)  # what each child runs
     assert report["args"]["models"] == ["m/small"]
     statuses = {s["name"]: (s["status"], s["error"]) for s in report["stages"]}
     assert statuses == {
@@ -279,6 +378,22 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
     assert envs["grpo:unsloth:m/small"] == {"CUDA_VISIBLE_DEVICES": "0"}
     # Each stack's venv is gone once its last bench is over.
     assert not (venvs / "unsloth").exists()
+
+
+@pytest.mark.phase(3)
+def test_run_without_a_script_to_start_stops_with_the_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def nowhere(work: Path) -> str:
+        raise RuntimeError("can't find this script's file or its source")
+
+    monkeypatch.setattr(spike, "_script_path", nowhere)
+    calls: list[str] = []
+    report = spike.run(_run_args(tmp_path), runner=_fake_runner({}, calls))
+    assert calls == []
+    assert report["error"] == "can't find this script's file or its source"
+    assert report["stages"] == [] and report["finished_at"] is not None
+    assert json.loads((tmp_path / "out" / spike.REPORT_NAME).read_text()) == report
 
 
 @pytest.mark.phase(3)
@@ -350,7 +465,9 @@ def test_run_child_reports_a_failed_stage(
     (fakes / "kaggle_secrets.py").write_text(source + "\n")
     stage = spike.Stage("secrets", sys.executable, ("secrets",))
     started = time.monotonic()
-    outcome = spike.run_child(stage, tmp_path / "results" / "secrets.json", timeout)
+    outcome = spike.run_child(
+        stage, tmp_path / "results" / "secrets.json", timeout, script=str(THROUGHPUT)
+    )
     assert (outcome.status, outcome.result) == (status, None)
     assert error in outcome.error
     if "exit code" in error:
@@ -364,7 +481,7 @@ def test_run_child_returns_the_stage_result(fakes: Path, tmp_path: Path) -> None
         "class UserSecretsClient:\n    def get_secret(self, label):\n        return 'x'\n"
     )
     stage = spike.Stage("secrets", sys.executable, ("secrets", "--labels", "HF_TOKEN"))
-    outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0)
+    outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0, script=str(THROUGHPUT))
     assert outcome.status == "ok", outcome.error
     assert outcome.result["labels"] == {"HF_TOKEN": {"readable": True}}
 
@@ -375,7 +492,7 @@ def test_run_child_gives_the_stage_its_environment(
 ) -> None:
     # The stand-in for kaggle_secrets records the environment the child sees.
     seen = tmp_path / "seen.json"
-    names = ("CUDA_VISIBLE_DEVICES", "TOKENIZERS_PARALLELISM")
+    names = ("CUDA_VISIBLE_DEVICES", "TOKENIZERS_PARALLELISM", spike.CHILD_ENV)
     (fakes / "kaggle_secrets.py").write_text(
         textwrap.dedent(
             f"""\
@@ -390,11 +507,12 @@ def test_run_child_gives_the_stage_its_environment(
     )
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")  # a T4 x2 session's two GPUs
     stage = spike.Stage("secrets", sys.executable, ("secrets",), env=spike.ONE_GPU)
-    outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0)
+    outcome = spike.run_child(stage, tmp_path / "secrets.json", 60.0, script=str(THROUGHPUT))
     assert outcome.status == "ok", outcome.error
     assert json.loads(seen.read_text()) == {
         "CUDA_VISIBLE_DEVICES": "0",
         "TOKENIZERS_PARALLELISM": "false",
+        spike.CHILD_ENV: "1",
     }
 
 

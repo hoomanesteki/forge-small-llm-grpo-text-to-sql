@@ -20,7 +20,11 @@ versions that conflict with each other, so each gets its own venv, deleted after
 
 The script needs only the standard library to start: heavy imports happen inside the
 stages, and nothing runs on import. Kaggle runs a script kernel without arguments, so
-scripts/kaggle_spike.py writes them into KERNEL_ARGV when it bundles the kernel.
+scripts/kaggle_spike.py writes them into KERNEL_ARGV when it bundles the kernel; they win
+over any the interpreter was given, such as an IPython kernel's own, except in a child,
+which run_child marks with FORGE_SPIKE_CHILD. Every launch writes the report's ``launch``
+record before it parses its arguments, so even a launch they don't suit says how Kaggle
+started the script.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import functools
 import importlib.metadata
 import itertools
 import json
+import linecache
 import os
 import platform
 import re
@@ -53,7 +58,11 @@ from typing import Any
 KERNEL_ARGV: list[str] = []
 
 REPORT_SCHEMA = "forge-kaggle-spike/1"
+# Only this script, or a copy of it, holds this line.
+SCRIPT_MARK = f"REPORT_SCHEMA = {json.dumps(REPORT_SCHEMA)}"
 REPORT_NAME = "spike-report.json"
+OUT_DIR = "/kaggle/working"  # the folder Kaggle keeps as a kernel's output
+CHILD_ENV = "FORGE_SPIKE_CHILD"
 PROBE_NAME = "limit-probe.json"
 DEFAULT_MODELS = ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B")
 # configs/models.yaml's reference, which FG-307 has vLLM load in 4-bit with bitsandbytes;
@@ -267,7 +276,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     grpo.add_argument("--quant", choices=["4bit", "none"], default="4bit")
 
     run = commands.add_parser("run", parents=[shared, grpo], help="every stage, one child each")
-    run.add_argument("--out-dir", default="/kaggle/working", help="kept as the kernel's output")
+    run.add_argument("--out-dir", default=OUT_DIR, help="kept as the kernel's output")
     run.add_argument("--work-dir", default="/kaggle/temp/forge-spike", help="discarded scratch")
     run.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS))
     run.add_argument("--vllm", action=argparse.BooleanOptionalAction, default=True)
@@ -313,7 +322,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     bench.add_argument("--work-dir", required=True)
 
     probe = commands.add_parser("limit-probe", help="rewrite a heartbeat until killed")
-    probe.add_argument("--out-dir", default="/kaggle/working")
+    probe.add_argument("--out-dir", default=OUT_DIR)
     probe.add_argument("--interval-seconds", type=float, default=30.0)
     probe.add_argument("--max-beats", type=_positive, default=None, help="stop after this many")
 
@@ -428,7 +437,8 @@ def _options(**values: object) -> tuple[str, ...]:
     )
 
 
-def new_report(args: argparse.Namespace) -> dict[str, Any]:
+def new_report(args: argparse.Namespace | None) -> dict[str, Any]:
+    """A report with no stage yet; ``args`` is None before the arguments are parsed."""
     now = _now()
     return {
         "schema": REPORT_SCHEMA,
@@ -437,11 +447,39 @@ def new_report(args: argparse.Namespace) -> dict[str, Any]:
         "updated_at": now,
         "finished_at": None,
         # How Kaggle started the script, which FG-303's entry script needs to know.
-        "launch": {"argv0": sys.argv[0], "file": _script_file(), "cwd": os.getcwd()},
-        "args": {k: v for k, v in vars(args).items() if k != "command"},
+        "launch": {
+            "argv0": sys.argv[0] if sys.argv else None,
+            "argv": list(sys.argv),
+            "kernel_argv": list(KERNEL_ARGV),
+            "file": _script_file(),
+            "cwd": os.getcwd(),
+        },
+        "args": None if args is None else {k: v for k, v in vars(args).items() if k != "command"},
         "stage_caps_minutes": dict(STAGE_CAPS_MINUTES),
         "stages": [],
     }
+
+
+def record_launch(argv: Sequence[str]) -> None:
+    """Write a report that holds only how the script was started, before ``argv`` is
+    parsed, so a launch whose arguments fail still leaves one."""
+    path = _out_dir(argv) / REPORT_NAME
+    try:
+        write_json(path, new_report(None))
+    except OSError as exc:
+        print(f"[spike] can't write the launch report {path}: {exc}", file=sys.stderr, flush=True)
+
+
+def _out_dir(argv: Sequence[str]) -> Path:
+    """``--out-dir`` as arguments not yet parsed give it, the last one winning as in
+    argparse, else the kernel's output folder."""
+    found = OUT_DIR
+    for i, arg in enumerate(argv):
+        if arg == "--out-dir" and i + 1 < len(argv):
+            found = argv[i + 1]
+        elif arg.startswith("--out-dir="):
+            found = arg.partition("=")[2]
+    return Path(found)
 
 
 def run(
@@ -451,11 +489,19 @@ def run(
 ) -> dict[str, Any]:
     """Run every planned stage and keep the report at ``out_dir`` current after each."""
     out_dir, work = Path(args.out_dir), Path(args.work_dir)
-    # Children share one model cache, kept out of the output folder.
-    runner = runner or functools.partial(run_child, hf_home=work / "hf")
     report = new_report(args)
     report_path = out_dir / REPORT_NAME
     write_json(report_path, report)
+    try:
+        script = _script_path(work)
+    except RuntimeError as exc:
+        # No stage can start without a file to run.
+        report.update(error=str(exc), finished_at=_now())
+        write_json(report_path, report)
+        return report
+    report["launch"]["script"] = script
+    # Children share one model cache, kept out of the output folder.
+    runner = runner or functools.partial(run_child, script=script, hf_home=work / "hf")
     deadline = clock() + args.budget_minutes * 60
     passed: set[str] = set()
     for stage in plan_stages(args):
@@ -492,14 +538,15 @@ def run(
 
 
 def run_child(
-    stage: Stage, result_file: Path, timeout: float, hf_home: Path | None = None
+    stage: Stage, result_file: Path, timeout: float, *, script: str, hf_home: Path | None = None
 ) -> Outcome:
-    """Run one stage as ``python throughput.py <argv> --out <file>``, its output in the log."""
+    """Run one stage as ``python <script> <argv> --out <file>``, its output in the log."""
     result_file.unlink(missing_ok=True)
     result_file.parent.mkdir(parents=True, exist_ok=True)
-    command = [stage.python, _script_path(), *stage.argv, "--out", str(result_file)]
+    command = [stage.python, script, *stage.argv, "--out", str(result_file)]
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
     env.update(stage.env)
+    env[CHILD_ENV] = "1"  # so the child takes its own arguments over the baked ones
     if hf_home is not None:
         env["HF_HOME"] = str(hf_home)
     # A session of its own, so a kill also reaches every process the stage started.
@@ -1057,12 +1104,30 @@ def _script_file() -> str | None:
     return str(Path(file).resolve()) if file else None
 
 
-def _script_path() -> str:
-    """This script's file, which every child runs: Kaggle may not set ``__file__``."""
-    for candidate in (_script_file(), sys.argv[0]):
-        if candidate and candidate.endswith(".py") and Path(candidate).is_file():
+def _script_path(work: Path) -> str:
+    """The file every child runs: this script's own, or else its source written to ``work``.
+
+    An IPython kernel runs the source with no ``__file__``, the kernel's launcher as
+    ``argv[0]``, and a cell's name as the code's file, which need not exist on disk; the
+    cell's source is in ``linecache`` all the same.
+    """
+    code_file = _script_path.__code__.co_filename
+    for candidate in (_script_file(), code_file, sys.argv[0] if sys.argv else None):
+        if candidate and _is_this_script(Path(candidate)):
             return str(Path(candidate).resolve())
-    raise RuntimeError("can't find this script's file to start a stage; run it as a .py file")
+    source = "".join(linecache.getlines(code_file))
+    if SCRIPT_MARK not in source:
+        raise RuntimeError("can't find this script's file or its source to start a stage")
+    copy = work / "throughput.py"
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_text(source, encoding="utf-8")
+    return str(copy)
+
+
+def _is_this_script(path: Path) -> bool:
+    if path.suffix != ".py" or not path.is_file():
+        return False
+    return SCRIPT_MARK in path.read_text(encoding="utf-8", errors="replace")
 
 
 CHILDREN: dict[str, Callable[[argparse.Namespace], Any]] = {
@@ -1077,7 +1142,13 @@ CHILDREN: dict[str, Callable[[argparse.Namespace], Any]] = {
 
 def main(argv: Sequence[str] | None = None) -> int:
     if argv is None:
-        argv = sys.argv[1:] or KERNEL_ARGV or ["run"]
+        if os.environ.get(CHILD_ENV) == "1":
+            argv = sys.argv[1:]  # the command line run_child gave this stage
+        else:
+            # Kaggle gives a script no arguments, and an IPython kernel gives its own
+            # (-f <connection file>), so the baked ones come first.
+            argv = KERNEL_ARGV or sys.argv[1:] or ["run"]
+            record_launch(argv)
     args = parse_args(argv)
     if args.command == "run":
         # Exit 0 even when stages fail: the report says which, and a kernel that ends in
@@ -1090,4 +1161,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Only a failure raises: an IPython kernel shows even SystemExit(0) as an exception.
+    if code := main():
+        raise SystemExit(code)
