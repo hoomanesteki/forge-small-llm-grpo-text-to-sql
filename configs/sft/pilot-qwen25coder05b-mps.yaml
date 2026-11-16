@@ -1,0 +1,31 @@
+# The local SFT pilot on Apple silicon's GPU (ADR-0016): configs/models.yaml's pilot,
+# Qwen2.5-Coder-0.5B-Instruct at the same commit, 1 epoch on the train split, so its
+# adapter can be evaluated on val beside the FG-291 base run
+# (configs/eval/pilot-qwen25coder05b-val.yaml). The run says local-mps, and its numbers
+# are a pilot's, on val only.
+#
+#   FORGE_DATA_DIR=data/spider uv run forge train sft --config configs/sft/pilot-qwen25coder05b-mps.yaml
+run:
+  kind: sft
+  model_ref: Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25
+  seed: 42
+  backend: trl
+  device: mps
+data:
+  prompt_version: p1
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+sft:
+  learning_rate: 2.0e-4
+  num_train_epochs: 1.0
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  max_length: 2048
+  logging_steps: 10
+ops:
+  checkpoint_every: 50

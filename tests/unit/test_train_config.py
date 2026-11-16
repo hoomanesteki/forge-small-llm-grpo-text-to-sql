@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from forge.data.prompts import MAX_PROMPT_TOKENS
 from forge.train.config import (
@@ -14,6 +15,17 @@ from forge.train.config import (
     load_train_config,
     parse_train_config,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
+# Each SFT config, and the configs/models.yaml entry whose model it trains.
+SFT_MODELS = {
+    "tiny-smoke.yaml": ("tiny",),
+    "pilot-qwen25coder05b-mps.yaml": ("pilot",),
+    "qwen3-1p7b-pilot.yaml": ("candidates", "qwen3-1-7b"),
+    "qwen3-4b-main.yaml": ("candidates", "qwen3-4b"),
+}
+# The Kaggle runs' GPU hours, plan section 3.8: the SFT pilot and the main run.
+KAGGLE_HOURS = {"qwen3-1p7b-pilot.yaml": 1.0, "qwen3-4b-main.yaml": 2.5}
 
 # Plan section 3.10's GRPO file, without the sections later stories add.
 GRPO_FILE = """\
@@ -186,3 +198,45 @@ def test_config_file_must_be_a_yaml_mapping(tmp_path: Path) -> None:
     text = SFT_FILE.replace("max_steps: 3", "max_steps: 0").replace("0.5}", "0.5, seed: 1}")
     with pytest.raises(ValueError, match=r"config\.yaml: sft\.max_steps: .*; ops\.seed: Extra"):
         load_train_config(_write(tmp_path, text))
+
+
+@pytest.mark.phase(4)
+def test_sft_configs_start_from_adr_0010() -> None:
+    models = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    paths = {path.name: path for path in (ROOT / "configs" / "sft").glob("*.yaml")}
+    assert sorted(paths) == sorted(SFT_MODELS)
+    for name, keys in SFT_MODELS.items():
+        config = load_train_config(paths[name])
+        sft = config.sft
+        assert sft is not None and config.run.kind == "sft", name
+        entry = models
+        for key in keys:
+            entry = entry[key]
+        # The model at the commit configs/models.yaml pins, so the runs train what was measured.
+        assert config.run.model_ref == f"{entry['repo']}@{entry['revision']}", name
+        assert (config.lora.r, config.lora.alpha, config.lora.dropout) == (16, 32, 0.0), name
+        assert config.lora.target == LORA_TARGETS, name
+        assert (sft.learning_rate, sft.lr_scheduler_type, sft.warmup_ratio) == (
+            2e-4,
+            "cosine",
+            0.03,
+        ), name
+        # 2,048 tokens, not TRL's 1,024, which would cut long rows' replies (FG-401).
+        assert config.max_seq_length == sft.max_length == 2048, name
+        if name == "tiny-smoke.yaml":
+            # Three steps on the CPU, what make smoke trains, with a checkpoint among them.
+            assert (config.run.backend, config.run.device, sft.max_steps) == ("trl", "cpu", 3)
+            assert config.ops.checkpoint_every < sft.max_steps
+            continue
+        # One epoch at an effective batch of 16 rows.
+        assert (sft.num_train_epochs, sft.max_steps) == (1.0, None), name
+        assert sft.per_device_train_batch_size * sft.gradient_accumulation_steps == 16, name
+        if name in KAGGLE_HOURS:
+            # A kernel job's: CUDA, a 4-bit base, and the plan's estimate for the budget.
+            assert (config.run.backend, config.run.device) == ("auto", "auto"), name
+            assert config.run.load_in_4bit, name
+            assert config.ops.est_gpu_hours == KAGGLE_HOURS[name], name
+        else:
+            # The local pilot on Apple silicon's GPU (ADR-0016).
+            assert (config.run.backend, config.run.device) == ("trl", "mps"), name
+            assert not config.run.load_in_4bit
