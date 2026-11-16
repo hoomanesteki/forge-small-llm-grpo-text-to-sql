@@ -32,6 +32,7 @@ from forge.eval.report import COMPARE_PREFIX, rebuild, write_run_report
 from forge.eval.reproducibility import compare_runs
 from forge.eval.run_files import StoredRun, read_run
 from forge.eval.runner import run_eval
+from forge.ops.adapters import checkpoint_ref
 from forge.ops.dev_usage import read_uses
 from forge.ops.hub import BEST, FINAL, LocalRunStore
 from forge.ops.ledger import LedgerRow, read_rows, run_hours
@@ -698,10 +699,8 @@ def test_kernel_training_runs_skip_only_while_pending(tmp_path: Path) -> None:
 
 def _checkpoint_of(run: StoredRun, trained: RunManifest) -> str | None:
     """The checkpoint of ``trained`` an eval run's adapter is, as a path in its run."""
-    parts = (run.manifest.adapter_ref or "").split("/")
-    if len(parts) < 3 or parts[-3] != trained.run_id or parts[-2] != "checkpoints":
-        return None
-    return "/".join(parts[-2:])
+    ref = checkpoint_ref(run.manifest.adapter_ref or "")
+    return ref.rel if ref is not None and ref.run_id == trained.run_id else None
 
 
 @pytest.mark.phase(4)
@@ -761,12 +760,11 @@ def sft_comparisons(runs: Path = RUNS) -> dict[str, list[Path]]:
     trained = {manifest.run_id for manifest in manifests if manifest.kind == "sft"}
     found: dict[str, list[Path]] = {}
     for manifest in manifests:
-        # An adapter that is a run's checkpoint: <...>/<run_id>/checkpoints/<name>.
-        parts = (manifest.adapter_ref or "").rstrip("/").split("/")
-        if manifest.kind != "eval" or len(parts) < 3 or parts[-2] != "checkpoints":
+        ref = checkpoint_ref(manifest.adapter_ref or "")
+        if manifest.kind != "eval" or ref is None:
             continue
         reports = sorted((runs / manifest.run_id / "eval").glob(f"{COMPARE_PREFIX}*.md"))
-        if parts[-3] in trained and reports:
+        if ref.run_id in trained and reports:
             found[manifest.run_id] = reports
     return found
 

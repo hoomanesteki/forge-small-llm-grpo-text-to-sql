@@ -48,6 +48,7 @@ from forge.ops.kaggle_job import (
 from forge.ops.ledger import read_rows, summary
 from forge.ops.sessions import Session
 from forge.train.config import load_train_config, parse_train_config
+from tests.fakes import sft_run_folder
 from tests.kernel import WHEEL
 from tests.spike import entry, load_script
 
@@ -652,6 +653,68 @@ def test_eval_job_scores_a_checkpoint_with_its_base_models_config(
         refused = _run("--job", job, "--config", str(config), "--adapter", checkpoint, "--yes")
         assert refused.exit_code == 1 and message in refused.stderr, refused.stderr
     assert len(fake.pushed) == 1
+
+
+@pytest.mark.phase(4)
+def test_eval_job_adapter_is_checked_before_the_push(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
+    base = ROOT / "configs" / "eval" / "qwen3-4b-val.yaml"
+    small = ROOT / "configs" / "eval" / "qwen3-1-7b-val.yaml"
+    run = "2026-11-20-qwen3-4b-sft-abc1234"
+    checkpoint = f"runs/{run}/checkpoints/final"
+
+    def push(config: Path, adapter: str) -> Any:
+        return _run(
+            *("--job", "eval", "--config", str(config), "--adapter", adapter),
+            *("--run-id", f"adapter-{len(fake.pushed)}", "--yes"),
+        )
+
+    # A shell's trailing slash and a leading ./ go into the kernel spelled the one way it
+    # fetches from the run store, and a Hub repo as it was given.
+    for adapter, pushed in (
+        (f"{checkpoint}/", checkpoint),
+        (f"./{checkpoint}", checkpoint),
+        ("org/adapter@abc123", "org/adapter@abc123"),
+    ):
+        result = push(base, adapter)
+        assert result.exit_code == 0, result.output
+        options = script.parse_args(_baked_argv(fake.pushed[-1]["entry.py"])).options
+        assert options["adapter"] == pushed, adapter
+
+    # This machine holds the run, pulled, and the record of another run's push: each must
+    # have trained the model the config evaluates.
+    sft_run_folder(repo / "runs", run, read_config_file(base)["model"], [])
+    other = "2026-11-20-qwen3-1-7b-sft-abc1234"
+    (repo / "runs" / other).mkdir()
+    record = {"job": "sft", "options": {"config": {"run": {"model_ref": "org/m"}}}}
+    (repo / "runs" / other / "kernels.json").write_text(
+        json.dumps({**record, "kernels": [{"kernel": f"{OWNER}/forge-{other}"}]})
+    )
+    evaluated = "2026-11-20-qwen3-4b-eval-abc1234"
+    (repo / "runs" / evaluated).mkdir()
+    (repo / "runs" / evaluated / "kernels.json").write_text(
+        json.dumps({"job": "eval", "options": {}, "kernels": [{"kernel": "x"}]})
+    )
+    local = repo.parent / "adapter"
+    local.mkdir()
+    pushes = len(fake.pushed)
+    for config, adapter, message in (
+        (base, f"runs/{run}/checkpoints/latest", "a run's checkpoints are checkpoints/final"),
+        (base, f"/kaggle/working/{checkpoint}", "but not in runs/: the kernel fetches it from"),
+        (base, f"{run}/checkpoints/final", f"from the run store as {checkpoint}, so name it so"),
+        (base, str(local), "is a folder on this machine, which the kernel can't read"),
+        (base, "no such repo", "is neither a directory nor a Hub repo id"),
+        (small, checkpoint, f"run {run} trained Qwen/Qwen3-4B@"),
+        (base, f"runs/{other}/checkpoints/final", f"run {other} trained org/m, and the job"),
+        (base, f"runs/{evaluated}/checkpoints/final", "is of kind eval, which trains no adapter"),
+    ):
+        refused = push(config, adapter)
+        assert refused.exit_code == 1 and message in refused.stderr, (adapter, refused.stderr)
+    # Refused before anything was pushed.
+    assert len(fake.pushed) == pushes
+    assert push(base, checkpoint).exit_code == 0
 
 
 @pytest.mark.phase(4)
