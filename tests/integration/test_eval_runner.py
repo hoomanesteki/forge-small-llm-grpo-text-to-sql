@@ -156,6 +156,7 @@ def test_end_to_end_with_fake_backend(spider_mini: Path, runs: Path, tmp_path: P
     assert manifest.ended_at is not None and manifest.ended_at >= manifest.started_at
     assert manifest.outputs == {
         "config": "config.yaml",
+        "sessions": "sessions.json",
         "generations": "eval/val-generations.jsonl",
         "scores": "eval/val-scores.jsonl",
     }

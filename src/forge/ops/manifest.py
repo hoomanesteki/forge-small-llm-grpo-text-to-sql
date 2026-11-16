@@ -10,7 +10,8 @@ script passes in ``FORGE_CODE_SHA``. Inside a checkout the variable is never rea
 
 ``accelerator`` names the GPU a run has, for its manifest's ``gpu``, and ``close`` writes
 how a run ended: its status, its end time and, on a platform with a GPU, its wall-clock
-hours as its GPU hours (``forge.ops.ledger.run_hours``).
+hours as its GPU hours (``forge.ops.ledger.run_hours``), those of its sessions when it
+keeps them (``forge.ops.sessions``).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -30,6 +31,7 @@ from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.ops.ledger import GPU_RUN_PLATFORMS, run_hours
 from forge.ops.paths import RepoRootNotFound, dev_usage_path, ledger_path, repo_root
+from forge.ops.sessions import Session
 
 # Mirrors RunManifest.platform; a unit test keeps the two in step.
 Platform = Literal["local-cpu", "local-mps", "kaggle", "colab", "modal"]
@@ -299,17 +301,27 @@ def _cuda_device() -> str | None:
     return str(torch.cuda.get_device_name(0))
 
 
-def close(manifest: RunManifest, status: EndStatus, *, now: datetime | None = None) -> RunManifest:
+def close(
+    manifest: RunManifest,
+    status: EndStatus,
+    *,
+    now: datetime | None = None,
+    sessions: Sequence[Session] | None = None,
+) -> RunManifest:
     """``manifest`` as its run ended at ``now`` (by default now), with ``status``.
 
     A run on a platform with a GPU (``GPU_RUN_PLATFORMS``, ``local-mps`` among them)
-    counts its wall-clock time from ``started_at`` as its GPU hours; a ``local-cpu`` run
-    counts none. A resumed run keeps its first start, so its hours run from there.
+    counts its wall-clock time as its GPU hours; a ``local-cpu`` run counts none. With
+    ``sessions``, the run's, that time is theirs, each from its start to its end, so a
+    resumed run leaves out the time between them; without, it runs from ``started_at``.
     """
     if now is not None and now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     ended_at = now or datetime.now(UTC)
-    hours = (
-        run_hours(manifest.started_at, ended_at) if manifest.platform in GPU_RUN_PLATFORMS else 0.0
-    )
+    if manifest.platform not in GPU_RUN_PLATFORMS:
+        hours = 0.0
+    elif sessions is None:
+        hours = run_hours(manifest.started_at, ended_at)
+    else:
+        hours = sum(run_hours(s.started_at, s.ended_at) for s in sessions if s.ended_at)
     return manifest.model_copy(update={"status": status, "ended_at": ended_at, "gpu_hours": hours})

@@ -1,7 +1,8 @@
 """An eval run's folder: its layout, its manifest's life, and outputs that survive a kill.
 
 The layout is the run store's (plan section 3.9), under ``runs/<run_id>/``:
-``manifest.json``, ``config.yaml``, ``eval/<split>-generations.jsonl`` and
+``manifest.json``, ``config.yaml``, ``sessions.json`` (each attempt's start and end,
+``forge.ops.sessions``), ``eval/<split>-generations.jsonl`` and
 ``eval/<split>-scores.jsonl``, plus ``error.txt`` when the last attempt failed. A run
 that retries failed queries (``forge.eval.retry``) keeps the first replies of the samples
 it retried in ``eval/<split>-first-tries.jsonl``; their generations line holds the
@@ -10,14 +11,15 @@ these exist, as paths inside the folder. Reports of a finished run
 (``forge.eval.report``) add ``eval/<split>-report.md`` and its chart, which the finished
 manifest doesn't list.
 
-``start`` writes the manifest with status ``running`` before any work, and ``finish``
-writes it again at the end, with its end time and GPU hours
-(``forge.ops.manifest.close``): ``finished``, ``stopped_time_guard`` when the time guard
-stopped it between batches, or ``failed`` with the traceback in ``error.txt``. A run
-killed outright stays ``running``. Any but a finished run can be resumed: the same run
-with the same config, commit and data. A finished run, one made with other options, code
-or data, or one of another kind is refused, and ``hold`` keeps a second process off a run
-while one works on it.
+``start`` writes the manifest with status ``running`` before any work and begins the
+attempt's session, and ``finish`` ends the session and writes the manifest again, with
+its end time and the GPU hours of its sessions (``forge.ops.manifest.close``):
+``finished``, ``stopped_time_guard`` when the time guard stopped it between batches, or
+``failed`` with the traceback in ``error.txt``. A run killed outright stays ``running``,
+and the next attempt marks its session failed, its end unknown. Any but a finished run
+can be resumed: the same run with the same config, commit and data. A finished run, one
+made with other options, code or data, or one of another kind is refused, and ``hold``
+keeps a second process off a run while one works on it.
 
 ``RunFiles`` treats the scores file as the record of what is done. Each batch's first
 tries are appended before its generations, and those before its scores, every line
@@ -40,6 +42,7 @@ import traceback
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -49,6 +52,7 @@ from pydantic import BaseModel, ValidationError
 from forge.core.types import Generation, RunManifest, Score, Split
 from forge.data.splits import SPLITS
 from forge.ops.manifest import EndStatus, close, config_hash
+from forge.ops.sessions import SESSIONS_FILE, begin, end
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +102,10 @@ class RunPaths:
         return self.root / "config.yaml"
 
     @property
+    def sessions(self) -> Path:
+        return self.root / SESSIONS_FILE
+
+    @property
     def generations(self) -> Path:
         return self.root / "eval" / f"{self.split}-generations.jsonl"
 
@@ -125,6 +133,7 @@ class RunPaths:
         """The run's files that exist, by logical name, as paths inside the run folder."""
         files = {
             "config": self.config,
+            "sessions": self.sessions,
             "generations": self.generations,
             "scores": self.scores,
             "first_tries": self.first_tries,
@@ -154,11 +163,14 @@ def hold(paths: RunPaths) -> Iterator[None]:
 
 
 def start(paths: RunPaths, fresh: RunManifest) -> RunManifest:
-    """Write the manifest as running: ``fresh``, or the stored one when this resumes it.
+    """Write the manifest as running: ``fresh``, or the stored one when this resumes it,
+    and begin a session at ``fresh``'s start.
 
     A resumed run keeps its first start time. Raises ``RunConflict`` when the stored run
-    can't be resumed by ``fresh``, and ``RunCorrupt`` for outputs with no manifest.
+    can't be resumed by ``fresh``, and ``RunCorrupt`` for outputs with no manifest or a
+    sessions file that can't be read.
     """
+    previous = None
     if paths.manifest.is_file():
         try:
             previous = RunManifest.model_validate_json(paths.manifest.read_bytes())
@@ -171,6 +183,10 @@ def start(paths: RunPaths, fresh: RunManifest) -> RunManifest:
     else:
         manifest = fresh
     write_atomic(paths.config, yaml.safe_dump(manifest.config, sort_keys=False).encode())
+    try:
+        begin(paths.root, fresh.started_at, resumes=previous)
+    except ValueError as exc:
+        raise RunCorrupt(str(exc)) from exc
     manifest = manifest.model_copy(update={"outputs": paths.outputs()})
     _write_manifest(paths, manifest)
     return manifest
@@ -209,9 +225,15 @@ def check_resumable(previous: RunManifest, fresh: RunManifest) -> None:
 
 
 def finish(
-    paths: RunPaths, manifest: RunManifest, error: BaseException | None, *, stopped: bool = False
+    paths: RunPaths,
+    manifest: RunManifest,
+    error: BaseException | None,
+    *,
+    stopped: bool = False,
+    now: datetime | None = None,
 ) -> RunManifest:
-    """Write the final manifest, with the traceback beside it when the run failed.
+    """Write the final manifest, with the traceback beside it when the run failed, as the
+    attempt ended at ``now`` (by default now).
 
     ``stopped`` says the time guard stopped the run before its last batch; an error
     outranks it.
@@ -224,7 +246,8 @@ def finish(
     status: EndStatus = (
         "failed" if error is not None else "stopped_time_guard" if stopped else "finished"
     )
-    final = close(manifest, status)
+    now = now or datetime.now(UTC)
+    final = close(manifest, status, now=now, sessions=end(paths.root, now, status))
     final = final.model_copy(update={"outputs": paths.outputs()})
     _write_manifest(paths, final)
     return final
