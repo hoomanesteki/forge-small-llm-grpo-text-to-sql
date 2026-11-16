@@ -347,7 +347,7 @@ uv run forge runs promote <run_id> --config <base val config> --eval <eval_run_i
 - `--adapter-sha256` holds a push to the digest of the run's adapter taken where it was
   trained (`forge.ops.adapters.adapter_sha256` of the folder the manifest names as its
   adapter), for a run whose manifest records none: if the folder holds other files, nothing
-  is uploaded.
+  is uploaded. FG-491's SFT pilot is one; its digest is in `docs/runs/pending.yaml`.
 - The end of an eval run and a push replace the store's copy: files it has that the folder lacks
   are deleted, such as the `error.txt` of an attempt that failed. The kernel's upload stage only
   adds, since a kernel that failed early may hold part of a run. None of them uploads over a

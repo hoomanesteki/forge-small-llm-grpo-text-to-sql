@@ -43,31 +43,54 @@ citing no number it doesn't hold (FG-405).
 A pilot that trains (FG-491) commits its training run without its weights: the manifest,
 `config.yaml` and `metrics.jsonl`, one line a logging step. The adapter stays in
 `runs/<run_id>/checkpoints/final/` on the laptop that trained it, where the eval run's
-`--adapter` names it, until the run store exists to hold it ([pending.yaml](pending.yaml)).
+`--adapter` names it, until the push [pending.yaml](pending.yaml) lists puts it in the run
+store.
 The manifest's `sft_data` says which rows it trained on: the hash of the rows
 `forge data build-sft` builds, how many were over `max_length` and left out, and how many
 of the rest the subset took.
 
-Both FG-491 runs were made at db0d8d8, where `make smoke` fails: one assertion in
-`tests/smoke/test_sft_smoke.py` still expected the manifest's `sft_data` as it was before
-0789ce9 added `over_max_length` and `trained`. The next commit, 510e07d, which committed the
-runs, fixed that assertion and changed none of the code that trained and scored them:
+Both FG-491 runs were made at db0d8d8, the commit their `run/<run_id>` tags keep, and
+`make smoke` fails there on one stale assertion: a known limit, since the runs stand as they
+were made and were not made again. At that commit the smoke test expects the manifest's
+`sft_data` as it was before `over_max_length` and `trained` were added, while the code that
+trained the pilot writes both:
 
 ```bash
-$ git diff --stat db0d8d8 510e07d -- src configs kaggle scripts Makefile pyproject.toml uv.lock
-$ git diff --stat db0d8d8 510e07d -- tests/smoke
- tests/smoke/test_sft_smoke.py | 8 +++++++-
- 1 file changed, 7 insertions(+), 1 deletion(-)
+$ git show run/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8:tests/smoke/test_sft_smoke.py | grep -n '"sft_data"'
+58:    assert manifest.config["sft_data"] == {"hash": meta.hash, "rows": meta.counts.rows}
+$ git show run/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8:src/forge/train/sft.py | grep -nE '"(over_max_length|trained)"'
+128:            "over_max_length": fit.over_max_length,
+129:            "trained": len(fit.rows),
 ```
 
-The first prints nothing. The commit's other 17 files are the checks of the committed runs
-in `tests/integration/test_artifacts.py` and `tests/integration/test_invariants.py`, the
-runs themselves and docs. The runs stand as they were made, and were not made again.
+The SFT pilot's manifest here has all four keys, as that code wrote them
+(`"over_max_length": 53`, `"trained": 3168`). The fix is to the test alone:
+`tests/smoke/test_sft_smoke.py` in this tree expects the four, with no row over the smoke's
+2,048 tokens and all of them trained:
+
+```python
+assert manifest.config["sft_data"] == {
+    "hash": meta.hash,
+    "rows": meta.counts.rows,
+    "over_max_length": 0,
+    "trained": meta.counts.rows,
+}
+```
 
 The FG-491 runs also come from before adapter digests: their manifests name the adapter by
 its path alone. Since FG-492 an eval run with an adapter records the `adapter_sha256` of its
 files, and a training run the digest of each checkpoint it keeps, so a later SFT run's val
-scores are tied to the weights that made them.
+scores are tied to the weights that made them. The SFT pilot's digest was recorded after
+both runs (FG-494), with `forge.ops.adapters.adapter_sha256`, on the same files the eval run
+read: the laptop's `runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final`,
+whose two adapter files were last written at 05:40:59 UTC on 2026-11-16, before the eval run
+started at 05:41:29. It is
+
+`e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562`
+
+and [pending.yaml](pending.yaml)'s push of the run checks the folder against it before it
+uploads anything (`forge runs push --adapter-sha256`). The committed manifests stay as they
+are.
 
 Story branches land on `dev` as squash merges, so the commit a manifest names is not on
 `dev` itself. Each committed run has a tag `run/<run_id>` on that commit, which keeps it
@@ -133,15 +156,19 @@ so each needs its tag there once the branch lands. To make one again from its co
 ## Pending runs
 
 [pending.yaml](pending.yaml) lists the runs a story needs that haven't been made and
-committed yet, what blocks each one, since when, and what it will fill in. FG-404's SFT runs
-are there, each with what blocks it, and FG-491's push of the SFT pilot, adapter and all,
-until the Hugging Face run store exists. FG-405's comparison of the main model with and
-without SFT waits there on FG-404's runs, to set beside FG-307's. FG-307's runs left it when
-they were committed, the reference's dev run last, on 2026-11-17, once ADR-0008's note of
-that day settled I5 for it, and FG-301's spike, FG-302's publish and FG-303's eval job on
-2026-11-16. `tests/integration/test_artifacts.py` finds a GPU story's runs here by the
-configs they were made from, and skips its checks on them only while the story has an entry
-in pending.yaml; once it has none, a missing run fails. A Kaggle SFT run is committed as
+committed yet, what blocks each one, since when, and what it will fill in. The Kaggle and
+Hugging Face accounts, their tokens and the run store repo exist since 2026-11-16. FG-307's
+runs left it when they were committed, the reference's dev run last, on 2026-11-17, once
+ADR-0008's note of that day settled I5 for it, and FG-301's spike, FG-302's publish and
+FG-303's eval job on 2026-11-16. FG-404's Kaggle SFT runs wait on their configs, which must
+train the model ADR-0012 chose from FG-307's baselines, `Qwen/Qwen2.5-Coder-1.5B-Instruct`,
+on p2 (ADR-0007), and FG-405's comparison of the main model with and without SFT on
+FG-404's runs, beside FG-307's. FG-491's push of the SFT pilot, adapter and all, waits only
+for the operator to run it, with the digest above. A kernel pushed with the CLI gets no
+`HF_TOKEN`, so a kernel job's results come back as its kernel output (`forge kaggle
+output`). `tests/integration/test_artifacts.py` finds a GPU story's runs here by the configs
+they were made from, and skips its checks on them only while the story has an entry in
+pending.yaml; once it has none, a missing run fails. A Kaggle SFT run is committed as
 FG-491's is, without its checkpoints, which the run store keeps, and with the `best.json`
 that `forge runs promote` writes: which checkpoint is `checkpoints/best`, and the val runs
 whose scores chose it (docs/runbook.md, "SFT runs").

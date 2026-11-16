@@ -36,7 +36,7 @@ from forge.eval.reproducibility import compare_runs
 from forge.eval.run_files import ADAPTER_DIGEST, StoredRun, read_run
 from forge.eval.runner import run_eval
 from forge.infer.base import FakeBackend
-from forge.ops.adapters import checkpoint_ref, digest_output
+from forge.ops.adapters import adapter_sha256, checkpoint_ref, digest_output
 from forge.ops.dev_usage import read_uses
 from forge.ops.hub import BEST, FINAL, LocalRunStore
 from forge.ops.ledger import LedgerRow, append_once, read_rows, run_hours
@@ -243,6 +243,23 @@ def test_sft_pilot_adapter_run_is_committed_whole() -> None:
     assert stored.paths.chart.is_file()
     # Its comparison with the base pilot, beside its report.
     assert (stored.paths.report.parent / f"compare-{PILOT_RUN}.md").is_file()
+
+
+@pytest.mark.phase(4)
+def test_sft_pilot_push_waits_with_its_adapter_digest() -> None:
+    # The pilot's manifests record no digest of its adapter, so pending.yaml does, and the
+    # push it describes checks the folder against it before any upload.
+    entries = yaml.safe_load(PENDING.read_text(encoding="utf-8"))["pending"]
+    (push,) = [entry for entry in entries if entry["run"] == "sft-pilot-to-run-store"]
+    digest = push["adapter_sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest), digest
+    assert f"forge runs push {SFT_PILOT_RUN} --adapter-sha256 {digest}," in push["how"]
+    assert f"`{digest}`" in (RUNS / "README.md").read_text(encoding="utf-8")
+    assert digest_output(FINAL) not in LocalRunStore(RUNS).get_manifest(SFT_PILOT_RUN).outputs
+    # Where the laptop that trained it still holds the adapter, its files have that digest.
+    local = ROOT / SFT_PILOT_ADAPTER
+    if local.is_dir():
+        assert adapter_sha256(local) == digest
 
 
 @pytest.mark.phase(4)

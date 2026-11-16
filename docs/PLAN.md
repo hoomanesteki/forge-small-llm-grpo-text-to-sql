@@ -2157,7 +2157,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 **Goal.** A results page where every number traces to a run, a README a hiring manager understands in two minutes, proof of reproducibility, and a tagged release.
 
 **Demo at the end.**
-- `docs/results.md` is generated with all tables.
+- `docs/results.md` is built with all tables.
 - A fresh clone passes `make smoke` in 15 minutes or less.
 - One stored number is reproduced on Kaggle within tolerance.
 - The v1.0.0 release is public.
