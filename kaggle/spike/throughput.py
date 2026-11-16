@@ -149,7 +149,8 @@ class Stack:
     """A candidate set of GPU packages, installed together into one venv."""
 
     requirements: tuple[str, ...]
-    # Reuse the image's torch and its CUDA build instead of downloading another.
+    # Reuse the image's torch and its CUDA build instead of downloading another: the
+    # install stage fails if a torch lands in the venv all the same.
     system_site_packages: bool
 
 
@@ -562,7 +563,7 @@ def download_stage(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def install_stage(args: argparse.Namespace) -> dict[str, Any]:
-    """Create the stack's venv and time how long its packages take to install with uv."""
+    """Create the stack's venv and time how long its packages take to install."""
     stack = STACKS[args.stack]
     venv = Path(args.venv)
     uv = [found] if (found := shutil.which("uv")) else None
@@ -573,15 +574,30 @@ def install_stage(args: argparse.Namespace) -> dict[str, Any]:
         bootstrap = round(time.perf_counter() - start, 3)
         uv = [sys.executable, "-m", "uv"]
     start = time.perf_counter()
-    flags = ["--system-site-packages"] if stack.system_site_packages else []
-    _check([*uv, "venv", "--python", sys.executable, *flags, str(venv)])
     python = str(venv / "bin" / "python")
-    _check([*uv, "pip", "install", "--python", python, *stack.requirements])
+    if stack.system_site_packages:
+        # uv ignores system site packages when it installs, so it would put a PyPI torch
+        # in the venv for trl and peft; the venv's own pip counts the image's as there.
+        flags = ["--seed", "--system-site-packages"]
+        _check([*uv, "venv", "--python", sys.executable, *flags, str(venv)])
+        pip = [python, "-m", "pip", "install", "--no-input", "--progress-bar", "off"]
+        _check([*pip, *stack.requirements])
+        installer = "pip"
+    else:
+        _check([*uv, "venv", "--python", sys.executable, str(venv)])
+        _check([*uv, "pip", "install", "--python", python, *stack.requirements])
+        installer = "uv"
     seconds = round(time.perf_counter() - start, 3)
+    if stack.system_site_packages and (own := _venv_packages(venv).get("torch")):
+        raise RuntimeError(
+            f"the install put torch {own} into {venv}, which would shadow the "
+            "image's torch the stack is meant to run on"
+        )
     return {
         "stack": args.stack,
         "requirements": list(stack.requirements),
         "system_site_packages": stack.system_site_packages,
+        "installer": installer,
         "uv": _check([*uv, "--version"]).strip(),
         "uv_bootstrap_seconds": bootstrap,
         "install_seconds": seconds,
@@ -916,6 +932,20 @@ def _check(command: list[str]) -> str:
         tail = done.stderr[-2000:]
         raise RuntimeError(f"{shlex.join(command)} exited {done.returncode}: {tail}")
     return done.stdout
+
+
+def _venv_packages(venv: Path) -> dict[str, str]:
+    """The distributions installed in ``venv`` itself, by lowercase name: not those it sees
+    through system site packages, which ``importlib.metadata`` would list too."""
+    folders = [str(path) for path in sorted(venv.glob("lib/python*/site-packages"))]
+    if not folders:
+        raise RuntimeError(f"no lib/python*/site-packages under {venv} to check")
+    found: dict[str, str] = {}
+    for dist in importlib.metadata.distributions(path=folders):
+        name = dist.metadata["Name"]
+        if name:
+            found[re.sub(r"[-_.]+", "-", name).lower()] = dist.version
+    return found
 
 
 def _tree_bytes(path: Path) -> int:

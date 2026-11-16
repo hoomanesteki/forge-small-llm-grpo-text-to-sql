@@ -65,7 +65,7 @@ their pins conflict (question 3). The stages, in order:
 | `env` | 1, 3 | Python, torch and CUDA versions, the GPUs and their compute capability, the image build (`/etc/git_commit`, `/etc/build_date`), internet, disk, preinstalled packages |
 | `secrets` | 2 | Whether `HF_TOKEN` could be read in this pushed run; never its value |
 | `download:<model>` | 4, 5 | Seconds and bytes to fetch Qwen3 1.7B and 4B, and the commit fetched |
-| `install:<stack>` | 3 | Seconds to install each stack with uv, venv size, `uv pip freeze` |
+| `install:<stack>` | 3 | Seconds to install each stack, venv size, `uv pip freeze` of the venv's own packages, the installer used |
 | `vllm:<model>` | 4 | Load seconds, tokens per second on 100 prompts, greedy, fp16, up to 256 tokens a reply, device memory |
 | `grpo:<stack>:<model>` | 5 | Seconds per step over 10 steps, peak memory, TRL's log, for 4-bit LoRA with 6 generations of up to 256 tokens |
 | `limit-probe` (own kernel) | 6 | A heartbeat rewritten every 30 s until the session is killed |
@@ -81,9 +81,16 @@ The stacks are candidates, each pinned in the script and none verified on a T4:
 | Stack | Pins | Why |
 |---|---|---|
 | `vllm` | vllm 0.33.0 (brings torch 2.14.0) | Generation throughput for evaluation (FG-306) |
-| `trl` | Forge's lock: trl 1.18.0, transformers 5.23.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0, huggingface-hub 2.4.0, plus bitsandbytes 0.50.2; on the image's torch | ADR-0006's training stack without vLLM, the fallback |
+| `trl` | Forge's lock: trl 1.18.0, transformers 5.23.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0, huggingface-hub 2.4.0, plus bitsandbytes 0.50.2; on the image's torch (see below) | ADR-0006's training stack without vLLM, the fallback |
 | `trl-vllm` | vllm 0.33.0, torch 2.14.0, transformers 5.20.2, then the lock's trl 1.18.0, peft 0.21.3, accelerate 1.15.0, datasets 5.2.0 and huggingface-hub 2.4.0, plus bitsandbytes 0.50.2 | The same list as `kaggle/requirements-gpu.txt` since FG-306: evaluation through vLLM, and TRL generating through colocated vLLM |
 | `unsloth` | unsloth 2026.11.4, vllm 0.11.2, transformers 4.57.6, trl 0.22.2, datasets 4.3.0, bitsandbytes 0.50.2, torchao below 0.18 | Unsloth's own Kaggle T4 recipe, for comparison |
+
+Each stack installs with uv into a venv of its own, except `trl`. Its venv is made with
+system site packages so that it runs on the image's torch, but uv leaves those out when
+it installs ("uv will _not_ take system site packages into account", `uv help venv`), so
+it would download a PyPI torch for trl, peft and accelerate. That venv is seeded with pip
+instead, which counts the image's packages as installed, and the stage fails if a torch
+lands in the venv all the same.
 
 ## 1. Kernel metadata, the accelerator and private datasets
 
