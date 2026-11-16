@@ -74,6 +74,8 @@ class BackendUnavailable(RuntimeError):
 
 class TrainBackend(Protocol):
     name: str
+    device: str  # where it trains: cpu, mps or cuda
+    precision: Precision  # what it trains at there, which a run's manifest records
 
     def load(
         self, model_ref: str, lora: LoraConfig, *, load_in_4bit: bool, seed: int
@@ -235,6 +237,7 @@ class _TrlTrainers:
     """The trainers both backends build: TRL's, on a model ``load`` gave."""
 
     name: str
+    device: str
     precision: Precision
 
     def sft_trainer(
@@ -436,7 +439,8 @@ class UnslothBackend(_TrlTrainers):
         self._fast = unsloth.FastLanguageModel
         self.max_seq_length = max_seq_length
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.precision = precision_for("cuda")
+        self.device = "cuda"
+        self.precision = precision_for(self.device)
 
     def load(
         self, model_ref: str, lora: LoraConfig, *, load_in_4bit: bool, seed: int

@@ -41,14 +41,13 @@ from transformers import TrainerCallback, TrainerControl, TrainerState, Training
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from forge.ops.dotenv import forge_env
-from forge.ops.hub import RunStore, StoreUnavailable, checkpoint_dir
+from forge.ops.hub import METRICS_FILE, RunStore, StoreUnavailable, checkpoint_dir
 from forge.ops.manifest import close
 from forge.ops.timeguard import Clock, Deadline
 from forge.train.config import OpsConfig
 
 log = logging.getLogger(__name__)
 
-METRICS_FILE = "metrics.jsonl"  # its name in a run, plan section 3.9
 WANDB_KEY = "WANDB_API_KEY"
 
 
