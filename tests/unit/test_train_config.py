@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -342,6 +343,16 @@ STARTING_SFT = {
 }
 
 
+# What ADR-0010 names rather than states as a number: code spans, story and ADR ids, dates
+# and phases.
+_ADR_NAMES = re.compile(r"`[^`\n]*`|\b(?:FG|ADR)-\d+\b|\b\d{4}-\d{2}-\d{2}\b|\bPhase \d+\b")
+# A number as prose writes one, such as 16, 0.0 or 2,048, and not the digits in a word such
+# as float32, bf16 or T4.
+_ADR_NUMBER = re.compile(r"(?<![\w.,])\d(?:[\d,.]*\d)?(?!\w)")
+# The MPS row's value: the dtype from macOS 14 on, then the one before.
+_MPS_CELL = re.compile(r"(\w+) where .* \(macOS 14 and later\), (\w+) otherwise")
+
+
 def _quotes(text: str) -> list[str]:
     """The ``key: value`` settings ``text`` quotes in code spans, as a YAML or JSON line."""
     return [quote for quote in re.findall(r"`([^`\n]+)`", text) if ": " in quote]
@@ -352,23 +363,48 @@ def _lines(text: str) -> set[str]:
     return {line.split("#", 1)[0].strip().rstrip(",") for line in text.splitlines()}
 
 
-@pytest.mark.phase(4)
-def test_adr_0010_says_what_the_configs_and_the_pilot_did(monkeypatch: pytest.MonkeyPatch) -> None:
-    adr = ADR_0010.read_text(encoding="utf-8")
+def _stated(text: str) -> set[float]:
+    """The numbers ``text`` states outside its names."""
+    found = _ADR_NUMBER.findall(_ADR_NAMES.sub(" ", text))
+    return {float(number.replace(",", "")) for number in found}
+
+
+def _values(data: object) -> Iterator[float]:
+    """Each number a parsed YAML or JSON document holds as a value, at any depth: not the
+    digits of a string such as a digest or a time, and no flag."""
+    if isinstance(data, dict):
+        for value in data.values():
+            yield from _values(value)
+    elif isinstance(data, list):
+        for value in data:
+            yield from _values(value)
+    elif isinstance(data, int | float) and not isinstance(data, bool):
+        yield float(data)
+
+
+def check_adr_0010(adr: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assert that ADR-0010's text ``adr`` says what the SFT configs, ``precision_for`` and
+    the committed SFT pilot did."""
     assert "- Status: accepted" in adr
     rows = {
         cells[1].strip(): cells[2].strip()
         for cells in (line.split("|") for line in adr.splitlines() if line.startswith("| "))
     }
-    # The base's dtype on each device is the one precision_for trains in, on any macOS.
+    # The base's dtype on each device is the one precision_for trains in: on MPS, each
+    # branch of the row is the dtype on that side of macOS 14.
     assert rows["Base on the CPU"] == precision_for("cpu").dtype
+    branches = _MPS_CELL.fullmatch(rows["Base on MPS"])
+    assert branches is not None, rows["Base on MPS"]
+    trains: dict[bool, str] = {}
     for macos_14 in (True, False):
-        monkeypatch.setattr(
-            torch.backends.mps, "is_macos_or_newer", lambda *_, newer=macos_14: newer
-        )
-        assert precision_for("mps").dtype in rows["Base on MPS"], macos_14
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.backends.mps, "is_macos_or_newer", lambda *_, newer=macos_14: newer)
+            trains[macos_14] = precision_for("mps").dtype
+    assert branches.groups() == (trains[True], trains[False]), "the MPS row's branches"
+    # The pilot trained on an Apple M4, which runs macOS 15 or later.
     pilot = PILOT_SFT_MANIFEST.read_text(encoding="utf-8")
-    assert json.loads(pilot)["config"]["trainer"]["dtype"] in rows["Base on MPS"]
+    manifest = json.loads(pilot)
+    assert manifest["config"]["trainer"]["dtype"] == branches.group(1)
 
     # A config that leaves a starting value out is named as taking it by omission, with the
     # settings it does state quoted from its file.
@@ -382,11 +418,39 @@ def test_adr_0010_says_what_the_configs_and_the_pilot_did(monkeypatch: pytest.Mo
     assert _quotes(decision) and set(_quotes(decision)) <= smoke
 
     # The note on the pilot quotes its config and manifest, and states no number that
-    # neither they nor the table above hold.
+    # neither the table above nor a value of either file holds.
     note = adr.split("## Notes", 1)[1]
     config = (ROOT / "configs" / "sft" / LOCAL_PILOT).read_text(encoding="utf-8")
-    assert _quotes(note) and set(_quotes(note)) <= _lines(config) | _lines(pilot)
-    prose = re.sub(r"`[^`\n]*`|\b(?:FG|ADR)-\d+\b|\b\d{4}-\d{2}-\d{2}\b", " ", note)
+    misquoted = sorted(set(_quotes(note)) - _lines(config) - _lines(pilot))
+    assert _quotes(note) and not misquoted, f"the note quotes {misquoted}, in neither file"
     table = "\n".join(line for line in adr.splitlines() if line.startswith("| "))
-    held = set(re.findall(r"\d[\d,.]*\d|\d", table + config + pilot))
-    assert set(re.findall(r"\d[\d,.]*\d|\d", prose)) <= held
+    held = _stated(table) | set(_values(yaml.safe_load(config))) | set(_values(manifest))
+    unheld = sorted(_stated(note) - held)
+    assert not unheld, f"the note states {unheld}, which the table, config and manifest lack"
+
+
+@pytest.mark.phase(4)
+def test_adr_0010_says_what_the_configs_and_the_pilot_did(monkeypatch: pytest.MonkeyPatch) -> None:
+    check_adr_0010(ADR_0010.read_text(encoding="utf-8"), monkeypatch)
+
+
+@pytest.mark.phase(4)
+def test_adr_0010_check_fails_on_swapped_branches_and_wrong_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adr = ADR_0010.read_text(encoding="utf-8")
+    newer, older = "bfloat16 where", "float32 otherwise"
+    # A count only text supplies: 20 is in the config's comments and the manifest's config
+    # hash, 41 in its end time.
+    wrong = {
+        "the MPS row's branches": adr.replace(newer, "float32 where").replace(
+            older, "bfloat16 otherwise"
+        ),
+        r"the note states \[20\.0\]": adr.replace("the same 16", "the same 20"),
+        r"the note states \[41\.0\]": adr.replace("the same 16", "the same 41"),
+        "the note quotes": adr.replace('`"over_max_length": 53`', '`"over_max_length": 52`'),
+    }
+    for message, text in wrong.items():
+        assert text != adr, message
+        with pytest.raises(AssertionError, match=message):
+            check_adr_0010(text, monkeypatch)

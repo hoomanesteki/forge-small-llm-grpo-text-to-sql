@@ -1163,6 +1163,15 @@ def _in_order(numbers: Sequence[str], line: Sequence[str]) -> bool:
 
 @pytest.mark.phase(4)
 def test_sft_notes_cite_only_report_numbers() -> None:
+    """Each number in the SFT notes comes from the comparison its block reads, and in a
+    bullet from the report row or section the bullet names before it, in the report's order.
+
+    What it does not check: which cell of a row a number sits in, since a run of numbers
+    need only appear on the row's line in order, with gaps; order across clauses, since a
+    run ends at a full stop, a semicolon or a colon; a section label in place of a row's,
+    since a section's label takes any line under it; and numbers outside the bullet lists,
+    which need only appear somewhere in their block's report.
+    """
     text = NOTES.read_text(encoding="utf-8")
     # The notes read the comparisons they link, the SFT pilot's among them.
     linked = [(NOTES.parent / target).resolve() for target in _COMPARISON_LINK.findall(text)]
