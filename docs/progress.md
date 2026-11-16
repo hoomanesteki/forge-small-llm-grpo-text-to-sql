@@ -66,7 +66,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
-| FG-501 | Reward functions | 5 | todo |  |  |  |
+| FG-501 | Reward functions | 5 | done |  |  | `forge.train.rewards.Rewards(gold, pool, config)`: `execution_reward`, `validity_reward`, `format_reward` (each 0 or 1) and `guard_penalty`, with `weights` [1.0, 0.1, 0.05, 1.0] from the new `rewards` config section, so the gold query in a code block scores 1.15; `non_select` -1.0, `multiple_statements` -0.5, `constant_query` -0.5 and `comment_payload` -0.2, and any guard, or a query that ran but that sqlglot can't read, takes away execution, validity and format. Model SQL runs only in the `SandboxPool`, once a batch for all four functions; gold from `forge.eval.gold_cache`. I3 in `test_invariants.py` |
 | FG-502 | Adversarial reward tests | 3 | todo |  |  |  |
 | FG-503 | Parallel reward computation and gold cache | 3 | todo |  |  |  |
 | FG-504 | GRPO trainer with CPU smoke | 5 | todo |  |  |  |
@@ -1074,3 +1074,27 @@ Work discovered along the way that is not a plan story.
   the notes cite it (FG-493).
 - `forge.train.callbacks.wandb_callback` leaves `WANDB_DIR` unset, so W&B still writes
   `wandb/` where training starts; `.gitignore` takes it at any depth (FG-493).
+- The plan has `validity_reward` return 0.1 and `format_reward` 0.05, and also gives TRL the
+  config's 0.1 and 0.05 as `reward_weights`, which would count each twice and make gold
+  1.0125. They return 0 or 1 and the weights scale them, so `rewards/<name>/mean` reads as a
+  rate and gold scores 1.15. `format_reward` pays nothing once a guard fires either, as
+  execution and validity don't, so a reply that sets one off scores its penalties alone:
+  `DELETE` -1.0, two statements -0.5 (FG-501).
+- sqlglot 30.31 drops a comment that no token follows (`-- note` alone tokenizes to
+  nothing) and raises `TokenError` on a block comment left open, which SQLite reads as a
+  comment to the end and runs: `SELECT 3 /* open` returns 3. So `comment_payload` reads
+  comments with the executor's lexer (`forge.sql.executor.comments`), and a query that ran
+  but that sqlglot can't read earns nothing, since no one can check its tables (FG-501).
+- sqlglot reads a bare `VALUES (3)` as `exp.Values`, not an `exp.Query`, and the executor
+  runs it, so the constant guard counts it as a query. Tables are a query scope's named
+  `exp.Table` sources, so a CTE named like a real table, `json_each` and subqueries don't
+  count. All 7,787 train gold queries parse as one query that reads a table (FG-501).
+- The constant guard only looks for tables: `SELECT 3 FROM professor LIMIT 1` reads one and
+  still answers a count question with a constant, and a query on a rowless database matches
+  its empty gold result. FG-502 should list both, the second as an audit candidate, and
+  FG-505 already keeps the rowless databases out of GRPO (FG-501).
+- `TrainBackend.grpo` takes the reward functions but not their weights, and TRL's
+  `remove_unused_columns` must stay `False` for `example_id`, `db_id` and `gold_sql` to reach
+  them: FG-504 passes `Rewards.weights` as `reward_weights` and sets both (FG-501).
+- sqlglot 30's node base class is `exp.Expr`; `exp.Query` is not an `exp.Expression`, so
+  annotations of what `sqlglot.parse` returns use `exp.Expr` (FG-501).
