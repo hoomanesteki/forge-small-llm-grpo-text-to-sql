@@ -62,9 +62,9 @@ from forge.core.ids import make_run_id
 from forge.core.types import RunManifest
 from forge.data.prompts import ChatTokenizer, chat_token_counter
 from forge.data.spider import resolve_data_dir
-from forge.eval.config import Host, check_run_id
+from forge.eval.config import EvalConfig, Host, check_run_id
 from forge.eval.metrics import summarize
-from forge.eval.run_files import read_run, write_atomic
+from forge.eval.run_files import ADAPTER_DIGEST, read_run, write_atomic
 from forge.ops.adapters import (
     ADAPTER_FILES,
     adapter_sha256,
@@ -441,24 +441,28 @@ def promote_best(
 
 
 def checkpoint_scores(
-    run_id: str, eval_run_ids: Sequence[str], *, runs_root: Path | None = None
+    run_id: str, eval_run_ids: Sequence[str], *, base: EvalConfig, runs_root: Path | None = None
 ) -> tuple[dict[str, float], dict[str, str]]:
     """The official EX on val of each checkpoint of SFT run ``run_id`` that one of the eval
     runs ``eval_run_ids`` in ``runs_root`` scored, and that eval run's id, by checkpoint.
 
-    Each eval run must be finished, on val, of the SFT run's model with one of its
-    checkpoints as the adapter (``<...>/<run_id>/checkpoints/<name>``, wherever its folder
-    was, as ``forge.ops.adapters.checkpoint_ref`` reads it), with an official verdict on
-    every score and the others' settings, so the scores differ by checkpoint alone. Raises
+    ``base`` is the base model's full val config, such as ``configs/eval/qwen3-4b-val.yaml``:
+    the SFT run's model on every val question, with no adapter. Each eval run must be
+    finished and made with that config and one of the run's checkpoints as the adapter
+    (``<...>/<run_id>/checkpoints/<name>``, wherever its folder was, as
+    ``forge.ops.adapters.checkpoint_ref`` reads it), on the files the run saved there, by
+    their digest, with an official verdict on every score. The scores then differ by
+    checkpoint alone, and each from the base model's by its adapter alone. Raises
     ``ValueError`` when one isn't, and as ``read_run`` does for a run that can't be read.
     """
     if not eval_run_ids:
         raise ValueError(f"name the eval runs of run {run_id}'s checkpoints, one at least")
     root = runs_dir() if runs_root is None else runs_root
     trained = LocalRunStore(root).get_manifest(run_id)
+    _check_base(base, trained)
+    expected = _scored(base.manifest_config())
     scores: dict[str, float] = {}
     sources: dict[str, str] = {}
-    settings: dict[str, dict[str, Any]] = {}
     for eval_id in eval_run_ids:
         made = read_run(root / eval_id)
         manifest = made.manifest
@@ -474,10 +478,23 @@ def checkpoint_scores(
                 f"run {eval_id}'s adapter is {manifest.adapter_ref}, no checkpoint of run {run_id}"
             )
         rel = found.rel
-        if manifest.model_ref != trained.model_ref:
+        settings = _scored(manifest.config)
+        if settings != expected:
+            changed = sorted(
+                name
+                for name in settings.keys() | expected.keys()
+                if settings.get(name) != expected.get(name)
+            )
             raise ValueError(
-                f"run {eval_id} evaluated {manifest.model_ref}, and run {run_id} trained "
-                f"{trained.model_ref}"
+                f"run {eval_id} differs from the base config in {', '.join(changed)}, not in "
+                "its adapter alone"
+            )
+        scored = manifest.outputs.get(ADAPTER_DIGEST)
+        saved = trained.outputs.get(digest_output(rel))
+        if scored is None or scored != saved:
+            raise ValueError(
+                f"run {eval_id} scored adapter files with sha256 {scored}, and run {run_id} "
+                f"saved {rel} with sha256 {saved}, so the score isn't that checkpoint's"
             )
         if rel in sources:
             raise ValueError(f"runs {sources[rel]} and {eval_id} both scored {rel}; name one")
@@ -488,22 +505,29 @@ def checkpoint_scores(
                 "official batch runs"
             )
         scores[rel], sources[rel] = ex.value, eval_id
-        settings[eval_id] = {
-            name: value for name, value in manifest.config.items() if name not in _SCORELESS
-        }
-    first, *rest = settings
-    for other in rest:
-        if settings[other] != settings[first]:
-            changed = sorted(
-                name
-                for name in settings[first].keys() | settings[other].keys()
-                if settings[first].get(name) != settings[other].get(name)
-            )
-            raise ValueError(
-                f"runs {first} and {other} differ in {', '.join(changed)}, not in the "
-                "checkpoint alone"
-            )
     return scores, sources
+
+
+def _check_base(base: EvalConfig, trained: RunManifest) -> None:
+    """Raise ``ValueError`` unless ``base`` scores the training run's model alone on every
+    val question, as a checkpoint's eval runs must too."""
+    if base.split != "val" or base.limit is not None:
+        asked = f"the first {base.limit} {base.split} questions" if base.limit else base.split
+        raise ValueError(
+            f"the base config scores {asked}; checkpoints are chosen on the whole val split"
+        )
+    if base.adapter is not None:
+        raise ValueError(f"the base config names the adapter {base.adapter}; it scores no adapter")
+    if base.model != trained.model_ref:
+        raise ValueError(
+            f"the base config scores {base.model}, and run {trained.run_id} trained "
+            f"{trained.model_ref}"
+        )
+
+
+def _scored(config: Mapping[str, Any]) -> dict[str, Any]:
+    """An eval config's settings but those that change no score."""
+    return {name: value for name, value in config.items() if name not in _SCORELESS}
 
 
 def _check_saved(trained: RunManifest, rel: str, folder: Path) -> None:

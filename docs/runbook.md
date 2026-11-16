@@ -205,7 +205,11 @@ scored with its base model's config (`configs/eval/<name>-val.yaml`) and the two
 differ in the adapter alone. An adapter that is a training run's checkpoint,
 `runs/<run_id>/checkpoints/<name>` as on the laptop, is fetched from the run store to the
 same path in the kernel before the model loads, so it needs the `HF_TOKEN` secret; the
-manifest names the adapter by that path, which `forge runs promote` reads.
+manifest names the adapter by that path, which `forge runs promote` reads, and records the
+`adapter_sha256` of the files it loaded. The push reads the adapter as both of those do
+(`forge.ops.adapters.checkpoint_ref`) and refuses, before any upload, a checkpoint outside
+`runs/`, a folder on this machine, and a checkpoint of a run this machine knows trained
+another model. A trailing `/` or a leading `./` is pushed spelled the one way.
 
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the
@@ -301,7 +305,7 @@ uv run forge runs show <run_id>                 # its manifest and latest checkp
 uv run forge runs pull <run_id>                 # mirror it into runs/<run_id>/
 uv run forge runs pull <run_id> --store kaggle  # the same as forge kaggle output
 uv run forge runs push <run_id>                 # make the store's copy runs/<run_id>/
-uv run forge runs promote <run_id> --eval <eval_run_id> ...  # its best checkpoint to best/
+uv run forge runs promote <run_id> --config <base val config> --eval <eval_run_id> ...  # best/
 ```
 
 - A pull makes `runs/<run_id>/` the store's copy of the run, as `forge kaggle output` does with
@@ -372,12 +376,14 @@ uv run forge runs promote <run_id> --eval <eval_run_id> ...  # its best checkpoi
   A training config's `ops.keep_checkpoints_at` names shares of the run, such as `[0.5]`,
   whose checkpoints are saved and kept too, for val to compare with `checkpoints/final`;
   the manifest's outputs name each, as `kept_at_0.5`.
-- `forge runs promote <sft_run_id> --eval <eval_run_id> ...` copies the SFT run's checkpoint
-  that val scores highest to `checkpoints/best/`, where GRPO starts
-  (`forge.train.sft.promote_best`). Each eval run is a finished val run in `runs/` whose
-  adapter is one of the run's checkpoints, `runs/<sft_run_id>/checkpoints/step-NNNNNN` or
-  `.../final`, with the others' settings. The highest official EX wins, the later
-  checkpoint on a tie, and `best.json` beside the manifest records each score and the eval
+- `forge runs promote <sft_run_id> --config <base val config> --eval <eval_run_id> ...`
+  copies the SFT run's checkpoint that val scores highest to `checkpoints/best/`, where GRPO
+  starts (`forge.train.sft.promote_best`). The config is the base model's on the whole val
+  split, `configs/eval/<name>-val.yaml`. Each eval run is a finished run in `runs/` of that
+  config with one of the run's checkpoints as its adapter and nothing else changed,
+  `runs/<sft_run_id>/checkpoints/step-NNNNNN` or `.../final`, and it must have scored the
+  files the SFT run saved there, by their `adapter_sha256`. The highest official EX wins,
+  the later checkpoint on a tie, and `best.json` beside the manifest records each score and the eval
   run it comes from; the manifest's outputs name both. Dev is never read. With the hub
   store, the default, pull the SFT run and its eval runs first: the copy is made here and
   pushed, `best/` first and the manifest last.
@@ -473,17 +479,23 @@ runs go to the run store, and an eval job fetches its checkpoint from there. Aft
 2. Its final adapter on val, with that candidate's FG-307 config, so the two runs differ
    in the adapter alone: `uv run forge kaggle run --job eval --config
    configs/eval/qwen3-1-7b-val.yaml --adapter runs/<pilot_run_id>/checkpoints/final
-   --run-id <date>-qwen3-1-7b-sft-val-<sha7>`. Then `uv run forge runs promote
-   <pilot_run_id> --eval <that run id>` sets the pilot's `checkpoints/best`, where FG-507's
-   GRPO pilot starts.
+   --run-id <date>-qwen3-1-7b-sft-val-<sha7>`. The push checks the adapter first: a run's
+   checkpoint in `runs/`, as here, which the kernel fetches, or a Hub repo@revision. Then
+   `uv run forge runs promote <pilot_run_id> --config configs/eval/qwen3-1-7b-val.yaml
+   --eval <that run id>` sets the pilot's `checkpoints/best`, where FG-507's GRPO pilot
+   starts.
 3. The main run, 1 epoch on the chosen model: `uv run forge kaggle run --job sft --config
    configs/sft/qwen3-4b-main.yaml`. If ADR-0012 chooses another model, the config names it
    first. It keeps its checkpoint half way (`ops.keep_checkpoints_at: [0.5]`) beside
    `checkpoints/final`; `forge runs show <run_id>` lists both, the first as `kept_at_0.5`.
 4. Both checkpoints on val, each with `configs/eval/qwen3-4b-val.yaml` and its own
    `--adapter runs/<main_run_id>/<checkpoint>` and `--run-id`.
-5. `uv run forge runs promote <main_run_id> --eval <half run id> --eval <final run id>`:
-   the higher official EX goes to `checkpoints/best`, the final adapter on a tie.
+5. `uv run forge runs promote <main_run_id> --config configs/eval/qwen3-4b-val.yaml --eval
+   <half run id> --eval <final run id>`: the higher official EX goes to `checkpoints/best`,
+   the final adapter on a tie. Each eval run must be that config, the base model's on the
+   whole val split, with its checkpoint as the adapter and nothing else changed, and must
+   have scored the files the run saved there: an eval run records the `adapter_sha256` of
+   its adapter, and the SFT run the digest of each checkpoint it keeps.
 
 Render each eval run's report on the laptop (`FORGE_DATA_DIR=data/spider uv run forge
 report run <run_id>`) and copy the folder whole to `docs/runs/`. Copy each SFT run

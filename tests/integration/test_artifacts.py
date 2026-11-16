@@ -1,8 +1,9 @@
 """Runs committed under docs/runs/: whole, made as their configs say, and rebuildable.
 
 A GPU story's runs wait in ``docs/runs/pending.yaml`` while the accounts they need don't
-exist. ``gpu_story_runs`` finds a story's runs by the configs they were made from, and
-skips the checks on them only while the story is listed there.
+exist. ``gpu_story_runs`` and ``kernel_training_runs`` find a story's runs by the configs
+they were made from, and skip the checks on them only while the story is listed there;
+``fg405_comparison`` does the same for FG-405's comparison of the main model.
 """
 
 from __future__ import annotations
@@ -10,11 +11,13 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
+import shutil
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 import yaml
@@ -26,19 +29,20 @@ from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.prompts import chat_token_counter, load_tokenizer
 from forge.data.spider import FAILING_GOLD_IDS, load_checksums, resolve_data_dir
-from forge.data.splits import load_train, read_split_ids
+from forge.data.splits import load_train, load_val, read_split_ids
 from forge.eval.config import HOSTS, EvalConfig, read_config_file
 from forge.eval.report import COMPARE_PREFIX, rebuild, write_run_report
 from forge.eval.reproducibility import compare_runs
-from forge.eval.run_files import StoredRun, read_run
+from forge.eval.run_files import ADAPTER_DIGEST, StoredRun, read_run
 from forge.eval.runner import run_eval
-from forge.ops.adapters import checkpoint_ref
+from forge.infer.base import FakeBackend
+from forge.ops.adapters import checkpoint_ref, digest_output
 from forge.ops.dev_usage import read_uses
 from forge.ops.hub import BEST, FINAL, LocalRunStore
-from forge.ops.ledger import LedgerRow, read_rows, run_hours
+from forge.ops.ledger import LedgerRow, append_once, read_rows, run_hours
 from forge.ops.manifest import config_hash
 from forge.train.config import load_train_config
-from forge.train.sft import PROMOTION_FILE, checkpoint_scores, fit_rows
+from forge.train.sft import PROMOTION_FILE, checkpoint_scores, fit_rows, promote_best
 from forge.train.sft_data import build_sft_dataset
 from tests.fakes import sft_run_folder
 from tests.report_trace import GENERATED, NUMBER, untraced
@@ -114,8 +118,12 @@ SFT_PILOT_CONFIG = ROOT / "configs" / "sft" / "pilot-qwen25coder05b-mps.yaml"
 SFT_PILOT_ADAPTER = f"runs/{SFT_PILOT_RUN}/{FINAL}"
 
 
-def _ledger_rows(run_id: str) -> list[LedgerRow]:
-    return [row for row in read_rows(ROOT / "docs" / "compute-ledger.md") if row.run_id == run_id]
+LEDGER = ROOT / "docs" / "compute-ledger.md"
+DEV_USAGE = ROOT / "docs" / "dev-usage.md"
+
+
+def _ledger_rows(run_id: str, ledger: Path = LEDGER) -> list[LedgerRow]:
+    return [row for row in read_rows(ledger) if row.run_id == run_id]
 
 
 def _made_from_its_commit(manifest: RunManifest) -> None:
@@ -278,6 +286,16 @@ def gpu_story_runs(
     When any is missing the calling test skips while ``story`` is in ``pending``, and fails
     once it isn't: a story off that list has run its jobs.
     """
+    found, missing = kernel_eval_runs(story, wanted, runs=runs)
+    if missing:
+        _missing(story, missing, runs=runs, pending=pending)
+    return found
+
+
+def kernel_eval_runs(
+    story: str, wanted: Mapping[str, Sequence[Path]], *, runs: Path = RUNS
+) -> tuple[dict[str, StoredRun], list[str]]:
+    """``gpu_story_runs``'s runs, and the names of those ``runs`` lacks, without skipping."""
     store = LocalRunStore(runs)
     stored = [
         read_run(runs / run) for run in store.runs() if store.get_manifest(run).kind == "eval"
@@ -297,12 +315,10 @@ def gpu_story_runs(
         if not matches[0].paths.report.is_file():
             pytest.fail(f"run {ids[0]}, {story}'s {name}, is committed without its report")
         found[name] = matches[0]
-    if missing:
-        _missing(story, missing, runs=runs, pending=pending)
-    return found
+    return found, missing
 
 
-def _missing(story: str, names: Sequence[str], *, runs: Path, pending: Path) -> None:
+def _missing(story: str, names: Sequence[str], *, runs: Path, pending: Path) -> NoReturn:
     """Skip while ``story`` is in ``pending``, since its runs can't happen yet, and fail
     once it isn't: a story off that list has run its jobs."""
     if story in pending_stories(pending):
@@ -648,6 +664,17 @@ def kernel_training_runs(
     test skips while ``story`` is in ``pending``, and fails once it isn't, as for
     ``gpu_story_runs``.
     """
+    found, missing = training_runs(story, wanted, runs=runs)
+    if missing:
+        _missing(story, missing, runs=runs, pending=pending)
+    return found
+
+
+def training_runs(
+    story: str, wanted: Mapping[str, Path], *, runs: Path = RUNS
+) -> tuple[dict[str, RunManifest], list[str]]:
+    """``kernel_training_runs``'s runs, and the names of those ``runs`` lacks, without
+    skipping."""
     store = LocalRunStore(runs)
     trained = [
         manifest
@@ -666,9 +693,7 @@ def kernel_training_runs(
             missing.append(name)
             continue
         found[name] = matches[0]
-    if missing:
-        _missing(story, missing, runs=runs, pending=pending)
-    return found
+    return found, missing
 
 
 @pytest.mark.phase(4)
@@ -703,48 +728,194 @@ def _checkpoint_of(run: StoredRun, trained: RunManifest) -> str | None:
     return ref.rel if ref is not None and ref.run_id == trained.run_id else None
 
 
-@pytest.mark.phase(4)
-def test_phase4_sft_runs_present() -> None:
-    trained = kernel_training_runs("FG-404", SFT_RUNS)
-    store = LocalRunStore(RUNS)
-    evals = [read_run(RUNS / run) for run in store.runs() if store.get_manifest(run).kind == "eval"]
-    dev_looks = {run_id for _, run_id, _ in read_uses(ROOT / "docs" / "dev-usage.md")}
+# The base models' full val configs, p1 and p2 (FG-307): an SFT run's checkpoints are each
+# scored with the one of its model and prompt version, and the adapter alone added.
+VAL_CONFIGS = [
+    EVAL_CONFIGS / f"{name}-val{prompt}.yaml" for name in CANDIDATES for prompt in ("", "-p2")
+]
+
+
+def base_val_config(trained: RunManifest, configs: Sequence[Path] = VAL_CONFIGS) -> Path:
+    """The full val config of the model ``trained`` trained, at the prompt version it
+    trained on: what its checkpoints are scored with, and FG-307 scored the model with."""
+    prompt = trained.config["data"]["prompt_version"]
+    matches = [
+        path
+        for path in configs
+        if (config := EvalConfig(**read_config_file(path))).model == trained.model_ref
+        and config.prompt_version == prompt
+    ]
+    assert len(matches) == 1, f"{trained.run_id}: {matches} score its model at {prompt}"
+    return matches[0]
+
+
+def assert_sft_runs_scored(
+    trained: Mapping[str, RunManifest],
+    *,
+    runs: Path = RUNS,
+    configs: Sequence[Path] = VAL_CONFIGS,
+    ledger: Path = LEDGER,
+    dev_usage: Path = DEV_USAGE,
+    val: Collection[str] | None = None,
+) -> None:
+    """Each kernel SFT run of ``trained`` committed under ``runs`` without its weights, its
+    checkpoints scored from kernels on every question of ``val`` (the val split's), each
+    with its base model's full val config and that checkpoint's files alone added, and
+    best/ set from those scores (FG-404)."""
+    if val is None:
+        val = {example_id for example_id, _ in read_split_ids("val")} - FAILING_GOLD_IDS
+    store = LocalRunStore(runs)
+    evals = [read_run(runs / run) for run in store.runs() if store.get_manifest(run).kind == "eval"]
+    dev_looks = {run_id for _, run_id, _ in read_uses(dev_usage)}
     for name, manifest in trained.items():
-        root = RUNS / manifest.run_id
+        root = runs / manifest.run_id
         assert (manifest.kind, manifest.status) == ("sft", "finished"), name
         assert manifest.config_hash == config_hash(manifest.config), name
-        assert [row.platform for row in _ledger_rows(manifest.run_id)] == [manifest.platform]
+        assert [row.platform for row in _ledger_rows(manifest.run_id, ledger)] == [
+            manifest.platform
+        ]
         # Committed without its weights, which the run store holds.
         assert (root / "config.yaml").is_file() and (root / "metrics.jsonl").is_file(), name
         assert not (root / "checkpoints").exists(), name
 
         # Its checkpoints on val, each from a kernel, with a report and a ledger row; none
         # of them on dev, and no dev look spent on them.
+        base = EvalConfig(**read_config_file(base_val_config(manifest, configs)))
         scored = {_checkpoint_of(run, manifest): run for run in evals}
         scored.pop(None, None)
         assert scored, f"{name}: no eval run of its checkpoints"
+        assert manifest.ended_at is not None, name
         for rel, run in scored.items():
             made = run.manifest
-            assert made.config["split"] == "val" and made.platform in HOSTS, rel
-            assert made.model_ref == manifest.model_ref, rel
+            # The base model's full val config, the base run's (FG-307), and the checkpoint
+            # alone added, so the two differ in the adapter alone (FG-405).
+            expected = replace(base, adapter=made.adapter_ref).manifest_config()
+            assert _made_from(made.config) == expected, f"{rel}: not the base config with it"
+            assert sorted(score.example_id for score in run.scores) == sorted(val), rel
+            assert made.platform in HOSTS and manifest.ended_at <= made.started_at, rel
+            # Scored on the files the run saved as that checkpoint.
+            saved = manifest.outputs[digest_output(rel)]
+            assert made.outputs[ADAPTER_DIGEST] == saved, f"{rel}: scored other weights"
             assert run.paths.report.is_file(), rel
-            assert [row.platform for row in _ledger_rows(made.run_id)] == [made.platform], rel
+            assert [row.platform for row in _ledger_rows(made.run_id, ledger)] == [made.platform]
             assert made.run_id not in dev_looks, rel
-        expected = {FINAL} if name == "pilot" else {manifest.outputs["kept_at_0.5"], FINAL}
-        assert set(scored) == expected, name
+        expected_ckpts = {FINAL} if name == "pilot" else {manifest.outputs["kept_at_0.5"], FINAL}
+        assert set(scored) == expected_ckpts, name
 
         # best/ set from those runs' own scores: the highest official EX among them.
         assert (manifest.outputs["best"], manifest.outputs["promotion"]) == (BEST, PROMOTION_FILE)
         record = json.loads((root / PROMOTION_FILE).read_text(encoding="utf-8"))
         ids = [run.manifest.run_id for run in scored.values()]
-        scores, sources = checkpoint_scores(manifest.run_id, ids, runs_root=RUNS)
+        scores, sources = checkpoint_scores(manifest.run_id, ids, base=base, runs_root=runs)
         assert (record["scores"], record["eval_runs"]) == (scores, sources), name
         assert scores[record["checkpoint"]] == max(scores.values()), name
 
 
+@pytest.mark.phase(4)
+def test_phase4_sft_runs_present() -> None:
+    assert_sft_runs_scored(kernel_training_runs("FG-404", SFT_RUNS))
+
+
+@pytest.mark.phase(4)
+def test_sft_runs_are_scored_on_their_base_models_full_val(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A kernel SFT run, its checkpoints' kernel val runs and best/, made on the fixture with
+    # the replies stood in for, in runs/; then committed, as the runbook says, to docs/runs.
+    monkeypatch.setenv("FORGE_CACHE_DIR", str(tmp_path / "cache"))
+    work, committed = tmp_path / "runs", tmp_path / "docs-runs"
+    model, sft_id = "org/model@abc123", "2026-11-01-model-sft-abc1234"
+    half = "checkpoints/step-000121"
+    base = tmp_path / "model-val.yaml"
+    base.write_text(f"model: {model}\nbackend: vllm\nlimit: null\nprompt_version: p1\n")
+    base_config = EvalConfig(**read_config_file(base))
+    trained_on = {"data": {"prompt_version": "p1"}}
+    trained = sft_run_folder(
+        work,
+        sft_id,
+        model,
+        [half, FINAL],
+        config=trained_on,
+        config_hash=config_hash(trained_on),
+        started_at=datetime(2026, 11, 1, 8, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 11, 1, 10, 0, tzinfo=UTC),
+    )
+    LocalRunStore(work).put_manifest(
+        trained.model_copy(update={"outputs": {**trained.outputs, "kept_at_0.5": half}})
+    )
+    for name in ("config.yaml", "metrics.jsonl"):
+        (work / sft_id / name).write_text("{}\n", encoding="utf-8")
+    examples = load_val()
+    gold = {example.id: example.gold_sql for example in examples}
+    ledger, dev_usage = tmp_path / "ledger.md", tmp_path / "dev-usage.md"
+
+    def evaluate(run_id: str, rel: str, **changes: Any) -> None:
+        """A kernel's val run of checkpoint ``rel`` with the base config, as ``changes``
+        change it, answering with gold, then its report and ledger row."""
+        options = {"adapter": str(work / sft_id / rel), "run_id": run_id, "host": "kaggle"}
+        config = EvalConfig(**{**read_config_file(base), **options, **changes})
+        replies = FakeBackend(
+            lambda prompt, params, i: f"```sql\n{gold[prompt.example_id]}\n```", model_ref=model
+        )
+        run_eval(config, backend=replies, allow_dirty=True, runs_root=work, workers=1)
+        write_run_report(run_id, runs_root=work)
+        append_once(LedgerRow(date.today(), "kaggle", "Tesla T4", 0.3, run_id, "val"), ledger)
+
+    evaluate("half-val", half)
+    evaluate("final-val", FINAL)
+    ids = ["half-val", "final-val"]
+    scores, sources = checkpoint_scores(sft_id, ids, base=base_config, runs_root=work)
+    promote_best(sft_id, scores, sources=sources, runs_root=work)
+    append_once(LedgerRow(date.today(), "kaggle", "Tesla T4", 2.0, sft_id, "sft"), ledger)
+
+    def commit(folder: Path, evals: Sequence[str]) -> RunManifest:
+        """``folder`` as docs/runs: the eval runs whole, the SFT run without checkpoints."""
+        for run_id in evals:
+            shutil.copytree(work / run_id, folder / run_id)
+        (folder / sft_id).mkdir(parents=True)
+        for name in ("manifest.json", "config.yaml", "metrics.jsonl", PROMOTION_FILE):
+            shutil.copyfile(work / sft_id / name, folder / sft_id / name)
+        return LocalRunStore(folder).get_manifest(sft_id)
+
+    def check(folder: Path, manifest: RunManifest) -> None:
+        val = [example.id for example in examples]
+        assert_sft_runs_scored(
+            {"main": manifest},
+            runs=folder,
+            configs=[base],
+            ledger=ledger,
+            dev_usage=dev_usage,
+            val=val,
+        )
+
+    check(committed, commit(committed, ids))
+
+    # A part of val or other sampling for the final adapter, or other weights than the run
+    # saved as it: a best/ chosen from such a run is refused, as promote refuses it.
+    weights = work / sft_id / FINAL / "adapter_model.safetensors"
+    saved = weights.read_text()
+    weights.write_text("weights from elsewhere")
+    evaluate("final-other-weights", FINAL)
+    weights.write_text(saved)
+    evaluate("final-part", FINAL, limit=3)
+    evaluate("final-sampled", FINAL, temperature=0.7)
+    for run_id, message in (
+        ("final-part", "not the base config with it"),
+        ("final-sampled", "not the base config with it"),
+        ("final-other-weights", "scored other weights"),
+    ):
+        folder = tmp_path / run_id
+        with pytest.raises(AssertionError, match=f"{FINAL}: {message}"):
+            check(folder, commit(folder, ["half-val", run_id]))
+        with pytest.raises(ValueError, match=f"run {run_id} "):
+            checkpoint_scores(sft_id, [run_id], base=base_config, runs_root=work)
+
+
 # FG-405: what SFT changed on val, from the comparisons of each committed val run of an SFT
-# adapter with its base run. The SFT pilot's is FG-491's; FG-404's main run adds its own.
+# adapter with its base run. The SFT pilot's is FG-491's; the main model's, FG-405's own,
+# waits in pending.yaml for FG-404's and FG-307's runs.
 COMPARISON = RUNS / SFT_PILOT_EVAL / "eval" / f"{COMPARE_PREFIX}{PILOT_RUN}.md"
+MAIN_COMPARISON = "sft-main-comparison"  # its name in pending.yaml
 NOTES = ROOT / "docs" / "notes" / "sft.md"
 # What in the notes or a report names something rather than measures it: code spans, link
 # targets, story and ADR ids, and a model's size such as 0.5B.
@@ -767,6 +938,85 @@ def sft_comparisons(runs: Path = RUNS) -> dict[str, list[Path]]:
         if ref.run_id in trained and reports:
             found[manifest.run_id] = reports
     return found
+
+
+def main_comparison(runs: Path = RUNS) -> Path | None:
+    """FG-405's comparison of the main model with and without SFT where FG-404's and
+    FG-307's runs put it: in the folder of the val run of the main SFT run's
+    checkpoints/best, the one its best.json names, against FG-307's run of the model's
+    full val config, so the two differ in the adapter alone. None while any is missing."""
+    trained, _ = training_runs("FG-404", {"main": SFT_RUNS["main"]}, runs=runs)
+    record = runs / trained["main"].run_id / PROMOTION_FILE if trained else None
+    if record is None or not record.is_file():
+        return None
+    promoted = json.loads(record.read_text(encoding="utf-8"))
+    best_val = promoted["eval_runs"][promoted["checkpoint"]]
+    base, _ = kernel_eval_runs("FG-307", {"base": [base_val_config(trained["main"])]}, runs=runs)
+    if not base:
+        return None
+    report = runs / best_val / "eval" / f"{COMPARE_PREFIX}{base['base'].manifest.run_id}.md"
+    return report if report.is_file() else None
+
+
+def fg405_comparison(*, runs: Path = RUNS, pending: Path = PENDING) -> Path:
+    """``main_comparison``, or a skip while FG-405 is in ``pending`` and a failure once it
+    isn't, as for a GPU story's runs."""
+    report = main_comparison(runs)
+    if report is None:
+        _missing("FG-405", [MAIN_COMPARISON], runs=runs, pending=pending)
+    return report
+
+
+@pytest.mark.phase(4)
+def test_main_comparison_skips_only_while_fg405_is_pending(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_CACHE_DIR", str(tmp_path / "cache"))
+    runs, pending, unlisted = tmp_path / "runs", tmp_path / "pending.yaml", tmp_path / "done.yaml"
+    pending.write_text(f"pending:\n  - story: FG-405\n    run: {MAIN_COMPARISON}\n")
+    unlisted.write_text("pending:\n  - story: FG-404\n    run: sft-main\n")
+
+    def missing() -> None:
+        with pytest.raises(
+            pytest.skip.Exception, match=f"GPU run pending: FG-405's {MAIN_COMPARISON}"
+        ):
+            fg405_comparison(runs=runs, pending=pending)
+        with pytest.raises(pytest.fail.Exception, match=r"FG-405 is not in done\.yaml, but"):
+            fg405_comparison(runs=runs, pending=unlisted)
+
+    missing()
+    # FG-404's main run from its config, its final adapter's kernel val run promoted to best/.
+    made = load_train_config(SFT_RUNS["main"]).model_dump(mode="json", include=TRAIN_SECTIONS)
+    main = sft_run_folder(runs, "main-sft", made["run"]["model_ref"], [FINAL], config=made)
+    base = base_val_config(main)
+    gold = {example.id: example.gold_sql for example in load_val()}
+
+    def evaluate(run_id: str, adapter: str | None) -> None:
+        options = {**read_config_file(base), "run_id": run_id, "host": "kaggle"}
+        replies = FakeBackend(lambda prompt, params, i: f"```sql\n{gold[prompt.example_id]}\n```")
+        run_eval(
+            EvalConfig(**options, adapter=adapter),
+            backend=replies,
+            allow_dirty=True,
+            runs_root=runs,
+            workers=1,
+        )
+        write_run_report(run_id, runs_root=runs)
+
+    evaluate("best-val", str(runs / "main-sft" / FINAL))
+    record = {"checkpoint": FINAL, "eval_runs": {FINAL: "best-val"}}
+    (runs / "main-sft" / PROMOTION_FILE).write_text(json.dumps(record), encoding="utf-8")
+    missing()
+    # FG-307's run of the model's val config, and a comparison against another run.
+    evaluate("base-val", None)
+    stray = runs / "best-val" / "eval" / f"{COMPARE_PREFIX}another-run.md"
+    stray.write_text("a comparison\n", encoding="utf-8")
+    missing()
+
+    report = runs / "best-val" / "eval" / f"{COMPARE_PREFIX}base-val.md"
+    report.write_text("a comparison\n", encoding="utf-8")
+    assert fg405_comparison(runs=runs, pending=pending) == report
+    assert fg405_comparison(runs=runs, pending=unlisted) == report
 
 
 def _numbers(text: str) -> set[str]:
@@ -799,6 +1049,25 @@ def test_phase4_compare_report_rebuildable(monkeypatch: pytest.MonkeyPatch) -> N
         assert result.exit_code == 0, result.output
         for report in reports:
             assert f"{report}: matches its rebuild\n" in result.output, result.output
+    # The main model's comparison, FG-405's subject, among them once it is committed.
+    main = fg405_comparison()
+    assert main in comparisons.get(main.parent.parent.name, []), comparisons
+
+
+def bullet_lists(text: str, folder: Path) -> dict[Path, list[int]]:
+    """The size of each bullet list in ``text``, by the comparison it reads: the last one
+    linked in it or above it, as a path from ``folder``."""
+    lists: dict[Path, list[int]] = {}
+    reading: Path | None = None
+    for block in text.split("\n\n"):
+        links = _COMPARISON_LINK.findall(block)
+        if links:
+            reading = (folder / links[-1]).resolve()
+        size = block.count("\n- ") + block.startswith("- ")
+        if size:
+            assert reading is not None, f"a list reads no comparison: {block[:60]!r}"
+            lists.setdefault(reading, []).append(size)
+    return lists
 
 
 @pytest.mark.phase(4)
@@ -811,6 +1080,9 @@ def test_sft_notes_cite_only_report_numbers() -> None:
     reported = set().union(*(_numbers(path.read_text(encoding="utf-8")) for path in linked))
     # Three to five bullets a list, the pilot's and each one a later comparison adds, and no
     # number in them or around them that those reports lack.
-    sizes = [block.count("\n- ") + block.startswith("- ") for block in text.split("\n\n")]
-    assert any(sizes) and all(3 <= size <= 5 for size in sizes if size), sizes
+    lists = bullet_lists(text, NOTES.parent)
+    assert COMPARISON in lists, lists
+    assert all(3 <= size <= 5 for sizes in lists.values() for size in sizes), lists
     assert sorted(_numbers(text) - reported) == []
+    # And a list of its own on the main model's comparison, once that is committed.
+    assert fg405_comparison().resolve() in lists, lists
