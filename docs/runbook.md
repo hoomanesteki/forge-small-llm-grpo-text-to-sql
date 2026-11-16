@@ -230,6 +230,7 @@ uv run forge runs show <run_id>                 # its manifest and latest checkp
 uv run forge runs pull <run_id>                 # mirror it into runs/<run_id>/
 uv run forge runs pull <run_id> --store kaggle  # the same as forge kaggle output
 uv run forge runs push <run_id>                 # make the store's copy runs/<run_id>/
+uv run forge runs promote <run_id> --eval <eval_run_id> ...  # its best checkpoint to best/
 ```
 
 - A pull makes `runs/<run_id>/` the store's copy of the run, as `forge kaggle output` does with
@@ -289,6 +290,15 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
   A training config's `ops.keep_checkpoints_at` names shares of the run, such as `[0.5]`,
   whose checkpoints are saved and kept too, for val to compare with `checkpoints/final`;
   the manifest's outputs name each, as `kept_at_0.5`.
+- `forge runs promote <sft_run_id> --eval <eval_run_id> ...` copies the SFT run's checkpoint
+  that val scores highest to `checkpoints/best/`, where GRPO starts
+  (`forge.train.sft.promote_best`). Each eval run is a finished val run in `runs/` whose
+  adapter is one of the run's checkpoints, `runs/<sft_run_id>/checkpoints/step-NNNNNN` or
+  `.../final`, with the others' settings. The highest official EX wins, the later
+  checkpoint on a tie, and `best.json` beside the manifest records each score and the eval
+  run it comes from; the manifest's outputs name both. Dev is never read. With the hub
+  store, the default, pull the SFT run and its eval runs first: the copy is made here and
+  pushed, `best/` first and the manifest last.
 
 ## Resume after a session limit
 

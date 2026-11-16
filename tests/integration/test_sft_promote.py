@@ -1,0 +1,157 @@
+"""``forge runs promote``: an SFT run's checkpoints scored by their val runs on the fixture
+data, and the best one promoted (FG-404), with the model's replies stood in for."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from typer.testing import CliRunner
+
+from forge import cli
+from forge.core.types import GenParams, Prompt
+from forge.data.splits import load_train, load_val
+from forge.eval.config import EvalConfig
+from forge.eval.metrics import summarize
+from forge.eval.run_files import read_run
+from forge.eval.runner import run_eval
+from forge.infer.base import FakeBackend
+from forge.ops.hub import BEST, FINAL, HubRunStore, LocalRunStore
+from forge.train.sft import PROMOTION_FILE
+from tests.fakes import FakeHub, sft_run_folder
+
+RUN = "2026-11-20-qwen3-4b-sft-abc1234"
+MODEL = "Qwen/Qwen3-4B@1cfa9a7208912126459214e8b04321603b3df60c"
+HALF = "checkpoints/step-000242"
+OTHER = "2026-11-19-qwen3-4b-sft-abc1234"  # another SFT run
+REPO = "owner/forge-runs"
+
+
+@pytest.fixture
+def runs(spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """runs/ under tmp_path, holding a finished SFT run with its half-way and final
+    checkpoints, as forge runs pull leaves one."""
+    folder = tmp_path / "runs"
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(folder))
+    monkeypatch.setenv("FORGE_CACHE_DIR", str(tmp_path / "cache"))
+    sft_run_folder(folder, RUN, MODEL, [HALF, FINAL])
+    return folder
+
+
+def _evaluate(runs: Path, run_id: str, adapter: str, right: int, **options: Any) -> None:
+    """A run of ``adapter`` on MODEL, on val unless ``options`` say otherwise, whose first
+    ``right`` replies are gold queries where the reply knows them, and the rest ``SELECT 1``."""
+    gold = {example.id: example.gold_sql for example in [*load_train(), *load_val()]}
+    answered: list[str] = []
+
+    def reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        answered.append(prompt.example_id)
+        sql = gold.get(prompt.example_id, "SELECT 1") if len(answered) <= right else "SELECT 1"
+        return f"```sql\n{sql}\n```"
+
+    config = EvalConfig(
+        model=MODEL, adapter=adapter, limit=6, run_id=run_id, **{"backend": "hf", **options}
+    )
+    run_eval(
+        config,
+        backend=FakeBackend(reply, model_ref=MODEL),
+        allow_dirty=True,
+        runs_root=runs,
+        workers=1,
+    )
+
+
+def _official_ex(runs: Path, run_id: str) -> float:
+    ex = summarize(read_run(runs / run_id).scores).ex_official
+    assert ex is not None
+    return ex.value
+
+
+def _promote(*args: str) -> Any:
+    return CliRunner().invoke(cli.app, ["runs", "promote", RUN, *args])
+
+
+@pytest.mark.phase(4)
+def test_runs_promote_picks_the_checkpoint_its_val_runs_score_highest(
+    runs: Path, tmp_path: Path
+) -> None:
+    # The adapters as forge eval run --adapter names them on the laptop, and as a kernel's
+    # folder holds one.
+    _evaluate(runs, "half-on-val", f"runs/{RUN}/{HALF}", right=5)
+    _evaluate(runs, "final-on-val", f"/kaggle/working/runs/{RUN}/{FINAL}", right=3)
+    half, final = _official_ex(runs, "half-on-val"), _official_ex(runs, "final-on-val")
+    assert half > final
+
+    done = _promote("--eval", "final-on-val", "--eval", "half-on-val", "--store", "local")
+
+    assert done.exit_code == 0, done.output
+    assert done.stdout.splitlines() == [
+        f"{HALF}: official EX {half:.2%} on val, in run half-on-val",
+        f"{FINAL}: official EX {final:.2%} on val, in run final-on-val",
+        f"best: {HALF}, now checkpoints/best in {runs / RUN / BEST}",
+    ]
+    record = json.loads((runs / RUN / PROMOTION_FILE).read_text())
+    # The scores are the stored runs' own, never typed.
+    assert record["scores"] == {HALF: half, FINAL: final}
+    assert record["eval_runs"] == {HALF: "half-on-val", FINAL: "final-on-val"}
+    weights = (runs / RUN / BEST / "adapter_model.safetensors").read_text()
+    assert weights == f"weights of {HALF}"
+    assert LocalRunStore(runs).get_manifest(RUN).outputs["best"] == BEST
+
+
+@pytest.mark.phase(4)
+def test_runs_promote_goes_to_the_hub_store(
+    runs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _evaluate(runs, "final-on-val", f"runs/{RUN}/{FINAL}", right=4)
+    # The store FORGE_RUN_STORE names, holding the run as it was pulled, and no .env read.
+    fake = FakeHub()
+    monkeypatch.setattr("huggingface_hub.HfApi", fake.client)
+    monkeypatch.setenv("FORGE_RUN_STORE", REPO)
+    monkeypatch.setenv("FORGE_ROOT", str(tmp_path))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    HubRunStore(REPO, api=fake).put_folder(RUN, runs / RUN)
+
+    done = _promote("--eval", "final-on-val")
+
+    assert done.exit_code == 0, done.output
+    assert done.stdout.splitlines()[-1] == (
+        f"best: {FINAL}, now checkpoints/best in {runs / RUN / BEST} and {REPO}"
+    )
+    stored = HubRunStore(REPO, api=fake).get_manifest(RUN)
+    assert stored.outputs["best"] == BEST and stored == LocalRunStore(runs).get_manifest(RUN)
+    assert fake.files[f"runs/{RUN}/{BEST}/adapter_model.safetensors"] == b"weights of " + (
+        FINAL.encode()
+    )
+
+
+@pytest.mark.phase(4)
+def test_runs_promote_takes_val_runs_of_the_runs_checkpoints_alone(
+    runs: Path, with_dev: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_DATA_DIR", str(with_dev))
+    _evaluate(runs, "final-on-val", f"runs/{RUN}/{FINAL}", right=4)
+    _evaluate(runs, "half-on-dev", f"runs/{RUN}/{HALF}", right=4, split="dev", reason="test")
+    _evaluate(runs, "half-on-train", f"runs/{RUN}/{HALF}", right=4, split="train")
+    _evaluate(runs, "half-with-retry", f"runs/{RUN}/{HALF}", right=4, retry=1)
+    _evaluate(runs, "another-run", f"runs/{OTHER}/{HALF}", right=4)
+    _evaluate(runs, "not-a-checkpoint", f"runs/{RUN}", right=4)
+    _evaluate(runs, "final-again", f"runs/{RUN}/{FINAL}", right=2)
+
+    refused = [
+        ("half-on-dev", "run half-on-dev evaluated dev; checkpoints are chosen on val"),
+        ("half-on-train", "run half-on-train evaluated train"),
+        ("half-with-retry", "runs final-on-val and half-with-retry differ in retry, not in the"),
+        ("another-run", f"run another-run's adapter is runs/{OTHER}/{HALF}, no checkpoint of"),
+        ("not-a-checkpoint", f"run not-a-checkpoint's adapter is runs/{RUN}, no checkpoint of"),
+        ("final-again", f"runs final-on-val and final-again both scored {FINAL}; name one"),
+    ]
+    for other, message in refused:
+        done = _promote("--eval", "final-on-val", "--eval", other, "--store", "local")
+        assert done.exit_code == 1, other
+        assert f"error: {message}" in done.stderr, done.stderr
+    assert not (runs / RUN / BEST).exists()
+    missing = _promote("--eval", "never-made", "--store", "local")
+    assert missing.exit_code == 1 and "error: no run in" in missing.stderr
