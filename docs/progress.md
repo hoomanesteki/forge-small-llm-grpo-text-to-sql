@@ -67,7 +67,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
 | FG-501 | Reward functions | 5 | done |  |  | `forge.train.rewards.Rewards(gold, pool, config)`: `execution_reward`, `validity_reward`, `format_reward` (each 0 or 1) and `guard_penalty`, with `weights` [1.0, 0.1, 0.05, 1.0] from the new `rewards` config section, so the gold query in a code block scores 1.15; `non_select` -1.0, `multiple_statements` -0.5, `constant_query` -0.5 and `comment_payload` -0.2, and any guard, or a query that ran but that sqlglot can't read, takes away execution, validity and format. Model SQL runs only in the `SandboxPool`, once a batch for all four functions; gold from `forge.eval.gold_cache`. I3 in `test_invariants.py` |
-| FG-502 | Adversarial reward tests | 3 | todo |  |  |  |
+| FG-502 | Adversarial reward tests | 3 | done |  |  | `tests/fixtures/adversarial_completions.yaml`: 48 completions on the fixture databases, each with its gold query, its four rewards and their weighted total, 9 of them audit candidates that name the FG-601 detector for their kind (`test_adversarial_cases`); `test_rewards_bounded_property` holds every reward and the total to [-2, 1.2] over 500 generated replies. Fixed in `train/rewards.py`: the constant guard charges a literal answer written over a table, such as `SELECT 3 FROM professor LIMIT 1` |
 | FG-503 | Parallel reward computation and gold cache | 3 | todo |  |  |  |
 | FG-504 | GRPO trainer with CPU smoke | 5 | todo |  |  |  |
 | FG-505 | GRPO dataset, filtering and curriculum | 3 | todo |  |  |  |
@@ -1098,3 +1098,24 @@ Work discovered along the way that is not a plan story.
   them: FG-504 passes `Rewards.weights` as `reward_weights` and sets both (FG-501).
 - sqlglot 30's node base class is `exp.Expr`; `exp.Query` is not an `exp.Expression`, so
   annotations of what `sqlglot.parse` returns use `exp.Expr` (FG-501).
+- The constant guard looked only for tables, so `SELECT 3 FROM professor LIMIT 1`,
+  `SELECT DISTINCT 3 FROM professor` and `SELECT 3 UNION SELECT dept_code FROM professor WHERE 0`
+  scored 1.15 on a count of 3. It now also fires when a returned row is built from literals alone (no
+  column, `*`, window, or aggregate but `min`, `max` and `avg`), in any SELECT the query returns
+  rows of or a `VALUES` row; none of the 7,787 train gold queries has one. The plan's FG-501 text
+  still says "no table references" (FG-502).
+- Two constants still score 1.15 and are audit candidates in the fixture: a column of a CTE or
+  subquery counts as read (`WITH c AS (SELECT 3 AS n FROM professor) SELECT DISTINCT n FROM c`),
+  and sqlglot reads `SELECT "BUS" FROM department` as a column where SQLite, finding none,
+  returns the string. Closing them takes column lineage or the schema, so FG-601's
+  `constant_query` detector should judge results rather than SQL (FG-502).
+- `-- ...` or `/* */` alone on an empty gold result earns nothing: the executor calls it empty
+  SQL, where the official evaluator scores it 1 (test-suite-sql-eval issue 33). A payload split
+  into comments of 40 characters or fewer is free, as the guard measures each comment (FG-502).
+- Unfenced, a query over several lines is read as its SELECT line alone (plan section 3.7), so a
+  right `SELECT count(*)\nFROM head ...` becomes `SELECT count(*)` and costs the constant
+  penalty, -0.5, below a wrong query in a code block at 0.15 (FG-502).
+- With the default weights no reply scores below -1.7 (`non_select`, `multiple_statements` and
+  `comment_payload`; `constant_query` never fires with `non_select`) or above 1.15. The property
+  test's replies mix any text, a soup of fragments, built queries and edited gold queries, and
+  reach every guard and a match; `--hypothesis-show-statistics` shows the mix (FG-502).
