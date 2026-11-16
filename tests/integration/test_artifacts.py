@@ -19,14 +19,16 @@ from typing import Any
 import pytest
 import yaml
 from datasets import Dataset
+from typer.testing import CliRunner
 
+from forge.cli import app
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.prompts import chat_token_counter, load_tokenizer
 from forge.data.spider import FAILING_GOLD_IDS, load_checksums, resolve_data_dir
 from forge.data.splits import load_train, read_split_ids
 from forge.eval.config import HOSTS, EvalConfig, read_config_file
-from forge.eval.report import rebuild, write_run_report
+from forge.eval.report import COMPARE_PREFIX, rebuild, write_run_report
 from forge.eval.reproducibility import compare_runs
 from forge.eval.run_files import StoredRun, read_run
 from forge.eval.runner import run_eval
@@ -739,3 +741,52 @@ def test_phase4_sft_runs_present() -> None:
         scores, sources = checkpoint_scores(manifest.run_id, ids, runs_root=RUNS)
         assert (record["scores"], record["eval_runs"]) == (scores, sources), name
         assert scores[record["checkpoint"]] == max(scores.values()), name
+
+
+# FG-405: what SFT changed on val, from the comparisons of each committed val run of an SFT
+# adapter with its base run. The SFT pilot's is FG-491's; FG-404's main run adds its own.
+COMPARISON = RUNS / SFT_PILOT_EVAL / "eval" / f"{COMPARE_PREFIX}{PILOT_RUN}.md"
+
+
+def sft_comparisons(runs: Path = RUNS) -> dict[str, list[Path]]:
+    """The compare reports in the folder of each committed val run of an SFT run's
+    checkpoint, by that run's id, for the runs that have one."""
+    store = LocalRunStore(runs)
+    manifests = [store.get_manifest(run) for run in store.runs()]
+    trained = {manifest.run_id for manifest in manifests if manifest.kind == "sft"}
+    found: dict[str, list[Path]] = {}
+    for manifest in manifests:
+        # An adapter that is a run's checkpoint: <...>/<run_id>/checkpoints/<name>.
+        parts = (manifest.adapter_ref or "").rstrip("/").split("/")
+        if manifest.kind != "eval" or len(parts) < 3 or parts[-2] != "checkpoints":
+            continue
+        reports = sorted((runs / manifest.run_id / "eval").glob(f"{COMPARE_PREFIX}*.md"))
+        if parts[-3] in trained and reports:
+            found[manifest.run_id] = reports
+    return found
+
+
+@pytest.mark.phase(4)
+@pytest.mark.requires_full_data
+def test_phase4_compare_report_rebuildable(monkeypatch: pytest.MonkeyPatch) -> None:
+    comparisons = sft_comparisons()
+    assert COMPARISON in comparisons.get(SFT_PILOT_EVAL, []), comparisons
+    # Run a is the base model alone: no adapter, and run b's settings but those that change
+    # no score, as checkpoint_scores reads them, so a report measures the adapter alone.
+    scoreless = ("adapter", "allow_over_budget")
+    store = LocalRunStore(RUNS)
+    for run_id, reports in comparisons.items():
+        sft = store.get_manifest(run_id)
+        for report in reports:
+            base = store.get_manifest(report.stem.removeprefix(COMPARE_PREFIX))
+            assert (base.kind, base.adapter_ref, base.model_ref) == ("eval", None, sft.model_ref)
+            for name in (base.config.keys() | sft.config.keys()).difference(scoreless):
+                assert base.config.get(name) == sft.config.get(name), (report.name, name)
+    # forge report rebuild renders each again from both runs' stored scores and diffs it
+    # line for line with the committed file, the Generated time aside.
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(RUNS))
+    for run_id, reports in comparisons.items():
+        result = CliRunner().invoke(app, ["report", "rebuild", run_id])
+        assert result.exit_code == 0, result.output
+        for report in reports:
+            assert f"{report}: matches its rebuild\n" in result.output, result.output
