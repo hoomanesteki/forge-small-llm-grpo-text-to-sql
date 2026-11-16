@@ -38,8 +38,8 @@ A GPU job runs the code and reads the data from two private Kaggle datasets, bot
 1. `uv run forge kaggle publish-data`, once. It checks every file `spider.sha256` lists in
    `data/spider` (or `FORGE_DATA_DIR`), copies them and that file to `build/kaggle-data/`,
    and creates `<owner>/forge-spider` with Spider's CC BY-SA 4.0 attribution and citation in
-   its description. The copy is about 511 MB, so it is removed after the upload
-   (`--keep-build` keeps it). Once `kaggle datasets status` says the dataset is ready, it
+   its description. The copy is about 511 MB, so it is removed after the upload, a failed
+   one too (`--keep-build` keeps it). Once `kaggle datasets status` says the dataset is ready, it
    uploads nothing; while Kaggle is still processing it, it says so and exits 1, so run it
    again later; and when the last version failed or was deleted, it uploads the files again
    as a new version.
@@ -120,7 +120,9 @@ holds HEAD, so the next push from the same commit mounts it.
 The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the kernel
 `<owner>/forge-<run_id>`. A run id that was pushed before is refused. `--resume` pushes the
 run again from the same commit with the same options, as `<owner>/forge-<run_id>-<n>`,
-mounting the last attempt's kernel so the eval carries on from its stored files.
+mounting the last attempt's kernel so the eval carries on from its stored files. An attempt
+whose own kernel source Kaggle dropped failed to restore the run, so `kernels.json` marks it
+(`kernel_source_dropped`) and the next resume mounts the attempt before it.
 
 Dates are UTC everywhere Forge writes one: a run id's, a ledger row's, a
 `docs/dev-usage.md` row's, and the last day of `forge ledger summary`'s week. `forge ledger
@@ -149,7 +151,8 @@ the run's `sessions.json` gets the same span: the session the job began is stret
 the kernel's, or, when a resumed job fails before its run starts again, the kernel's
 session is added as failed. A resumed run's kernel holds the run from its restore stage,
 so one that fails before its job gets that failed session too. A new run's kernel that
-fails before its job holds no run and logs no row; add it with `forge ledger add`. The
+fails before its job holds no run and logs no row; add it with `forge ledger add`, for the
+hours and date the note quotes from its `status.json`. The
 upload stage first stretches the session up to the upload, so the Hub's copy misses only
 the upload's own minutes; `forge kaggle wait` logs the whole session first. A resumed run's
 output holds every session so far, so a session that was never waited for still gets its
@@ -173,8 +176,12 @@ manifest's config then records it.
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
 `forge kaggle run` writes its row, with the run id and the reason, as soon as Kaggle
-accepts the push, before it records the kernel or does anything else that could fail. So a
-kernel that may read dev always has its row, and a push Kaggle refuses spends nothing. A
+accepts the push, and records the kernel whether or not that write worked: if either step
+fails, the error names it and says not to push again, since the kernel runs. A push fails
+only when Kaggle refuses it ("Kernel push error") or the kaggle CLI exits with an error
+before it says the kernel was pushed; any other answer, one that names no version among
+them, is a kernel that runs, and its look is spent. So a kernel that may read dev has its
+row unless the error says it hasn't, and a push that fails spends nothing. A
 `--resume` carries on the same run, from the same commit with the same options, so it is
 the same look: it adds no row, and it goes even once the six are spent. In the kernel the
 preflight answers 5 val questions instead, so dev loads once, in the job, whose own row
@@ -186,7 +193,8 @@ would get the same default id.
 Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
 kernel, which only the web editor can do. Each is read without the line breaks and outer
 spaces huggingface_hub drops, and its value becomes `***` in every stage result in
-`status.json`, the error, the traceback and a failed run's `error.txt`. Without them the
+`status.json`, the error, the traceback, a failed run's `error.txt` and every log record,
+such as the run store's warning on stderr when it tries a Hub call again. Without them the
 job still runs, nothing is uploaded, and `forge kaggle output <run_id>` is how its results
 come back: the run's files go to `runs/<run_id>/`, and the log and the preflight to
 `runs/<run_id>/kernel/`.
@@ -226,8 +234,9 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 
 - A pull makes `runs/<run_id>/` the store's copy of the run, as `forge kaggle output` does with
   a kernel's: a file the copy lacks goes, such as an earlier attempt's `error.txt` or a report
-  made here (`forge report run` makes it again), and only `kernels.json` and `kernel/`, which
-  this machine alone keeps, stay. Other runs' folders are not touched.
+  made here (`forge report run` makes it again). `kernels.json` and `kernel/` stay as they
+  are unless the copy's `kernels.json` lists more pushes than this machine's, since `forge
+  runs push` uploads them and the store's may be older. Other runs' folders are not touched.
 - A pull, from either store, also writes a row in `docs/compute-ledger.md` for each of the
   run's sessions that has ended, once a session, as `forge kaggle wait` and `output` do:
   the UTC date the session started, the run's platform and GPU, the session's wall-clock
@@ -259,11 +268,14 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
   store whose copy holds a session the folder lacks: the command says so and uploads nothing.
 - A Hub call that fails on the network (a dropped or refused connection, a timeout, 408, 429
   or 5xx, downloads included) is tried again by one layer only. huggingface_hub 2.4 tries most
-  of its requests 5 more times itself, 1, 2, 4, 8 and 8 seconds apart; the two it sends once,
-  a commit and the repo lookup that starts a pull, the store tries 3 more times, 2, 4 and 8
-  seconds apart. No failure is retried by both, so a call that keeps failing waits at most
-  14 s between the store's tries and 23 s inside the client's, then says the store is
-  unavailable. A missing run is reported as missing, and a missing
+  such failures 5 more times itself, 1, 2, 4, 8 and 8 seconds apart; what it doesn't retry,
+  the store tries 3 more times, 2, 4 and 8 seconds apart: a commit, the repo lookup that
+  starts a pull, a connection dropped on a download, and a 5xx other than 500, 502, 503 and
+  504. No failure is retried by both, so a call that keeps failing waits at most 14 s between
+  the store's tries and 23 s inside the client's, then says the store is unavailable; when
+  the Hub's answer says how long to wait (`Retry-After`, or a 429's `RateLimit` header), the
+  client waits that long and 1 s more before each of its 5 tries, so a `Retry-After: 60`
+  costs 305 s. A missing run is reported as missing, and a missing
   repo, a refused token or a refused upload fails at once.
 - The token is `HF_TOKEN` from the environment or `.env`; without one, huggingface_hub uses a
   saved login. Nothing creates the repo: make it private by hand (Accounts, step 2), and
@@ -302,7 +314,10 @@ before the next one.
   the run's `sessions.json`, with its own start, end and status. A manifest's `gpu_hours`
   adds up its sessions' wall-clock hours on a platform with a GPU (`local-mps` too), and is
   none on `local-cpu`; each session gets its own ledger row. The time between two sessions
-  holds no GPU, so it counts in neither.
+  holds no GPU, so it counts in neither. A kernel's job writes its manifest before the
+  kernel ends, so there `gpu_hours`, which `forge runs show` prints, counts the job's own
+  span, while the session's row counts the whole kernel, setup, preflight and upload
+  included; the budget reads only the rows.
 
 ## Baselines
 

@@ -234,7 +234,8 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     names = [stage.name for stage in stages]
     small, large, reference = "Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B", "Qwen/Qwen3-8B"
     # The GRPO benches come first, so a vLLM stage that hangs can't take their time, and
-    # the reference is fetched only when vLLM's stack is next.
+    # the reference is fetched only when vLLM's stack is next; it loads in 4-bit right
+    # after vLLM's install, before the fp16 benches.
     assert names == [
         "env",
         "secrets",
@@ -251,10 +252,12 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
         f"grpo:trl-vllm:{large}",
         f"download:{reference}",
         "install:vllm",
+        f"vllm:{reference}:bnb",
         f"vllm:{small}",
         f"vllm:{large}",
-        f"vllm:{reference}:bnb",
     ]
+    # Those three may run in the minutes the budget keeps for them, and nothing else may.
+    assert [stage.name for stage in stages if stage.reserved] == names[-5:-2]
     by_name = {stage.name: stage for stage in stages}
     venv = tmp_path / "work" / "venvs" / "trl"
     bench = by_name[f"grpo:trl:{large}"]
@@ -281,11 +284,13 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     vllm = spike.parse_args([*by_name[f"vllm:{small}"].argv, "--out", "x.json"])
     assert (vllm.command, vllm.prompts, vllm.max_tokens) == ("vllm-bench", 100, 256)
     assert vllm.quantization is None
-    # The reference loads in 4-bit with bitsandbytes, last in vLLM's venv, on a few prompts.
+    # The reference loads in 4-bit with bitsandbytes in vLLM's venv, on a few prompts, under
+    # a cap of its own; the last fp16 bench deletes the venv.
     bnb = by_name[f"vllm:{reference}:bnb"]
     assert bnb.needs == ("install:vllm", f"download:{reference}")
-    assert bnb.removes == str(tmp_path / "work" / "venvs" / "vllm")
-    assert by_name[f"vllm:{large}"].removes is None
+    assert (bnb.kind, by_name[f"vllm:{small}"].kind) == ("bnb", "vllm")
+    assert bnb.removes is None
+    assert by_name[f"vllm:{large}"].removes == str(tmp_path / "work" / "venvs" / "vllm")
     assert bnb.env == spike.ONE_GPU
     child = spike.parse_args([*bnb.argv, "--out", "x.json"])
     assert (child.model, child.quantization) == (reference, "bitsandbytes")
@@ -297,6 +302,11 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
     no_bnb = spike.plan_stages(_run_args(tmp_path, "--bnb-models"), python="py")
     assert [s.name for s in no_bnb][-1] == f"vllm:{large}"
     assert f"download:{reference}" not in [s.name for s in no_bnb]
+    assert not any(stage.reserved for stage in no_bnb)
+    # A reference among the models is fetched with them, so only its install and load
+    # are kept for.
+    early = spike.plan_stages(_run_args(tmp_path, "--models", small, reference), python="py")
+    assert [s.name for s in early if s.reserved] == ["install:vllm", f"vllm:{reference}:bnb"]
 
 
 @pytest.mark.phase(3)
@@ -348,6 +358,7 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
         "args",
         "stages",
         "stage_caps_minutes",
+        "bnb_reserve_minutes",
     }
     assert (report["schema"], report["story"]) == (spike.REPORT_SCHEMA, "FG-301")
     assert report["finished_at"] is not None
@@ -365,8 +376,8 @@ def test_run_report_records_every_stage(tmp_path: Path) -> None:
         "grpo:unsloth:m/small": ("ok", None),
         "download:Qwen/Qwen3-8B": ("ok", None),
         "install:vllm": ("ok", None),
-        "vllm:m/small": ("timeout", "killed after 60 s"),
         "vllm:Qwen/Qwen3-8B:bnb": ("ok", None),
+        "vllm:m/small": ("timeout", "killed after 60 s"),
     }
     assert "grpo:trl:m/small" not in calls
     fields = {"name", "status", "started_at", "seconds", "timeout_seconds", "env", "result"}
@@ -398,7 +409,8 @@ def test_run_without_a_script_to_start_stops_with_the_reason(
 
 @pytest.mark.phase(3)
 def test_run_skips_stages_once_out_of_budget(tmp_path: Path) -> None:
-    args = _run_args(tmp_path, "--models", "m/small", "--budget-minutes", "1")
+    # No 4-bit reference, so no minutes are kept for one.
+    args = _run_args(tmp_path, "--models", "m/small", "--budget-minutes", "1", "--bnb-models")
     ticks: Iterator[int] = iter(range(0, 10_000, 25))  # every reading is 25 s later
     calls: list[str] = []
     report = spike.run(args, runner=_fake_runner({}, calls), clock=lambda: float(next(ticks)))
@@ -428,16 +440,63 @@ def test_a_hung_stage_costs_only_its_cap(tmp_path: Path) -> None:
     report = spike.run(args, runner=runner, clock=lambda: now[0])
     caps = spike.STAGE_CAPS_MINUTES
     assert report["stage_caps_minutes"] == caps
-    assert set(caps) == {stage.kind for stage in spike.plan_stages(args)}
+    kinds = {stage.name: stage.kind for stage in spike.plan_stages(args)}
+    assert set(caps) == set(kinds.values())
     # Each stage may run for its kind's cap, all well inside the budget.
     assert max(caps.values()) < args.budget_minutes
     for stage in report["stages"]:
-        cap = caps[stage["name"].split(":")[0]] * 60
+        cap = caps[kinds[stage["name"]]] * 60
         assert timeouts[stage["name"]] == stage["timeout_seconds"] == cap, stage["name"]
     # The hang cost its cap, not the time left, and every stage after it still ran.
     statuses = {s["name"]: s["status"] for s in report["stages"]}
     assert statuses.pop("grpo:trl:m/small") == "timeout"
     assert set(statuses.values()) == {"ok"}
+
+
+@pytest.mark.phase(3)
+def test_the_grpo_benches_leave_the_4bit_reference_its_minutes(tmp_path: Path) -> None:
+    args = _run_args(tmp_path, "--models", "m/small", "m/large")
+    now = [0.0]
+    timeouts: dict[str, float] = {}
+
+    def runner(stage: Any, result_file: Path, timeout: float) -> Any:
+        timeouts[stage.name] = timeout
+        if stage.kind == "grpo":
+            now[0] += timeout  # every GRPO bench runs until it is killed
+            return spike.Outcome("timeout", error=f"killed after {timeout:.0f} s")
+        now[0] += 60.0
+        return spike.Outcome("ok", result={})
+
+    report = spike.run(args, runner=runner, clock=lambda: now[0])
+
+    assert report["bnb_reserve_minutes"] == spike.BNB_RESERVE_MINUTES == 20
+    kept = "out of budget (80 min, the last 20 kept for the 4-bit reference)"
+    statuses = {s["name"]: (s["status"], s["error"]) for s in report["stages"]}
+    assert statuses == {
+        "env": ("ok", None),
+        "secrets": ("ok", None),
+        "download:m/small": ("ok", None),
+        "download:m/large": ("ok", None),
+        "install:trl": ("ok", None),
+        "grpo:trl:m/small": ("timeout", "killed after 1500 s"),
+        "grpo:trl:m/large": ("timeout", "killed after 1500 s"),
+        "install:unsloth": ("ok", None),
+        # Cut where the kept minutes start, 60 minutes in.
+        "grpo:unsloth:m/small": ("timeout", "killed after 240 s"),
+        "grpo:unsloth:m/large": ("skipped", kept),
+        "install:trl-vllm": ("skipped", kept),
+        "grpo:trl-vllm:m/small": ("skipped", "needs install:trl-vllm"),
+        "grpo:trl-vllm:m/large": ("skipped", "needs install:trl-vllm"),
+        # The answer FG-306 and FG-307 wait on still comes, under its own cap, and the
+        # fp16 benches take what is left.
+        "download:Qwen/Qwen3-8B": ("ok", None),
+        "install:vllm": ("ok", None),
+        "vllm:Qwen/Qwen3-8B:bnb": ("ok", None),
+        "vllm:m/small": ("ok", None),
+        "vllm:m/large": ("ok", None),
+    }
+    assert timeouts["vllm:Qwen/Qwen3-8B:bnb"] == spike.STAGE_CAPS_MINUTES["bnb"] * 60
+    assert timeouts["download:Qwen/Qwen3-8B"] == spike.STAGE_CAPS_MINUTES["download"] * 60
 
 
 @pytest.fixture
@@ -640,8 +699,8 @@ def test_env_stage_reports_off_kaggle_too(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # The venv's python, which the stand-in uv writes: it logs its arguments too, and its pip
-# puts a torch into the venv's own site-packages when FAKE_PIP_TORCH is set, as uv's
-# installer does whatever system site packages hold.
+# puts a torch into the venv's own site-packages when FAKE_PIP_TORCH is set, as uv's own
+# install does too, whatever system site packages hold.
 FAKE_VENV_PYTHON = """\
 #!{python}
 import os, sys
@@ -669,7 +728,7 @@ def fake_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         textwrap.dedent(
             f"""\
             #!{sys.executable}
-            import sys
+            import os, sys
             from pathlib import Path
             args = sys.argv[1:]
             with open({str(log)!r}, "a") as log:
@@ -684,6 +743,14 @@ def fake_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 print("uv 0.12.3")
             elif args[:2] == ["pip", "freeze"]:
                 print("trl==1.18.0")
+            elif args[:2] == ["pip", "install"] and os.environ.get("FAKE_PIP_TORCH"):
+                venv = Path(args[args.index("--python") + 1]).parents[1]
+                site = next(venv.glob("lib/python*/site-packages"))
+                info = site / "torch-2.9.0.dist-info"
+                info.mkdir()
+                info.joinpath("METADATA").write_text(
+                    "Metadata-Version: 2.1\\nName: torch\\nVersion: 2.9.0\\n"
+                )
             """
         )
     )
@@ -737,14 +804,16 @@ def test_install_stage_uses_uv_for_a_stack_with_its_own_torch(
 
 
 @pytest.mark.phase(3)
+@pytest.mark.parametrize("own_torch", ["unsloth", "trl-vllm"])
 def test_install_stage_refuses_a_torch_inside_a_venv_meant_to_reuse_the_images(
-    tmp_path: Path, fake_uv: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, fake_uv: Path, monkeypatch: pytest.MonkeyPatch, own_torch: str
 ) -> None:
     monkeypatch.setenv("FAKE_PIP_TORCH", "1")
     with pytest.raises(RuntimeError, match=r"torch 2\.14\.0 .*image's torch"):
         _install(tmp_path, "trl")
-    # A stack that brings its own torch may install one.
-    _, result = _install(tmp_path, "unsloth")
+    # A stack that brings its own torch keeps the one it installs.
+    venv, result = _install(tmp_path, own_torch)
+    assert spike._venv_packages(venv)["torch"] == "2.9.0"
     assert result["installer"] == "uv"
 
 

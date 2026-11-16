@@ -6,7 +6,9 @@ datasets mount, so these check the stages and what status.json says, not a GPU r
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import os
 import shutil
 import signal
@@ -349,6 +351,40 @@ def test_secrets_are_recorded_by_where_they_came_from_never_by_value(
     assert uploaded["ended_at"] <= status["ended_at"]
     assert TOKEN not in capsys.readouterr().out
     assert TOKEN not in (run / "status.json").read_text()
+
+
+@pytest.mark.phase(3)
+def test_log_records_are_redacted_whichever_handler_prints_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A library's own logger and handler, as huggingface_hub and transformers set up theirs.
+    printed = io.StringIO()
+    logger = logging.getLogger("tests.kernel-library")
+    handler = logging.StreamHandler(printed)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    monkeypatch.setattr(logger, "handlers", [handler])
+    monkeypatch.setattr(logger, "propagate", False)
+    secrets: list[str] = []
+    previous = script._redact_logs(secrets)
+    try:
+        # The secrets stage adds a value once the factory is in place.
+        secrets.append(TOKEN)
+        logger.warning("retrying %s: %s", "upload", f"Authorization: Bearer {TOKEN}")
+        try:
+            raise ConnectionError(f"reset, token {TOKEN}")
+        except ConnectionError:
+            logger.exception("upload failed")
+        # Arguments that don't fit the format, which a handler would print as they are.
+        logger.warning("%s and %s", TOKEN)
+    finally:
+        logging.setLogRecordFactory(previous)
+
+    text = printed.getvalue()
+    assert TOKEN not in text
+    assert "WARNING retrying upload: Authorization: Bearer ***\n" in text
+    assert "ERROR upload failed\nTraceback" in text
+    assert "ConnectionError: reset, token ***" in text
+    assert "WARNING %s and %s (not formatted: TypeError)" in text
 
 
 @pytest.mark.phase(3)

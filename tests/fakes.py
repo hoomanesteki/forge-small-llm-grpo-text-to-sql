@@ -202,19 +202,30 @@ class InlineSandbox:
 REPO_URL = "https://huggingface.co/api/models/owner/forge-runs"
 # The file listing, a request huggingface_hub retries itself before it raises.
 TREE_URL = f"{REPO_URL}/tree/main"
+# A file of the repo: a download sends a HEAD here for its metadata, then a GET.
+RESOLVE_URL = "https://huggingface.co/owner/forge-runs/resolve/main/runs/x/manifest.json"
 
 
 def hub_error(
-    status: int, kind: type[HfHubHTTPError] = HfHubHTTPError, *, url: str = REPO_URL
+    status: int,
+    kind: type[HfHubHTTPError] = HfHubHTTPError,
+    *,
+    url: str = REPO_URL,
+    method: str = "POST",
 ) -> HfHubHTTPError:
     """The error huggingface_hub raises when the Hub answers ``status`` to ``url``."""
-    request = httpx2.Request("POST", url)
+    request = httpx2.Request(method, url)
     return kind(f"{status} from the Hub", response=httpx2.Response(status, request=request))
 
 
-def connect_error(url: str) -> httpx2.ConnectError:
+def connect_error(url: str, method: str = "GET") -> httpx2.ConnectError:
     """The error huggingface_hub raises when the connection for ``url`` is refused."""
-    return httpx2.ConnectError("connection refused", request=httpx2.Request("GET", url))
+    return httpx2.ConnectError("connection refused", request=httpx2.Request(method, url))
+
+
+def dropped_error(url: str, method: str = "GET") -> httpx2.ReadError:
+    """The error httpx2 raises when the Hub drops the connection for ``url`` mid-answer."""
+    return httpx2.ReadError("connection reset by peer", request=httpx2.Request(method, url))
 
 
 def _unreachable(error: BaseException) -> bool:

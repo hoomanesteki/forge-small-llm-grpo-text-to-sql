@@ -93,7 +93,7 @@ class VllmBackend:
     def generate(self, prompts: Sequence[Prompt], params: GenParams) -> list[Generation]:
         check_params(params)
         if not prompts:
-            # vLLM would read an empty list as one conversation with no messages.
+            # Nothing to send, so no engine call for an empty batch.
             return []
         sampling = [
             self._sampling_params(**sampling_kwargs(params, prompt.example_id))

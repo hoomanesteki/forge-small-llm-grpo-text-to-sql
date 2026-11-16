@@ -282,6 +282,32 @@ def test_publish_data_never_uploads_over_a_version_being_processed(
 
 
 @pytest.mark.phase(3)
+@pytest.mark.parametrize("keep_build", [False, True])
+def test_a_failed_data_upload_leaves_no_bundle_behind(
+    repo: Path, spider_mini: Path, checksums: Path, keep_build: bool
+) -> None:
+    class TimesOut(FakeCli):
+        """Kaggle takes the data, then the CLI times out reading its answer."""
+
+        def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+            command = list(args)
+            if command[1:3] == ["datasets", "create"]:
+                self.commands.append(command)
+                self.exists.add("forge-owner/forge-spider")
+                return _done(command, 1, stderr="Read timed out.\n")
+            return super().__call__(command)
+
+    fake = TimesOut()
+
+    with pytest.raises(KaggleError, match="exited 1: Read timed out"):
+        publish_data(repo, OWNER, _client(fake), spider_mini, checksums, keep_build=keep_build)
+    assert (repo / DATA_BUNDLE).exists() is keep_build
+    # The rerun finds the dataset ready and builds nothing, so the copy had to go then.
+    assert publish_data(repo, OWNER, _client(fake), spider_mini, checksums) is None
+    assert (repo / DATA_BUNDLE).exists() is keep_build
+
+
+@pytest.mark.phase(3)
 def test_data_bundle_holds_the_verified_files_and_attribution(
     repo: Path, spider_mini: Path, checksums: Path
 ) -> None:

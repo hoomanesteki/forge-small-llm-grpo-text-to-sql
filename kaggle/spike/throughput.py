@@ -7,10 +7,14 @@ which question each stage answers:
 - env: Python, CUDA, torch, the GPUs, the image build, internet and disk.
 - secrets: whether Kaggle Secrets can be read in a pushed run. The report says only
   whether a read worked, never what it returned.
-- download:<model>: how long a model takes to fetch, and the commit fetched.
+- download:<model>: how long a model takes to fetch, and the commit fetched; the 4-bit
+  reference's only once the GRPO stacks are done.
 - install:<stack>: how long a candidate GPU stack takes to install into a venv of its own.
+- grpo:<stack>:<model>: seconds per GRPO step and peak GPU memory over 10 steps, for each
+  GRPO stack in turn.
+- vllm:<model>:bnb: whether vLLM loads the 4-bit reference with bitsandbytes, on a few
+  prompts, right after vLLM's install, in the minutes the budget keeps for it.
 - vllm:<model>: fp16 generation throughput with vLLM on 100 prompts.
-- grpo:<stack>:<model>: seconds per GRPO step and peak GPU memory over 10 steps.
 - limit-probe, pushed as its own CPU kernel: a heartbeat file rewritten until the session
   is killed, so the output of a timed-out session shows what survives the kill.
 
@@ -94,7 +98,13 @@ STAGE_CAPS_MINUTES = {
     "install": 20,
     "grpo": 25,
     "vllm": 15,
+    "bnb": 10,
 }
+# The last minutes of the budget, kept for the 4-bit reference's download, vLLM's install
+# and the bitsandbytes load: FG-306 and FG-307 wait on that answer, and the GRPO benches
+# before it could take the whole budget. About what those three take, guessed, as their
+# caps add up to more than half the budget.
+BNB_RESERVE_MINUTES = 20
 # Plan section 3.10: prompts are fitted to 1,536 tokens, LoRA covers every linear layer.
 MAX_PROMPT_TOKENS = 1536
 LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
@@ -242,11 +252,13 @@ class Stage:
     needs: tuple[str, ...] = ()  # stages that must have passed first
     removes: str | None = None  # a venv to delete once this stage is over
     env: tuple[tuple[str, str], ...] = ()  # set for the child over the session's own
+    reserved: bool = False  # may run in the minutes BNB_RESERVE_MINUTES keeps
 
     @property
     def kind(self) -> str:
-        """What the stage does, which sets its time cap: its name up to the first colon."""
-        return self.name.partition(":")[0]
+        """What the stage does, which sets its time cap: ``bnb`` for a 4-bit load, else
+        its name up to the first colon."""
+        return "bnb" if self.name.endswith(":bnb") else self.name.partition(":")[0]
 
 
 @dataclass(frozen=True)
@@ -293,7 +305,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--budget-minutes",
         type=float,
         default=80.0,
-        help="start no stage after this; push with -t a little longer so the report gets out",
+        help=(
+            "start no stage after this, nor any but the 4-bit reference's in its last "
+            f"{BNB_RESERVE_MINUTES}; push with -t a little longer so the report gets out"
+        ),
     )
 
     child = argparse.ArgumentParser(add_help=False)
@@ -354,7 +369,9 @@ def plan_stages(args: argparse.Namespace, python: str = sys.executable) -> list[
     """What ``run`` does, in order: probes, downloads, each GRPO stack, then vLLM's.
 
     The GRPO benches come first, since ADR-0006 rests on them, so a vLLM stage that hangs
-    can't take their time.
+    can't take their time. In vLLM's stack the 4-bit reference loads first, right after
+    the install, and its stages are ``reserved``: they may use the time the budget keeps
+    for them, which the GRPO benches can't.
     """
     work = Path(args.work_dir)
     stages = [
@@ -366,15 +383,19 @@ def plan_stages(args: argparse.Namespace, python: str = sys.executable) -> list[
         grpo = [(f"grpo:{stack}:{m}", m, _grpo_argv(stack, work, m, args)) for m in args.models]
         stages += _stack_stages(stack, work, python, grpo)
     if args.vllm:
-        vllm = [(f"vllm:{m}", m, _vllm_argv(m, args, args.prompts)) for m in args.models]
-        vllm += [
+        bnb = [
             (f"vllm:{m}:bnb", m, _vllm_argv(m, args, BNB_PROMPTS, "bitsandbytes"))
             for m in args.bnb_models
         ]
+        fp16 = [(f"vllm:{m}", m, _vllm_argv(m, args, args.prompts)) for m in args.models]
         # Fetched only now, so the reference's 16 GB don't hold up the GRPO benches.
         extra = [m for m in dict.fromkeys(args.bnb_models) if m not in args.models]
-        stages += [_download(model, python) for model in extra]
-        stages += _stack_stages("vllm", work, python, vllm)
+        vllm = [_download(model, python) for model in extra]
+        vllm += _stack_stages("vllm", work, python, bnb + fp16)
+        # The reference's download, the install and the bnb loads after it; no fp16 bench.
+        reserved = len(extra) + 1 + len(bnb) if bnb else 0
+        stages += [replace(stage, reserved=True) for stage in vllm[:reserved]]
+        stages += vllm[reserved:]
     return stages
 
 
@@ -456,6 +477,7 @@ def new_report(args: argparse.Namespace | None) -> dict[str, Any]:
         },
         "args": None if args is None else {k: v for k, v in vars(args).items() if k != "command"},
         "stage_caps_minutes": dict(STAGE_CAPS_MINUTES),
+        "bnb_reserve_minutes": BNB_RESERVE_MINUTES,
         "stages": [],
     }
 
@@ -503,17 +525,23 @@ def run(
     # Children share one model cache, kept out of the output folder.
     runner = runner or functools.partial(run_child, script=script, hf_home=work / "hf")
     deadline = clock() + args.budget_minutes * 60
+    stages = plan_stages(args)
+    # Kept back from every stage until the first that may use it.
+    kept = BNB_RESERVE_MINUTES * 60 if any(stage.reserved for stage in stages) else 0
     passed: set[str] = set()
-    for stage in plan_stages(args):
+    for stage in stages:
         entry: dict[str, Any] = {"name": stage.name, "status": "skipped", "started_at": _now()}
         entry.update(seconds=None, timeout_seconds=None, env=dict(stage.env))
         entry.update(result=None, error=None)
+        if stage.reserved:
+            kept = 0
         missing = [name for name in stage.needs if name not in passed]
-        left = deadline - clock()
+        left = deadline - kept - clock()
         if missing:
             entry["error"] = "needs " + ", ".join(missing)
         elif left <= 0:
-            entry["error"] = f"out of budget ({args.budget_minutes:g} min)"
+            why = f", the last {BNB_RESERVE_MINUTES} kept for the 4-bit reference" if kept else ""
+            entry["error"] = f"out of budget ({args.budget_minutes:g} min{why})"
         else:
             timeout = min(left, STAGE_CAPS_MINUTES[stage.kind] * 60)
             entry["timeout_seconds"] = timeout

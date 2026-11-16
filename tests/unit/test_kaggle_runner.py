@@ -415,6 +415,47 @@ def test_resume_mounts_the_last_attempts_kernel(
 
 
 @pytest.mark.phase(3)
+def test_a_resume_skips_an_attempt_whose_kernel_source_kaggle_dropped(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    assert _eval(repo, "--yes", "--run-id", "r1").exit_code == 0
+    # Kaggle starts the second attempt without the first one's output, so its restore
+    # fails and its own output holds no run.
+    lost = (
+        "The following are not valid kernel sources and could not be added to the kernel: "
+        f"['{OWNER}/forge-r1/1']"
+    )
+    fake.push_output = f"{lost}\n{_pushed(f'{OWNER}/forge-r1-2')}"
+    second = _eval(repo, "--yes", "--run-id", "r1", "--resume")
+    assert second.exit_code == 0, second.output
+    assert (
+        f"warning: this attempt can't restore the run, so a --resume mounts {OWNER}/forge-r1/1 "
+        "again" in second.stderr
+    )
+    fake.push_output = None
+
+    third = _eval(repo, "--yes", "--run-id", "r1", "--resume")
+    fourth = _eval(repo, "--yes", "--run-id", "r1", "--resume")
+
+    assert third.exit_code == fourth.exit_code == 0, third.output + fourth.output
+    metas = [json.loads(pushed["kernel-metadata.json"]) for pushed in fake.pushed]
+    assert [(m["id"], m["kernel_sources"]) for m in metas] == [
+        (f"{OWNER}/forge-r1", []),
+        (f"{OWNER}/forge-r1-2", [f"{OWNER}/forge-r1/1"]),
+        # The attempt numbers go on; the run is carried on from the last attempt holding it.
+        (f"{OWNER}/forge-r1-3", [f"{OWNER}/forge-r1/1"]),
+        (f"{OWNER}/forge-r1-4", [f"{OWNER}/forge-r1-3/1"]),
+    ]
+    kernels = _record(repo, "r1")["kernels"]
+    assert [k.get("kernel_source_dropped", False) for k in kernels] == [False, True, False, False]
+    # The kernel to follow is still the latest pushed, which is the one running.
+    status = CliRunner().invoke(cli.app, ["kaggle", "status", "r1"])
+    assert status.stdout.startswith(f"{OWNER}/forge-r1-4/1: COMPLETE")
+
+
+@pytest.mark.phase(3)
 def test_jobs_a_later_story_builds_and_bad_options_are_refused_before_any_upload(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -548,6 +589,67 @@ def test_a_dev_look_is_logged_once_kaggle_accepts_the_push(
 
 
 @pytest.mark.phase(3)
+def test_a_push_kaggle_started_logs_its_look_and_is_recorded_whatever_fails(
+    repo: Path, dev_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    fake = _use(FakeKaggle(head), monkeypatch)
+    dev = repo.parent / "dev.yaml"
+    dev.write_text("model: gold\nbackend: fake\nsplit: dev\nops: {est_gpu_hours: 0.5}\n")
+
+    def push(run_id: str) -> Any:
+        args = ("--job", "eval", "--config", str(dev), "--reason", "baseline", "--yes")
+        return _run(*args, "--run-id", run_id)
+
+    # kaggle 2.2.5's line for a push the server gave no number: the kernel runs, and its
+    # latest version is this push.
+    fake.push_output = (
+        "Kernel version successfully pushed.  Please check progress at "
+        f"https://www.kaggle.com/code/{OWNER}/forge-v1\n"
+    )
+    versionless = push("v1")
+    assert versionless.exit_code == 0, versionless.output
+    assert "dev look 1 of 6 logged in docs/dev-usage.md" in versionless.stdout
+    assert f"run v1: kernel {OWNER}/forge-v1, its latest version" in versionless.stdout
+    assert _record(repo, "v1")["kernels"][0]["version"] is None
+    status = CliRunner().invoke(cli.app, ["kaggle", "status", "v1"])
+    assert status.exit_code == 0 and status.stdout.startswith(f"{OWNER}/forge-v1: COMPLETE")
+    fake.push_output = None
+
+    # The dev-usage write fails: the push is recorded all the same, so status, logs, wait
+    # and --resume find the kernel, and the error says what is missing.
+    monkeypatch.setenv("FORGE_DEV_USAGE", str(repo.parent))
+    unlogged = push("v2")
+    assert unlogged.exit_code == 1, unlogged.output
+    assert "its dev look is not logged" in unlogged.stderr
+    assert f"Kaggle runs {OWNER}/forge-v2 version 1 all the same, so don't push it again" in (
+        unlogged.stderr
+    )
+    assert _record(repo, "v2")["kernels"][0]["kernel"] == f"{OWNER}/forge-v2"
+    monkeypatch.setenv("FORGE_DEV_USAGE", str(dev_log))
+
+    # Another push took the last look while this one went up: Kaggle runs it anyway.
+    def taken(run_id: str, reason: str) -> int:
+        raise kaggle_job.DevBudgetExceeded("dev split already used 6 of 6 times")
+
+    monkeypatch.setattr(kaggle_job, "log_dev_use", taken)
+    raced = push("v3")
+    assert raced.exit_code == 1, raced.output
+    assert "its dev look is not logged (dev split already used 6 of 6 times)" in raced.stderr
+    assert _record(repo, "v3")["kernels"][0]["kernel"] == f"{OWNER}/forge-v3"
+
+    # Both steps fail, and the error names both.
+    blocked = repo.parent / "runs-is-a-file"
+    blocked.write_text("")
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(blocked))
+    neither = push("v4")
+    assert neither.exit_code == 1, neither.output
+    assert "its dev look is not logged" in neither.stderr
+    assert f"the push is not in {blocked / 'v4' / 'kernels.json'}" in neither.stderr
+    assert len(fake.ran("kernels", "push")) == 4
+
+
+@pytest.mark.phase(3)
 def test_bad_kernel_slugs_and_notebook_resumes_are_refused_before_any_upload(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -672,6 +774,22 @@ def test_wait_ends_on_the_kernel_state_and_the_jobs_own_status(
     assert result.exit_code == 1
     assert "job failed at stage data; upload: not reached" in result.stdout
     assert "error: JobError: no data" in result.stderr
+    # It held its GPU all the same, for the span its status.json gives, which the note
+    # quotes for forge ledger add.
+    failed.update(started_at="2026-11-16T23:40:00+00:00", ended_at="2026-11-17T00:10:00+00:00")
+    fake.outputs = {"runs/run-1/status.json": json.dumps(failed)}
+    result = CliRunner().invoke(cli.app, ["kaggle", "wait", "run-1"])
+    assert result.exit_code == 1
+    assert (
+        "ledger: no row, the output has no manifest; use forge ledger add: the kernel held its "
+        "GPU 0.50 h, from 2026-11-16T23:40:00+00:00 to 2026-11-17T00:10:00+00:00, so --hours "
+        "0.50 --on 2026-11-16\n" in result.stdout
+    )
+    assert read_rows() == []
+    failed["ended_at"] = "not a time"
+    fake.outputs = {"runs/run-1/status.json": json.dumps(failed)}
+    result = CliRunner().invoke(cli.app, ["kaggle", "wait", "run-1"])
+    assert "its status.json gives no span it can count" in result.stdout
 
     fake.states = ["ERROR"]
     result = CliRunner().invoke(cli.app, ["kaggle", "wait", "run-1"])
@@ -860,9 +978,52 @@ def test_client_reads_what_the_kaggle_cli_prints() -> None:
     pushed = answer(f"{dropped}\n{_pushed('o/forge-x')}").push_kernel(
         Path("k"), timeout_s=60, gpu=True
     )
-    assert (pushed.version, pushed.dropped) == (1, (dropped,))
+    assert (pushed.version, pushed.dropped, pushed.kernel_source_dropped) == (1, (dropped,), True)
+    datasets = dropped.replace("kernel sources", "dataset sources")
+    pushed = answer(f"{datasets}\n{_pushed('o/forge-x')}").push_kernel(
+        Path("k"), timeout_s=60, gpu=True
+    )
+    assert (pushed.dropped, pushed.kernel_source_dropped) == ((datasets,), False)
     with pytest.raises(KaggleError, match="printed"):
         answer("ready").dataset_version("o/forge-code")
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    ("stdout", "code", "version"),
+    [
+        # kaggle 2.2.5's line when the server sends no version number.
+        ("Kernel version successfully pushed.  Please check progress at {url}\n", 0, None),
+        # Another wording, with no push error: Kaggle has the kernel.
+        ("Kernel version 3 pushed. Please check progress at {url}\n", 0, 3),
+        # The CLI failed after it said the push went through.
+        ("Kernel version 2 successfully pushed.  Please check progress at {url}\n", 1, 2),
+    ],
+)
+def test_a_push_kaggle_started_is_never_refused(
+    stdout: str, code: int, version: int | None
+) -> None:
+    output = stdout.format(url="https://www.kaggle.com/code/o/forge-x")
+    client = KaggleClient(run=lambda args: _done(list(args), code, output), executable="kaggle")
+
+    pushed = client.push_kernel(Path("k"), timeout_s=60, gpu=True)
+
+    assert (pushed.kernel, pushed.version, pushed.output) == ("o/forge-x", version, output.strip())
+
+
+@pytest.mark.phase(3)
+def test_a_push_kaggle_never_started_says_how_it_failed() -> None:
+    def answer(stdout: str, code: int, stderr: str = "") -> KaggleClient:
+        return KaggleClient(
+            run=lambda args: _done(list(args), code, stdout, stderr), executable="kaggle"
+        )
+
+    with pytest.raises(KaggleError, match="was refused: Kernel push error: bad title"):
+        answer("Kernel push error: bad title\n", 0).push_kernel(Path("k"), timeout_s=60, gpu=True)
+    # A CLI that fails before Kaggle answers started nothing, and says how it failed.
+    with pytest.raises(KaggleError, match="exited 1: Connection reset") as raised:
+        answer("", 1, "Connection reset\n").push_kernel(Path("k"), timeout_s=60, gpu=True)
+    assert "refused" not in str(raised.value)
 
 
 def _baked_argv(source: str) -> list[str]:

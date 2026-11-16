@@ -9,22 +9,26 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import subprocess
 import sys
 import types
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
+import httpx2
 import pytest
+from huggingface_hub.errors import HfHubHTTPError
 
 from forge.core.types import RunManifest, Score
 from forge.data.splits import load_val
 from forge.eval import runner
 from forge.eval.config import EvalConfig
 from forge.ops.dev_usage import read_uses
+from forge.ops.hub import HubRunStore
 from forge.ops.sessions import read_sessions
-from tests.fakes import FakeHub, FakeVllm, gold_reply
+from tests.fakes import REPO_URL, FakeHub, FakeVllm, gold_reply
 from tests.kernel import SHA, argv, build_inputs, kernel_folder, mount_output
 from tests.spike import entry
 
@@ -186,12 +190,30 @@ def test_entry_loads_dev_once_in_a_dev_job(
     assert not dev_log.exists()
 
 
+def _commit_failed(text: str) -> HfHubHTTPError:
+    """The Hub answering 503 to a commit, which huggingface_hub sends once."""
+    request = httpx2.Request("POST", f"{REPO_URL}/commit/main")
+    return HfHubHTTPError(text, response=httpx2.Response(503, request=request))
+
+
 @pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    ("make_error", "retries"),
+    [
+        # Refused at once, so only status.json quotes it.
+        (ValueError, 0),
+        # Network failures the run store tries again, warning on stderr each time.
+        (ConnectionError, 3),
+        (_commit_failed, 3),
+    ],
+)
 def test_nothing_the_kernel_writes_or_prints_holds_a_secret(
     tmp_path: Path,
     spider_mini: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    make_error: Callable[[str], Exception],
+    retries: int,
 ) -> None:
     kernel_env = kernel_folder(tmp_path, monkeypatch)
     build_inputs(kernel_env, spider_mini)
@@ -207,26 +229,40 @@ def test_nothing_the_kernel_writes_or_prints_holds_a_secret(
         sys.modules, "kaggle_secrets", types.SimpleNamespace(UserSecretsClient=UserSecretsClient)
     )
     hub = FakeHub()
-    hub.fail["upload_folder"] = [ValueError(f"401 Unauthorized, Authorization: Bearer {TOKEN}")]
+    error = make_error(f"401 Unauthorized, Authorization: Bearer {TOKEN}")
+    hub.fail["upload_folder"] = [error] * (retries + 1)
     monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    waits: list[float] = []
+    monkeypatch.setitem(HubRunStore.__init__.__kwdefaults__, "sleep", waits.append)
+    # As in a kernel, where nothing sets up logging, Python's last resort prints forge's
+    # warnings on stderr, which Kaggle keeps as the kernel's log.
+    monkeypatch.setattr(logging.getLogger("forge"), "propagate", False)
     options = {"model": "gold", "backend": "fake", "limit": 3}
+    factory = logging.getLogRecordFactory()
 
     assert script.main(argv(kernel_env, "--no-preflight", options=options), run=lambda c: None) == 0
 
     run_dir = kernel_env / "working" / "runs" / "run-1"
     status = json.loads((run_dir / "status.json").read_text())
     assert (status["status"], status["stage"]) == ("finished", "upload")
-    assert status["stages"]["upload"]["result"] == (
-        "failed: ValueError: 401 Unauthorized, Authorization: Bearer ***"
+    assert status["stages"]["upload"]["result"].startswith("failed: ")
+    assert status["stages"]["upload"]["result"].endswith(
+        f"{type(error).__name__}: 401 Unauthorized, Authorization: Bearer ***"
     )
     assert hub.tokens == [TOKEN]
+    assert waits == [2.0, 4.0, 8.0][:retries]
     manifest = RunManifest.model_validate_json((run_dir / "manifest.json").read_text())
     assert manifest.status == "finished"
     printed = capsys.readouterr()
     assert TOKEN not in printed.out + printed.err
+    warned = [line for line in printed.err.splitlines() if "trying again in" in line]
+    assert len(warned) == retries
+    assert all(line.endswith(" s") and "Bearer ***" in line for line in warned)
     files = [path for path in (kernel_env / "working").rglob("*") if path.is_file()]
     assert run_dir / "manifest.json" in files and run_dir / "status.json" in files
     assert [path for path in files if TOKEN.encode() in path.read_bytes()] == []
+    # The kernel's own records only: the factory it replaced is back.
+    assert logging.getLogRecordFactory() is factory
 
 
 @pytest.mark.phase(3)
