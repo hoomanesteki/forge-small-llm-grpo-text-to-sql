@@ -1480,6 +1480,10 @@ def train_sft(
     typer.echo(f"run {manifest.run_id}: {run.root}")
     typer.echo(f"sft data {run.sft_data}: {sft_data['rows']} rows, hash {sft_data['hash']}")
     typer.echo(
+        f"trained on {sft_data['trained']} rows; {sft_data['over_max_length']} were over "
+        f"max_length {manifest.config['sft']['max_length']} and left out"
+    )
+    typer.echo(
         f"platform {manifest.platform}, backend {trainer['backend']} on {trainer['device']} "
         f"in {trainer['dtype']}"
     )

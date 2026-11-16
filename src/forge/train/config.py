@@ -22,6 +22,8 @@ any model does:
   ``gradient_accumulation_steps``, so every prompt's group fits in one batch whole.
 - ``max_prompt_length`` is Forge's own prompt filter (``forge.train.backends``): TRL 1.18
   has no such setting, so it is never passed to TRL.
+- An SFT row longer than ``max_length`` is left out rather than cut, and ``subset_rows``
+  trains on a fixed subset of the rest (``forge.train.sft``); neither goes to TRL.
 - ``data.split`` is ``train``: training never reads val or dev (ADR-0004).
 - Unsloth and 4-bit loading need CUDA, so a run on the CPU or MPS asks for neither.
 
@@ -140,8 +142,14 @@ class SftConfig(_Section):
     warmup_ratio: Fraction = 0.03
     per_device_train_batch_size: Count = 4
     gradient_accumulation_steps: Count = 4
-    max_length: Count = 2048  # prompt and reply, in tokens
+    max_length: Count = 2048  # prompt and reply, in tokens; a longer row is left out
     logging_steps: Count = 10
+    # TRL's default, set here so the manifest says it: the backward pass recomputes each
+    # layer's activations rather than keep them, which long rows need on a laptop.
+    gradient_checkpointing: StrictBool = True
+    # Train on this many of the rows that fit, a subset forge.train.sft draws by hash,
+    # rather than on all of them; for a run with less time than an epoch takes.
+    subset_rows: Count | None = None
 
 
 class GrpoConfig(_Section):

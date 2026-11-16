@@ -3,6 +3,7 @@ manifest, and what it refuses before any model loads. The smoke test trains for 
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -174,7 +175,12 @@ def test_sft_run_writes_its_adapter_and_manifest(spider_mini: Path, tmp_path: Pa
     meta = read_meta(run.sft_data)
     assert run.sft_data == tmp_path / "sft" / meta.hash
     assert (meta.prompt_version, meta.tokenizer) == ("p1", MODEL)
-    assert manifest.config["sft_data"] == {"hash": meta.hash, "rows": meta.counts.rows}
+    assert manifest.config["sft_data"] == {
+        "hash": meta.hash,
+        "rows": meta.counts.rows,
+        "over_max_length": 0,
+        "trained": meta.counts.rows,
+    }
     assert manifest.data_manifest_hash == data_manifest_hash(spider_mini)
     # The config hash covers what can change the adapter, the trainer's precision among it,
     # and not the ops section.
@@ -201,6 +207,83 @@ def test_sft_run_writes_its_adapter_and_manifest(spider_mini: Path, tmp_path: Pa
     assert again.sft_data == run.sft_data
     assert again.manifest.config_hash == manifest.config_hash
     assert [p.name for p in (tmp_path / "sft").iterdir()] == [meta.hash]
+
+
+def _lengths(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
+    return {row["example_id"]: sft.row_tokens(WordTokenizer(), row) for row in rows}
+
+
+@pytest.mark.phase(4)
+def test_rows_over_max_length_are_left_out_not_cut(spider_mini: Path, tmp_path: Path) -> None:
+    everything = FakeBackend()
+    whole = _train(tmp_path, everything, run_id="2026-11-15-tiny-sft-all1234")
+    lengths = _lengths(everything.rows)
+    # A limit some rows pass, one of them by exactly its length.
+    limit = sorted(lengths.values())[len(lengths) // 2]
+    over = sorted(example_id for example_id, n in lengths.items() if n > limit)
+    assert over and limit in lengths.values()
+
+    backend = FakeBackend()
+    run = _train(tmp_path, backend, _config(sft={"max_steps": 3, "max_length": limit}))
+
+    # The rows that fit reach the trainer as they were saved, none of them shortened, and
+    # the manifest counts the rest.
+    fitting = [row for row in everything.rows if lengths[row["example_id"]] <= limit]
+    assert backend.rows == fitting
+    assert run.manifest.config["sft_data"] == {
+        **whole.manifest.config["sft_data"],
+        "over_max_length": len(over),
+        "trained": len(fitting),
+    }
+    # Counted as TRL's SFTTrainer encodes a row: prompt and reply through the chat template.
+    row = everything.rows[0]
+    tokenizer = WordTokenizer()
+    assert sft.row_tokens(tokenizer, row) == len(
+        tokenizer.apply_chat_template(row["prompt"] + row["completion"])["input_ids"]
+    )
+
+    shortest = min(lengths.values())
+    with pytest.raises(ValueError, match=f"all {len(lengths)} SFT rows are over max_length"):
+        _train(
+            tmp_path,
+            FakeBackend(),
+            _config(sft={"max_length": shortest - 1}),
+            run_id="2026-11-15-tiny-sft-none123",
+        )
+
+
+@pytest.mark.phase(4)
+def test_subset_is_drawn_by_hash_and_counted(spider_mini: Path, tmp_path: Path) -> None:
+    everything = FakeBackend()
+    _train(tmp_path, everything, run_id="2026-11-15-tiny-sft-all1234")
+    ids = [row["example_id"] for row in everything.rows]
+    size = len(ids) // 3
+
+    backend = FakeBackend()
+    run = _train(tmp_path, backend, _config(sft={"max_steps": 3, "subset_rows": size}))
+
+    # The ids that hash lowest with the run's seed, 7, kept in the saved order.
+    def rank(example_id: str) -> str:
+        return hashlib.sha256(f"7:{example_id}".encode()).hexdigest()
+
+    drawn = set(sorted(ids, key=rank)[:size])
+    assert backend.rows == [row for row in everything.rows if row["example_id"] in drawn]
+    assert run.manifest.config["sft_data"]["trained"] == size
+    assert run.manifest.config["sft"]["subset_rows"] == size
+    # Another seed draws other rows. A row's draw doesn't depend on the others: without a
+    # row the subset left out, the same rows are drawn.
+    assert sft.subset(ids, size, 8) != sft.subset(ids, size, 7)
+    undrawn = next(example_id for example_id in ids if example_id not in drawn)
+    rest = [example_id for example_id in ids if example_id != undrawn]
+    assert {rest[position] for position in sft.subset(rest, size, 7)} == drawn
+
+    with pytest.raises(ValueError, match=f"subset_rows {len(ids) + 1} is more than the {len(ids)}"):
+        _train(
+            tmp_path,
+            FakeBackend(),
+            _config(sft={"subset_rows": len(ids) + 1}),
+            run_id="2026-11-15-tiny-sft-big1234",
+        )
 
 
 @pytest.mark.phase(4)
@@ -310,6 +393,7 @@ def test_train_sft_command(
     assert done.stdout.splitlines() == [
         f"run {RUN}: {root}",
         f"sft data {tmp_path / 'sft' / meta.hash}: {meta.counts.rows} rows, hash {meta.hash}",
+        f"trained on {meta.counts.rows} rows; 0 were over max_length 2048 and left out",
         "platform local-cpu, backend fake on cpu in float32",
         f"adapter {root / 'checkpoints' / 'final'}",
     ]
