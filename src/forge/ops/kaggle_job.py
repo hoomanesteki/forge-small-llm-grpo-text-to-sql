@@ -64,9 +64,11 @@ from forge.eval.config import (
 from forge.eval.run_files import MANIFEST_FILE
 from forge.ops.clock import utc_today
 from forge.ops.dev_usage import MAX_DEV_USES, count_dev_uses, log_dev_use, read_uses
+from forge.ops.hub import KERNEL_DIR, KERNELS_FILE, replace_run
 from forge.ops.kaggle import (
     CODE_SLUG,
     DATA_SLUG,
+    DATASET_BROKEN,
     GIT_SHA_FILE,
     KaggleClient,
     KaggleError,
@@ -90,13 +92,9 @@ SPIKE = Path("kaggle") / "spike" / "throughput.py"
 SPIKE_SLUG = "forge-throughput-spike"
 SPIKE_TITLE = "Forge throughput spike"
 KERNEL_BUILD = Path("build") / "kaggle-kernel"
-KERNELS_FILE = "kernels.json"
 STATUS_FILE = "status.json"  # what kaggle/entry.py writes in the run's folder
 SESSION_HOURS = 12.0
 OVERRUN = 1.5
-# kagglesdk's DatabundleVersionStatus names, lowercased as the CLI prints them: every
-# other one is a step on the way to ready.
-DATASET_BROKEN = frozenset({"failed", "deleted"})
 DATASET_POLL_S = 15.0
 # The paths a Colab runtime gives the job in place of /kaggle/...
 COLAB_DIRS = ["--input-dir", "/content/input", "--work-dir", "/content/working"]
@@ -628,22 +626,27 @@ def read_status(run_dir: Path) -> dict[str, Any]:
 
 def fetch_output(client: KaggleClient, kernel: str, run_id: str, runs_root: Path) -> Path:
     """Download the kernel's output: the run's files into ``runs/<run_id>/``, and the rest
-    (its log, the preflight run, a spike's report) into ``runs/<run_id>/kernel/``."""
+    (its log, the preflight run, a spike's report) into ``runs/<run_id>/kernel/``.
+
+    The run's folder then holds the kernel's copy of the run and no file an earlier copy
+    left (``forge.ops.hub.replace_run``); output that holds no run leaves it as it was.
+    """
     run_dir = runs_root / run_id
-    staging = run_dir / "kernel"
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True)
-    client.kernel_output(kernel, staging)
-    produced = staging / "runs" / run_id
-    if produced.is_dir():
-        for item in produced.iterdir():
-            target = run_dir / item.name
-            if target.is_dir():
-                shutil.rmtree(target)
-            elif target.exists():
-                target.unlink()
-            shutil.move(item, target)
-        shutil.rmtree(staging / "runs")
+    runs_root.mkdir(parents=True, exist_ok=True)
+    # Staged beside the run, so a download that fails changes nothing in it.
+    with tempfile.TemporaryDirectory(prefix=".output-", dir=runs_root) as folder:
+        staging = Path(folder)
+        client.kernel_output(kernel, staging)
+        produced = staging / "runs" / run_id
+        if produced.is_dir():
+            replace_run(produced, run_dir, move=True)
+            shutil.rmtree(staging / "runs")
+        rest = run_dir / KERNEL_DIR
+        if rest.exists():
+            shutil.rmtree(rest)
+        rest.mkdir(parents=True)
+        for item in staging.iterdir():
+            shutil.move(item, rest / item.name)
     return run_dir
 
 

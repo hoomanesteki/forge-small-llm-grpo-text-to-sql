@@ -38,7 +38,11 @@ A GPU job runs the code and reads the data from two private Kaggle datasets, bot
 1. `uv run forge kaggle publish-data`, once. It checks every file `spider.sha256` lists in
    `data/spider` (or `FORGE_DATA_DIR`), copies them and that file to `build/kaggle-data/`,
    and creates `<owner>/forge-spider` with Spider's CC BY-SA 4.0 attribution and citation in
-   its description. Once the dataset exists, it uploads nothing.
+   its description. The copy is about 511 MB, so it is removed after the upload
+   (`--keep-build` keeps it). Once `kaggle datasets status` says the dataset is ready, it
+   uploads nothing; while Kaggle is still processing it, it says so and exits 1, so run it
+   again later; and when the last version failed or was deleted, it uploads the files again
+   as a new version.
 2. `uv run forge kaggle publish-code`, on a clean tree, for each commit a job runs. It builds
    the wheel into `build/kaggle-code/` with `kaggle/requirements-gpu.txt` and `GIT_SHA`, then
    uploads it as a new version of `<owner>/forge-code` noted with the SHA, creating the
@@ -217,8 +221,10 @@ uv run forge runs pull <run_id> --store kaggle  # the same as forge kaggle outpu
 uv run forge runs push <run_id>                 # make the store's copy runs/<run_id>/
 ```
 
-- A pull replaces each top-level file or folder of the run that the store holds and keeps the
-  rest, such as `kernels.json`, as `forge kaggle output` does.
+- A pull makes `runs/<run_id>/` the store's copy of the run, as `forge kaggle output` does with
+  a kernel's: a file the copy lacks goes, such as an earlier attempt's `error.txt` or a report
+  made here (`forge report run` makes it again), and only `kernels.json` and `kernel/`, which
+  this machine alone keeps, stay. Other runs' folders are not touched.
 - A pull, from either store, also writes a row in `docs/compute-ledger.md` for each of the
   run's sessions that has ended, once a session, as `forge kaggle wait` and `output` do:
   the UTC date the session started, the run's platform and GPU, the session's wall-clock
@@ -234,16 +240,28 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 - Invariant I7 (`tests/integration/test_invariants.py`) checks that every session of every
   `kaggle`, `colab` or `modal` run under `docs/runs/` and `runs/` has a row, that a run's
   rows name its platform, and that the ledger's cash stays within $50.
-- `forge eval run --store hub` fetches the run from the store when `runs/<run_id>/` has no
-  manifest, so a run another machine started resumes here, and puts the folder in the store
-  when the run ends, finished or failed. If that upload fails after the run finished, the
-  command exits 1 and says so; `forge runs push <run_id>` tries again.
+- `forge eval run --store hub` first compares `runs/<run_id>/` with the store's copy, and fetches
+  the store's when it is newer or the folder has none, so a run another machine carried on
+  resumes from where that machine left it, and a finished run is never run again. It puts the
+  folder in the store when the run ends, finished or failed. If that upload fails after the run
+  finished, the command exits 1 and says so; `forge runs push <run_id>` tries again.
+- Which copy is newer comes from the run's `sessions.json`, one session an attempt
+  (`forge.ops.run_copies`): a copy whose sessions begin with all of the other's is the newer.
+  When neither's do, two machines carried the run on from one point and each holds work the
+  other lacks, so `forge eval run` refuses to resume it and no upload replaces either. Keep the
+  store's with `forge runs pull <run_id>`, or evaluate again under a new `--run-id`.
 - The end of an eval run and a push replace the store's copy: files it has that the folder lacks
   are deleted, such as the `error.txt` of an attempt that failed. The kernel's upload stage only
-  adds, since a kernel that failed early may hold part of a run.
-- A Hub call that fails on the network (a dropped connection, a timeout, 408, 429 or 5xx, a
-  failed upload or Xet transfer) is tried 3 more times, 2, 4 and 8 seconds apart. A missing
-  repo or a refused token fails at once.
+  adds, since a kernel that failed early may hold part of a run. None of them uploads over a
+  store whose copy holds a session the folder lacks: the command says so and uploads nothing.
+- A Hub call that fails on the network (a dropped or refused connection, a timeout, 408, 429
+  or 5xx, downloads included) is tried again by one layer only. huggingface_hub 2.4 tries most
+  of its requests 5 more times itself, 1, 2, 4, 8 and 8 seconds apart; the two it sends once,
+  a commit and the repo lookup that starts a pull, the store tries 3 more times, 2, 4 and 8
+  seconds apart. No failure is retried by both, so a call that keeps failing waits at most
+  14 s between the store's tries and 23 s inside the client's, then says the store is
+  unavailable. A missing run is reported as missing, and a missing
+  repo, a refused token or a refused upload fails at once.
 - The token is `HF_TOKEN` from the environment or `.env`; without one, huggingface_hub uses a
   saved login. Nothing creates the repo: make it private by hand (Accounts, step 2), and
   `forge doctor` checks it.

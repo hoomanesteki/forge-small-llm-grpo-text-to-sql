@@ -27,9 +27,10 @@ A run evaluates one model on one split:
    database's columns, which are read in process like gold.
 9. Each batch's first tries, generations and scores are stored before the next batch
    starts.
-10. With a run store (``--store hub``), an earlier attempt's files come from it when
-    this machine has none, and the run's folder goes to it when the run ends, finished
-    or failed (``forge.ops.hub``).
+10. With a run store (``--store hub``), the store's copy of the run comes first when it
+    is newer than this machine's or this machine has none, and the run's folder goes to
+    it when the run ends, finished or failed, unless the store's copy has moved on since
+    (``forge.ops.run_copies``). Copies that went separate ways are refused.
 11. With a deadline (``forge.ops.timeguard``), the run asks it before each batch and
     stops once that batch might not end in time. The batches stored stay, official EX
     waits for the attempt that resumes the run, and the manifest says
@@ -70,9 +71,10 @@ from forge.eval.run_files import Key, RunFiles, RunPaths, finish, hold, key, sta
 from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
-from forge.ops.hub import RunNotFound, RunStore, hub_store
+from forge.ops.hub import RunStore, hub_store
 from forge.ops.manifest import CODE_SHA_ENV, accelerator, build_manifest
 from forge.ops.paths import RepoRootNotFound, cache_dir, repo_root, runs_dir
+from forge.ops.run_copies import StoreNewer, fetch_newer, put_run
 from forge.ops.timeguard import Deadline
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
@@ -185,8 +187,8 @@ def run_eval(
         store = hub_store()
     paths = RunPaths((runs_root or runs_dir()) / fresh.run_id, config.split)
     with hold(paths):
-        if store is not None and not paths.manifest.is_file():
-            _fetch_earlier(store, paths)
+        if store is not None and fetch_newer(store, paths.root):
+            log.info("fetched run %s from %s to resume it", paths.root.name, store)
         manifest = start(paths, fresh)
         try:
             questions, files, generate_s, stopped = _evaluate(
@@ -215,23 +217,17 @@ def run_eval(
     return EvalRun(final, paths, questions, tuple(files.scores), files.resumed, generate_s, stored)
 
 
-def _fetch_earlier(store: RunStore, paths: RunPaths) -> None:
-    """Bring an earlier attempt's files from ``store``, so this attempt resumes it."""
-    try:
-        store.pull(paths.root.name, paths.root)
-    except RunNotFound:
-        return  # no earlier attempt: the run starts here
-    log.info("fetched run %s from %s to resume it", paths.root.name, store)
-
-
 def _store(store: RunStore, paths: RunPaths) -> None:
     """Make ``store``'s copy of the run its folder, saying how to try again when that fails.
 
-    The folder is the whole run: an earlier attempt's files were fetched into it first.
+    The folder is the whole run: the store's copy was fetched into it first when newer.
+    ``StoreNewer``, a store whose copy moved on meanwhile, says what to do itself.
     """
     run = paths.root.name
     try:
-        store.put_folder(run, paths.root, replace=True)
+        put_run(store, paths.root, replace=True)
+    except StoreNewer:
+        raise
     except OSError as exc:
         raise OSError(
             f"run {run} is in {paths.root}, but storing it in {store} failed: {exc}; "

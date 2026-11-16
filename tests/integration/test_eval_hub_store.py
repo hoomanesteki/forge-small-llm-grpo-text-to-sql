@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -13,6 +14,7 @@ from forge import cli
 from forge.core.types import GenParams, Prompt, RunManifest
 from forge.data.splits import load_val
 from forge.eval.config import EvalConfig
+from forge.eval.run_files import RunConflict
 from forge.eval.runner import run_eval
 from forge.infer.base import FakeBackend
 from forge.ops.hub import HubRunStore
@@ -78,8 +80,13 @@ def test_eval_run_store_hub_puts_the_run_in_the_hub(
         "sessions.json",
     ]
     assert RunManifest.model_validate_json(stored["manifest.json"]).status == "finished"
-    # It looked for an earlier attempt first, then uploaded once, with no token to give.
-    assert [method for method, _ in hub.calls] == ["snapshot_download", "upload_folder"]
+    # It looked for the store's copy before it began and again before its one upload, and
+    # found no manifest either time, with no token to give.
+    assert [(method, kw.get("filename")) for method, kw in hub.calls] == [
+        ("hf_hub_download", "runs/hub-run/manifest.json"),
+        ("hf_hub_download", "runs/hub-run/manifest.json"),
+        ("upload_folder", None),
+    ]
     assert hub.tokens == [None]
 
 
@@ -176,3 +183,105 @@ def test_a_run_the_hub_cannot_take_says_how_to_push_it(
         )
     assert "run both is in" in caplog.text and "failed 4 times" in caplog.text
     assert "runs/both/manifest.json" not in hub.files
+
+
+def _breaks_at(example_id: str | None) -> FakeBackend:
+    """The gold model, on a machine whose session ends at ``example_id``, if given."""
+    gold = {example.id: example.gold_sql for example in load_val()}
+
+    def reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        if prompt.example_id == example_id:
+            raise RuntimeError("the session ended")
+        return f"```sql\n{gold[prompt.example_id]}\n```"
+
+    return FakeBackend(reply, model_ref="gold")
+
+
+def _scores(hub: FakeHub, run_id: str) -> int:
+    return len(_hub_run(hub, run_id)["eval/val-scores.jsonl"].splitlines())
+
+
+@pytest.mark.phase(3)
+def test_a_stale_copy_never_beats_the_stores_newer_run(
+    spider_mini: Path, tmp_path: Path, runs: Path
+) -> None:
+    val = sorted(load_val(), key=lambda example: example.id)
+    hub = FakeHub()
+    store = HubRunStore(REPO, api=hub, sleep=lambda seconds: None)
+    config = EvalConfig(model="gold", backend="fake", run_id="shared", store="hub")
+    a, b = tmp_path / "machine-a", tmp_path / "machine-b"
+
+    def attempt(machine: Path, breaks_at: str | None) -> Any:
+        return run_eval(
+            config,
+            backend=_breaks_at(breaks_at),
+            allow_dirty=True,
+            runs_root=machine,
+            workers=1,
+            batch_size=2,
+            store=store,
+        )
+
+    with pytest.raises(RuntimeError, match="the session ended"):
+        attempt(a, val[2].id)
+    assert _scores(hub, "shared") == 2
+    with pytest.raises(RuntimeError, match="the session ended"):
+        attempt(b, val[6].id)
+    assert _scores(hub, "shared") == 6
+
+    # A's own copy holds 2 scores and the store's 6. A carries on from the store's, so it
+    # never asks again the question its session would now end at.
+    finished = attempt(a, val[3].id)
+    assert finished.resumed == 6 and finished.manifest.status == "finished"
+    assert _hub_run(hub, "shared") == _local_run(a / "shared")
+    stored = dict(hub.files)
+
+    # B's copy is older than the finished run, so B gets that and may not run it again.
+    with pytest.raises(RunConflict, match="has finished and its results stand"):
+        attempt(b, None)
+    assert hub.files == stored
+    assert _local_run(b / "shared") == _hub_run(hub, "shared")
+
+
+@pytest.mark.phase(3)
+def test_copies_that_went_separate_ways_are_refused(
+    spider_mini: Path, tmp_path: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    val = sorted(load_val(), key=lambda example: example.id)
+    hub = FakeHub()
+    store = HubRunStore(REPO, api=hub, sleep=lambda seconds: None)
+    config = EvalConfig(model="gold", backend="fake", run_id="split", store="hub")
+    a, b = tmp_path / "machine-a", runs
+
+    def attempt(machine: Path, breaks_at: str | None) -> Any:
+        return run_eval(
+            config,
+            backend=_breaks_at(breaks_at),
+            allow_dirty=True,
+            runs_root=machine,
+            workers=1,
+            batch_size=2,
+            store=store,
+        )
+
+    with pytest.raises(RuntimeError, match="the session ended"):
+        attempt(a, val[2].id)
+    # B carries on from the store's copy, but can't upload what it did.
+    hub.fail["upload_folder"] = [hub_error(403)]
+    with pytest.raises(RuntimeError, match="the session ended"):
+        attempt(b, val[6].id)
+    assert _scores(hub, "split") == 2
+    # A carries on from the same point, and the store takes A's.
+    attempt(a, None)
+    stored = dict(hub.files)
+    held = _local_run(b / "split")
+
+    # Each copy holds an attempt the other lacks: neither replaces the other.
+    with pytest.raises(RunConflict, match="went separate ways at session 2"):
+        attempt(b, None)
+    monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    pushed = CliRunner().invoke(cli.app, ["runs", "push", "split"])
+    assert pushed.exit_code == 1, pushed.output
+    assert "went separate ways at session 2" in pushed.stderr
+    assert "nothing was uploaded" in pushed.stderr
+    assert hub.files == stored and _local_run(b / "split") == held

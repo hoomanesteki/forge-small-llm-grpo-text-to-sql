@@ -437,9 +437,9 @@ def eval_run(
     eval/<split>-generations.jsonl and -scores.jsonl. With --retry 1,
     eval/<split>-first-tries.jsonl keeps the first reply of each retried sample, and the
     generations file holds the reply each score is for. With --store hub the folder also
-    goes to the Hub run store when the run ends, finished or failed, and a --run-id that
-    runs/ lacks is fetched from it to resume. Exits 1 unless the run finishes: when it
-    fails, or when --deadline-minutes stops it.
+    goes to the Hub run store when the run ends, finished or failed, and the store's copy
+    of a --run-id is fetched to resume when runs/ has none or an older one. Exits 1 unless
+    the run finishes: when it fails, or when --deadline-minutes stops it.
     """
     from forge.eval.config import EvalConfig, NotAvailable
     from forge.eval.run_files import RunConflict, RunCorrupt, RunLocked
@@ -851,13 +851,22 @@ def kaggle_publish_code() -> None:
 
 
 @kaggle_app.command("publish-data")
-def kaggle_publish_data() -> None:
+def kaggle_publish_data(
+    keep_build: Annotated[
+        bool,
+        typer.Option(
+            "--keep-build", help="Keep build/kaggle-data after the upload, a copy of Spider."
+        ),
+    ] = False,
+) -> None:
     """Upload the verified Spider files once, as the private dataset <owner>/forge-spider.
 
     Every file spider.sha256 lists must be in FORGE_DATA_DIR (default data/spider) and
     match it. build/kaggle-data gets them and spider.sha256, and the description carries
-    Spider's CC BY-SA 4.0 attribution and citation. A dataset that exists is left as it
-    is: the checksums pin Spider, so one upload serves every job.
+    Spider's CC BY-SA 4.0 attribution and citation; the folder goes once the upload is
+    done. A dataset whose status says ready is left as it is: the checksums pin Spider,
+    so one upload serves every job. One whose last version failed or was deleted gets a
+    new version, and one Kaggle is still processing is an error until it is ready.
     """
     from forge.data.spider import ChecksumMismatch, resolve_data_dir
     from forge.ops.kaggle import DATA_BUNDLE, DATA_SLUG, KaggleClient, KaggleError, publish_data
@@ -867,7 +876,7 @@ def kaggle_publish_data() -> None:
         root = repo_root()
         owner = _kaggle_owner()
         data_dir = resolve_data_dir()
-        published = publish_data(root, owner, KaggleClient(), data_dir)
+        published = publish_data(root, owner, KaggleClient(), data_dir, keep_build=keep_build)
     except ChecksumMismatch as exc:
         typer.echo(
             f"error: {len(exc.files)} file(s) in {data_dir} are missing or differ from "
@@ -880,10 +889,15 @@ def kaggle_publish_data() -> None:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     if published is None:
-        typer.echo(f"{owner}/{DATA_SLUG} exists already; nothing to upload")
+        typer.echo(f"{owner}/{DATA_SLUG} is ready already; nothing to upload")
         return
-    typer.echo(f"bundle {root / DATA_BUNDLE}: the files of {data_dir}, each matching spider.sha256")
-    typer.echo(f"created {published.ref}")
+    kept = "kept" if keep_build else "removed after the upload"
+    typer.echo(
+        f"bundle {root / DATA_BUNDLE} ({kept}): the files of {data_dir}, each matching "
+        "spider.sha256"
+    )
+    action = "created" if published.created else "uploaded a new version of"
+    typer.echo(f"{action} {published.ref}")
     typer.echo(published.output)
 
 
@@ -1283,9 +1297,10 @@ def runs_pull(
 ) -> None:
     """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR), and add its ledger rows.
 
-    Each file or folder at the top of the run that the store holds replaces the local one,
-    and what only runs/<run_id>/ holds, such as kernels.json, stays. A run that held a GPU
-    gets a row in docs/compute-ledger.md for each of its sessions that has ended, once.
+    The folder then holds the store's copy and no file it lacks, such as an earlier
+    attempt's error.txt, but for kernels.json and kernel/, which only this machine keeps.
+    A run that held a GPU gets a row in docs/compute-ledger.md for each of its sessions
+    that has ended, once.
     --store kaggle is forge kaggle output.
     """
     from forge.ops.hub import LocalRunStore, hub_store
@@ -1310,15 +1325,17 @@ def runs_push(run_id: RunArgument) -> None:
 
     For a run whose upload failed, or one that came back through forge kaggle output. Its
     manifest must be there. Files the store has and the folder lacks are deleted, so push
-    a run only from a folder that holds all of it, such as one forge runs pull filled.
+    a run only from a folder that holds all of it, such as one forge runs pull filled. A
+    store whose copy holds a session the folder lacks keeps it, and the push is refused.
     """
     from forge.ops.hub import LocalRunStore, hub_store
     from forge.ops.paths import runs_dir
+    from forge.ops.run_copies import put_run
 
     try:
         hub, local = hub_store(), LocalRunStore(runs_dir())
         manifest = local.get_manifest(run_id)
-        path = hub.put_folder(run_id, local.root / run_id, replace=True)
+        path = put_run(hub, local.root / run_id, replace=True)
     except _runs_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc

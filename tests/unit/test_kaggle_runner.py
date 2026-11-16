@@ -715,6 +715,46 @@ def test_output_brings_the_run_into_runs(repo: Path, monkeypatch: pytest.MonkeyP
     assert result.stdout.endswith(logged)
 
 
+@pytest.mark.phase(3)
+def test_output_leaves_no_file_of_an_earlier_attempt(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
+    assert _eval(repo, "--yes", "--run-id", "run-1").exit_code == 0
+    runs = repo / "runs"
+    (runs / "run-2").mkdir()
+    (runs / "run-2" / "error.txt").write_text("another run's\n")
+    fake.outputs = {
+        "runs/run-1/manifest.json": _kernel_manifest("run-1", status="failed").decode(),
+        "runs/run-1/error.txt": "Traceback: the session ended\n",
+        "runs/run-1/eval/val-scores.jsonl": "{}\n",
+        "preflight/run-1-preflight/manifest.json": "{}",
+    }
+    first = CliRunner().invoke(cli.app, ["kaggle", "output", "run-1"])
+    assert first.exit_code == 0, first.output
+    assert (runs / "run-1" / "error.txt").is_file()
+
+    # The attempt that resumed it finished, so its output has no error.txt, nor a preflight.
+    fake.outputs = {
+        "runs/run-1/manifest.json": _kernel_manifest("run-1").decode(),
+        "runs/run-1/eval/val-scores.jsonl": "{}\n{}\n",
+    }
+    second = CliRunner().invoke(cli.app, ["kaggle", "output", "run-1"])
+
+    assert second.exit_code == 0, second.output
+    run = runs / "run-1"
+    assert sorted(p.relative_to(run).as_posix() for p in run.rglob("*") if p.is_file()) == [
+        "eval/val-scores.jsonl",
+        "kernel/forge-run-1.log",
+        "kernels.json",
+        "manifest.json",
+    ]
+    assert (run / "eval" / "val-scores.jsonl").read_text() == "{}\n{}\n"
+    assert (runs / "run-2" / "error.txt").read_text() == "another run's\n"
+    # Nothing of the download is left beside the runs.
+    assert sorted(p.name for p in runs.iterdir()) == ["run-1", "run-2"]
+
+
 START = datetime(2026, 11, 16, 1, 0, tzinfo=UTC)
 
 

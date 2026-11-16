@@ -12,21 +12,31 @@ names (``hoomanesteki/forge-runs`` by default), and ``LocalRunStore`` a folder s
 In a local store the folder is ``<root>/<run_id>/``. Paths inside a run are POSIX paths
 relative to its folder, such as ``eval/val-scores.jsonl``, in either store.
 
-``RunStore`` is plan section 3.5's protocol with three methods more: ``put_folder``, since
-a checkpoint goes up as a folder; ``runs``, for ``forge runs list``; and
-``prune_checkpoints``, the retention rule, which keeps the latest checkpoints and
-``best/`` and deletes the older ``step-NNNNNN`` folders. ``put_folder`` adds to what the
-store holds, or with ``replace`` makes it hold the folder's files and no others, as a run
-that ended must: an earlier attempt's ``error.txt`` would otherwise outlive it.
+``RunStore`` is plan section 3.5's protocol with four methods more: ``put_folder``, since
+a checkpoint goes up as a folder; ``read_file``, one file of a run; ``runs``, for
+``forge runs list``; and ``prune_checkpoints``, the retention rule, which keeps the latest
+checkpoints and ``best/`` and deletes the older ``step-NNNNNN`` folders. ``put_folder``
+adds to what the store holds, or with ``replace`` makes it hold the folder's files and no
+others, as a run that ended must: an earlier attempt's ``error.txt`` would otherwise
+outlive it.
 
-A Hub call that fails on the network is tried again ``RETRIES`` times, after
-``BACKOFF_S`` seconds and then twice as long each time (``network_error`` says which
-failures count). Anything else, such as a missing repo or a refused token, fails at once.
+A Hub call that fails on the network (``network_error`` says which failures count) is
+tried again by one layer only, so the waits never multiply. huggingface_hub 2.4 already
+tries most of its requests 5 more times, 1, 2, 4, 8 and 8 s apart, and a failure that
+comes through those retries is ``StoreUnavailable`` at once. It sends two requests only
+once, a commit and the repo lookup a snapshot download starts with (``client_retried``);
+when one of those fails, the store tries the whole call again ``RETRIES`` times, after
+``BACKOFF_S`` seconds and then twice as long each time, 2, 4 and 8 s. So a call that keeps
+failing waits at most 14 s between the store's tries, and at most 23 s inside the
+client's retries of one request. A missing run is ``RunNotFound``, and anything else,
+such as a missing repo or a refused token, fails at once.
 
-``pull`` mirrors a run into a local folder as ``forge kaggle output`` does: each file or
-folder at the top of the run that the store holds replaces the local one, and what only
-the local folder holds, such as ``kernels.json``, stays. An eval run's lock file never
-leaves the machine it was taken on.
+``pull`` makes a local folder hold the store's copy of a run, as ``forge kaggle output``
+does with a kernel's (``replace_run``): what the copy lacks goes, such as a failed
+attempt's ``error.txt`` beside the manifest of the attempt that finished the run, and
+only what this machine alone keeps stays (``LOCAL_ONLY``): ``kernels.json``, the kernels
+``forge kaggle run`` pushed for the run, ``kernel/``, the rest of a kernel's output, and
+an eval run's lock file, which never leaves the machine it was taken on.
 """
 
 from __future__ import annotations
@@ -60,9 +70,16 @@ RETRIES = 3
 BACKOFF_S = 2.0
 # Request timeout and rate limiting: the Hub's answer may differ a moment later.
 RETRY_STATUS = frozenset({408, 429})
+# The paths of the two requests huggingface_hub 2.4 sends without retrying them: the
+# repo lookup (``/api/models/<repo>``, with ``/revision/<rev>`` from snapshot_download)
+# and a commit (``/commit/<rev>``). It retries every other request itself.
+_SENT_ONCE = re.compile(r"/api/models/[^/]+/[^/]+(?:/revision/[^/]+|/commit/[^/]+)?$")
 # The names checkpoint_dir writes: six digits, or more without a leading zero, so no two
 # names stand for one step.
 _STEP = re.compile(r"step-(\d{6}|[1-9]\d{6,})")
+KERNELS_FILE = "kernels.json"  # forge kaggle run's record of the run's kernels
+KERNEL_DIR = "kernel"  # where forge kaggle output puts what a kernel wrote beside the run
+LOCAL_ONLY = frozenset({LOCK_FILE, KERNELS_FILE, KERNEL_DIR})
 
 
 class RunNotFound(FileNotFoundError):
@@ -83,6 +100,7 @@ class RunStore(Protocol):
     ) -> str: ...
     def put_manifest(self, manifest: RunManifest) -> None: ...
     def get_manifest(self, run_id: str) -> RunManifest: ...
+    def read_file(self, run_id: str, dest: str) -> bytes | None: ...
     def latest_checkpoint(self, run_id: str) -> str | None: ...
     def prune_checkpoints(self, run_id: str, keep: int = KEEP_CHECKPOINTS) -> list[str]: ...
     def runs(self) -> list[str]: ...
@@ -154,17 +172,33 @@ def _same(a: Path, b: Path) -> bool:
     return a.resolve() == b.resolve()
 
 
-def _mirror(source: Path, target: Path, *, move: bool) -> None:
-    """Replace each top-level item of ``target`` that ``source`` holds, lock file aside."""
+def _remove(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def _empty(folder: Path) -> None:
+    for child in folder.iterdir():
+        _remove(child)
+
+
+def replace_run(source: Path, target: Path, *, move: bool) -> None:
+    """Make the run folder ``target`` hold the copy of the run in ``source``.
+
+    Each top-level item of ``source`` replaces ``target``'s of that name, and every other
+    item of ``target`` goes, unless it is ``LOCAL_ONLY``. The lock file is never copied
+    or touched. ``move`` moves the items out of ``source`` instead of copying them.
+    """
     target.mkdir(parents=True, exist_ok=True)
-    for item in sorted(source.iterdir()):
-        if item.name == LOCK_FILE:
-            continue
+    incoming = sorted(item for item in source.iterdir() if item.name != LOCK_FILE)
+    names = {item.name for item in incoming}
+    for there in sorted(target.iterdir()):
+        if there.name in names or there.name not in LOCAL_ONLY:
+            _remove(there)
+    for item in incoming:
         there = target / item.name
-        if there.is_dir() and not there.is_symlink():
-            shutil.rmtree(there)
-        elif there.exists() or there.is_symlink():
-            there.unlink()
         if move:
             shutil.move(item, there)
         elif item.is_dir():
@@ -223,6 +257,11 @@ class LocalRunStore:
             raise RunNotFound(f"no run {run_id} in {self.root}: it has no {MANIFEST_FILE}")
         return _read_manifest(path.read_bytes(), run_id, str(path))
 
+    def read_file(self, run_id: str, dest: str) -> bytes | None:
+        """The file ``dest`` of the run, or None when the run has no such file."""
+        path = self._run(run_id) / _inside(dest)
+        return path.read_bytes() if path.is_file() else None
+
     def _checkpoints(self, run_id: str) -> list[str]:
         """Checkpoint folders holding a file: the Hub has no empty folders to match."""
         folder = self._run(run_id) / CHECKPOINTS
@@ -257,7 +296,7 @@ class LocalRunStore:
         if not source.is_dir():
             raise RunNotFound(f"no run {run_id} in {self.root}")
         if not _same(source, target):
-            _mirror(source, target, move=False)
+            replace_run(source, target, move=False)
 
 
 class HubApi(Protocol):
@@ -316,22 +355,66 @@ class HubApi(Protocol):
 
 
 def network_error(exc: BaseException) -> bool:
-    """Whether a Hub call that raised ``exc`` is worth trying again.
+    """Whether a Hub call that raised ``exc`` failed on the network, so it may work a
+    moment later.
 
-    A connection the client's own retries gave up on raises an httpx2 transport error or
-    a ``ConnectionError``; the Hub answers 408, 429 or 5xx when the trouble is on its
-    side; and huggingface_hub reports a failed upload or Xet transfer as a bare
-    ``RuntimeError``. Offline mode, missing repos and files, and refused tokens are not.
+    That is a dropped or refused connection, a timeout, or the Hub answering 408, 429 or
+    5xx, raised as itself or as the cause of what huggingface_hub wraps it in: a
+    ``LocalEntryNotFoundError`` for a download, a bare ``RuntimeError`` for an LFS
+    upload. Offline mode, missing repos and files, refused tokens, any other
+    ``RuntimeError`` (a 403 the LFS upload wrapped, ``NotImplementedError``) and a
+    misconfigured proxy are not.
     """
+    return _network_cause(exc) is not None
+
+
+def _network_cause(exc: BaseException) -> BaseException | None:
+    """The network failure ``exc`` is or wraps, as ``network_error`` describes; None for
+    any other error."""
     import httpx2
-    from huggingface_hub.errors import HfHubHTTPError, OfflineModeIsEnabled
+    from huggingface_hub.errors import (
+        HfHubHTTPError,
+        LocalEntryNotFoundError,
+        OfflineModeIsEnabled,
+    )
 
     if isinstance(exc, OfflineModeIsEnabled):
-        return False
+        return None
     if isinstance(exc, HfHubHTTPError):
         status = exc.response.status_code
-        return status >= 500 or status in RETRY_STATUS
-    return isinstance(exc, httpx2.TransportError | ConnectionError | TimeoutError | RuntimeError)
+        return exc if status >= 500 or status in RETRY_STATUS else None
+    if isinstance(exc, LocalEntryNotFoundError) or type(exc) is RuntimeError:
+        return None if exc.__cause__ is None else _network_cause(exc.__cause__)
+    # The errors huggingface_hub's own retries take as passing, and the builtin ones a
+    # socket raises.
+    passing = (
+        httpx2.NetworkError,
+        httpx2.TimeoutException,
+        httpx2.RemoteProtocolError,
+        ConnectionError,
+        TimeoutError,
+    )
+    return exc if isinstance(exc, passing) else None
+
+
+def client_retried(exc: BaseException) -> bool:
+    """Whether huggingface_hub already tried again the request whose failure ``exc`` is:
+    any request it names, except the two ``_SENT_ONCE`` matches."""
+    import httpx2
+    from huggingface_hub.errors import HfHubHTTPError
+
+    try:
+        if isinstance(exc, HfHubHTTPError):
+            request = exc.response.request
+        elif isinstance(exc, httpx2.RequestError):
+            request = exc.request
+        else:
+            return False
+    # httpx2's answer when the error was made without its request: one the store can't
+    # place, so it retries the call itself.
+    except RuntimeError:
+        return False
+    return _SENT_ONCE.search(request.url.path) is None
 
 
 class HubRunStore:
@@ -373,15 +456,20 @@ class HubRunStore:
             try:
                 return method(repo_id=self.repo_id, repo_type=REPO_TYPE, **kwargs)
             except Exception as exc:
-                if not network_error(exc):
+                cause = _network_cause(exc)
+                if cause is None:
                     raise
+                last = f"{type(cause).__name__}: {cause}"
+                if client_retried(cause):
+                    raise StoreUnavailable(
+                        f"{what} failed on the network after huggingface_hub's own retries: {last}"
+                    ) from exc
                 if attempt == RETRIES:
                     raise StoreUnavailable(
-                        f"{what} failed {RETRIES + 1} times; the last time "
-                        f"{type(exc).__name__}: {exc}"
+                        f"{what} failed {RETRIES + 1} times; the last time {last}"
                     ) from exc
                 wait = BACKOFF_S * 2**attempt
-                log.warning("%s: %s: %s; trying again in %g s", what, type(exc).__name__, exc, wait)
+                log.warning("%s: %s; trying again in %g s", what, last, wait)
                 self.sleep(wait)
                 attempt += 1
 
@@ -435,11 +523,21 @@ class HubRunStore:
         )
 
     def get_manifest(self, run_id: str) -> RunManifest:
-        from huggingface_hub.errors import EntryNotFoundError
-
+        """The run's manifest. Raises ``RunNotFound`` when the repo has none for it, and
+        ``StoreUnavailable`` when the Hub can't be reached to say."""
         path = self._path(run_id, MANIFEST_FILE)
+        data = self.read_file(run_id, MANIFEST_FILE)
+        if data is None:
+            raise RunNotFound(f"no run {run_id} in {self.repo_id}: it has no {path}")
+        return _read_manifest(data, run_id, f"{self.repo_id}/{path}")
+
+    def read_file(self, run_id: str, dest: str) -> bytes | None:
+        """The file ``dest`` of the run, or None when the repo has no such file."""
+        from huggingface_hub.errors import RemoteEntryNotFoundError
+
+        path = self._path(run_id, _inside(dest))
         # A folder of its own rather than the Hub cache, which would keep every copy.
-        with tempfile.TemporaryDirectory(prefix="forge-manifest-") as folder:
+        with tempfile.TemporaryDirectory(prefix="forge-file-") as folder:
             try:
                 self._call(
                     self.api.hf_hub_download,
@@ -447,10 +545,11 @@ class HubRunStore:
                     filename=path,
                     local_dir=folder,
                 )
-            except EntryNotFoundError as exc:
-                raise RunNotFound(f"no run {run_id} in {self.repo_id}: it has no {path}") from exc
-            data = Path(folder, path).read_bytes()
-        return _read_manifest(data, run_id, f"{self.repo_id}/{path}")
+            # The Hub's 404 for the file. An outage is a LocalEntryNotFoundError instead,
+            # which _call retries or turns into StoreUnavailable.
+            except RemoteEntryNotFoundError:
+                return None
+            return Path(folder, path).read_bytes()
 
     def _files(self, run_id: str) -> list[str]:
         """Every file of the run, as a path inside its folder."""
@@ -498,8 +597,15 @@ class HubRunStore:
         # Staged beside the target, so moving the files in is a rename, and nothing of a
         # download that fails reaches it.
         with tempfile.TemporaryDirectory(prefix=".pull-", dir=target.parent) as staging:
+
+            def download(**kwargs: Any) -> object:
+                # snapshot_download that can't reach the Hub returns a folder that isn't
+                # empty as if it were complete, so no try starts on what one before left.
+                _empty(Path(staging))
+                return self.api.snapshot_download(**kwargs)
+
             self._call(
-                self.api.snapshot_download,
+                download,
                 f"downloading {self.repo_id}/{path}",
                 local_dir=staging,
                 allow_patterns=[f"{path}/*"],
@@ -507,7 +613,7 @@ class HubRunStore:
             fetched = Path(staging, path)
             if not fetched.is_dir():
                 raise RunNotFound(f"no run {run_id} in {self.repo_id}")
-            _mirror(fetched, target, move=True)
+            replace_run(fetched, target, move=True)
 
 
 def hub_store(env: Mapping[str, str] | None = None) -> HubRunStore:

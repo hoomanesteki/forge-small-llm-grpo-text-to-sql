@@ -126,6 +126,7 @@ Work discovered along the way that is not a plan story.
 | FG-295 | Gate 2 fixes: last items | done | The taxonomy reads a whole ORDER BY alias in parentheses or with COLLATE, drops parentheses around a whole ORDER BY term, and lets a derived table's or CTE's columns win over an alias; `rebuild` skips a chart only for a renderer-shaped Software text, and the full-data pilot test skips rather than pass when its chart isn't compared; `compare --out` naming the default file through a symlink or letter case writes that file; `git_sha` excludes the logs where `forge.ops.paths` puts them; the pilot's rule-3 note recounted by `scripts/count_pilot_extraction.py`; `GitError` hand-off for Phase 3 |
 | FG-391 | Gate 3 fixes: UTC dates and ledger sessions | done | One UTC date for run ids, ledger rows, dev-usage rows and the ledger's week (`forge.ops.clock`), and runner tests that take the UTC date, with one pinned ten hours west of UTC; each attempt at a run is a session in its `sessions.json`, a manifest's GPU hours add up its sessions, and each session gets its own ledger row, marked `(session N)` after the first, which `append_once` keys on and I7 checks; a kernel's session spans the whole kernel (`status.json`, `sessions.json`); `forge kaggle wait` and `output` add the rows |
 | FG-392 | Gate 3 fixes: kernel jobs | done | A kernel's eval job stops at a deadline counted from the kernel's start to the push's timeout (`--timeout-s`), a tenth kept back for official EX and the upload, then uploads and resumes; `forge eval run --deadline-minutes` does the same; the restore is the first stage, so a resume that fails early still carries the run; every stage result, the error and `error.txt` are redacted, with secrets cleaned as huggingface_hub sends them; the data is checked against the wheel's pinned list; a dev look is logged as soon as Kaggle accepts the push, one row a run id across resumes (ADR-0004 notes); a push that dropped a source is recorded with a warning; run ids that make no kernel slug and `--resume --emit-notebook` are refused before any upload; the runbook says when the code dataset is published |
+| FG-393 | Gate 3 fixes: run store | done | Hub downloads retry network failures, and `get_manifest` tells a missing run (`RunNotFound`) from an outage (`StoreUnavailable`, with its cause); only refused or dropped connections, timeouts, 408, 429 and 5xx count, a `RuntimeError` only with such a cause; each failure is retried by huggingface_hub or by the store, never both, measured with the real client on an in-process transport (at most 23 s or 14 s of waits); a retried pull starts from an empty folder; `--store hub`, `forge runs push` and the kernel's upload compare the two copies' sessions (`forge.ops.run_copies`), fetch the store's when it is newer, and refuse copies that went separate ways; a pull and `forge kaggle output` leave no file the new copy lacks but `kernels.json`, `kernel/` and the lock; `publish-data` counts only a ready dataset as there, uploads a new version over a failed or deleted one, refuses one Kaggle is still processing, and removes `build/kaggle-data` after the upload (`--keep-build`) |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -831,3 +832,21 @@ Work discovered along the way that is not a plan story.
 - A dev look is one row a run id only for `forge kaggle run --resume`: the push can't tell
   whether the attempt before it reached dev. On the laptop `load_dev` still logs each load,
   a resume's included, as ADR-0004 decided (FG-392).
+- huggingface_hub 2.4 retries most requests itself, 5 more times 1, 2, 4, 8 and 8 s apart, but
+  sends a commit and the repo lookup that starts `snapshot_download` once, and its downloads
+  turn an unreachable Hub into `LocalEntryNotFoundError` with the frames of the error cut off.
+  So the store tells what the client retried by the path of the request that failed
+  (`forge.ops.hub.client_retried`); an upgrade of huggingface_hub has to pass
+  `test_store_and_client_retries_never_stack`, which runs the real client (FG-393).
+- `snapshot_download` that can't reach the Hub returns a `local_dir` that isn't empty as if it
+  were complete, so a retried pull could have passed a half download for a whole run; each try
+  now starts from an empty folder (FG-393).
+- Which copy of a run is newer comes from its sessions' start times. A kernel resume restores
+  from the last kernel's output, not from the store, so a laptop attempt made in between makes
+  the two go separate ways; the kernel's upload is then refused, recorded in `status.json`, and
+  a person keeps one copy (FG-393).
+- A pull now removes a report made only on this machine, as it removes any file the store's
+  copy lacks; `forge report run` makes it again (FG-393).
+- publish-data uploads a new version over a failed or deleted `forge-spider`, which no real
+  Kaggle account has tried yet; the first real publish (`docs/runs/pending.yaml`, FG-302) shows
+  whether Kaggle takes a version there or wants the dataset deleted first (FG-393).

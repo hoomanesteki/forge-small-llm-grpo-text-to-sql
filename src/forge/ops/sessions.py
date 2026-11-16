@@ -78,6 +78,14 @@ def read_sessions(run_dir: Path) -> list[Session] | None:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    return parse_sessions(text, str(path))
+
+
+def parse_sessions(text: str, where: str) -> list[Session]:
+    """The sessions a sessions file's ``text`` lists; ``where`` names the file in errors.
+
+    Raises ``ValueError`` for text that isn't a list of sessions.
+    """
     try:
         data = json.loads(text)
         if not isinstance(data, list) or not data:
@@ -85,7 +93,7 @@ def read_sessions(run_dir: Path) -> list[Session] | None:
         return [Session.from_json(item) for item in data]
     # JSONDecodeError is a ValueError; a field of the wrong type raises TypeError.
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"{path} is not a list of sessions: {exc}") from exc
+        raise ValueError(f"{where} is not a list of sessions: {exc}") from exc
 
 
 def sessions_of(manifest: RunManifest, run_dir: Path) -> list[Session]:

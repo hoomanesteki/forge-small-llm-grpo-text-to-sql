@@ -21,10 +21,12 @@ from typing import Any
 
 import pytest
 
+from forge.core.types import RunManifest
 from forge.data.spider import raw_files
 from forge.eval import run_files
 from forge.eval.config import HOSTS
 from forge.ops import kaggle, manifest, sessions
+from forge.ops.hub import manifest_bytes
 from tests.fakes import FakeHub
 from tests.kernel import (
     KERNEL_ENV,
@@ -320,7 +322,11 @@ def test_secrets_are_recorded_by_where_they_came_from_never_by_value(
     assert status["stages"]["upload"]["result"] == "uploaded to forge-owner/forge-runs"
     run = kernel_root / "working" / "runs" / "run-1"
     assert hub.tokens == [TOKEN]
-    assert hub.calls == [
+    # The store had no copy of the run, so none could hold more than the kernel's.
+    lookup, *uploads = hub.calls
+    assert lookup[0] == "hf_hub_download"
+    assert lookup[1]["filename"] == "runs/run-1/manifest.json"
+    assert uploads == [
         (
             "upload_folder",
             {
@@ -343,6 +349,54 @@ def test_secrets_are_recorded_by_where_they_came_from_never_by_value(
     assert uploaded["ended_at"] <= status["ended_at"]
     assert TOKEN not in capsys.readouterr().out
     assert TOKEN not in (run / "status.json").read_text()
+
+
+@pytest.mark.phase(3)
+def test_the_upload_never_replaces_a_run_the_store_holds_more_of(
+    kernel_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    hub = FakeHub()
+    # The store's copy of run-1 began on a laptop, in a session this kernel's copy lacks.
+    began = datetime(2026, 11, 14, 8, 0, tzinfo=UTC)
+    laptop = sessions.Session(began, began.replace(hour=9), "failed")
+    stored_manifest = RunManifest(
+        run_id="run-1",
+        kind="eval",
+        git_sha=SHA,
+        config={"split": "val"},
+        config_hash="2" * 64,
+        data_manifest_hash="3" * 64,
+        model_ref="gold",
+        platform="local-cpu",
+        seed=0,
+        started_at=began,
+        ended_at=began.replace(hour=9),
+        status="failed",
+    )
+    hub.files["runs/run-1/manifest.json"] = manifest_bytes(stored_manifest)
+    hub.files["runs/run-1/sessions.json"] = json.dumps([laptop.to_json()]).encode()
+    stored = dict(hub.files)
+
+    def makes_its_run(kernel: Any, preflight: bool) -> str:
+        if not preflight:
+            kernel.run_dir.mkdir(parents=True)
+            (kernel.run_dir / "manifest.json").write_text(json.dumps({"status": "finished"}))
+        return "finished"
+
+    monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    monkeypatch.setitem(script.JOBS, "eval", makes_its_run)
+
+    script.main(argv(kernel_root), run=lambda c: None)
+
+    status = status_of(kernel_root)
+    # The run is whole in the kernel output, so the job still finished.
+    assert (status["status"], status["stage"]) == ("finished", "upload")
+    result = status["stages"]["upload"]["result"]
+    assert result.startswith("failed: StoreNewer: the copy of run run-1 in forge-owner/forge-runs")
+    assert "went separate ways at session 1" in result and "nothing was uploaded" in result
+    assert hub.files == stored
+    assert "upload_folder" not in [method for method, _ in hub.calls]
 
 
 @pytest.mark.phase(3)
