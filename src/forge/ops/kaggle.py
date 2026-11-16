@@ -89,6 +89,11 @@ _PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
 _VERSION = re.compile(r"[1-9][0-9]*")
 
 
+def valid_slug(slug: str) -> bool:
+    """Whether Kaggle takes ``slug``: lowercase letters and digits, single hyphens between."""
+    return _SLUG.fullmatch(slug) is not None
+
+
 def title_slug(title: str) -> str:
     """The slug Kaggle derives from a kernel title: lowercase words joined by hyphens."""
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
@@ -121,7 +126,7 @@ def check_kernel_metadata(meta: Mapping[str, Any]) -> list[str]:
         owner, slug = parts
         if not _OWNER.fullmatch(owner):
             problems.append(f"id has a bad owner {owner!r}")
-        if not _SLUG.fullmatch(slug):
+        if not valid_slug(slug):
             problems.append(f"id has a bad slug {slug!r}: lowercase letters, digits, hyphens")
         title = meta.get("title")
         if not isinstance(title, str) or len(title) < 5:
