@@ -39,11 +39,17 @@ how the candidates will behave.
 
 - Output: non-thinking mode for Qwen3 and 256 new tokens at most, the SQL in a
   ```` ```sql ```` block, as plan section 3.7 says. This ADR changes no extraction rule.
-- Prompt version: FG-307 runs the top candidate of the p1 val runs (ADR-0012) on val with
-  p2 too, from the same commit. p2 is fixed for every later phase only if its official EX
-  is higher and `forge report compare` finds the paired difference significant (McNemar,
-  p below 0.05). Otherwise p1 stays: it is the shorter prompt, and it is what the overflow
-  policy falls back to anyway.
+- Prompt version: FG-307 runs the model ADR-0012's rule chooses from the p1 val runs on
+  val with p2 too, from the same commit. p2 is fixed for every later phase only if its
+  official EX is higher and `forge report compare` finds the paired difference significant
+  (McNemar, p below 0.05). Otherwise p1 stays: it is the shorter prompt, and it is what the
+  overflow policy falls back to anyway.
+- That model is the eligible candidate with the best val official EX, with the rule's
+  fewer-parameters tie-break, not the best p1 run alone. Plan section 3.7 compares p1 and
+  p2 "for the chosen model", while the FG-307 story block says "the top candidate"; the two
+  differ when the top candidate scores 75% or more on val, fails FG-301's memory check, or
+  loses the tie-break to a smaller model. The prompt version is fixed for the model every
+  later phase trains, so section 3.7's reading holds, and the p2 run waits for the choice.
 - Each run in the comparison gets its row from `scripts/count_extraction.py` beside its EX,
   so a version that loses the code block more often is seen as a format problem, not read
   as a schema one.
