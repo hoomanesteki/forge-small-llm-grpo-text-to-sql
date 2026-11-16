@@ -1,10 +1,17 @@
-# The local SFT pilot on Apple silicon's GPU (ADR-0016): configs/models.yaml's pilot,
-# Qwen2.5-Coder-0.5B-Instruct at the same commit, 1 epoch on the train split, so its
-# adapter can be evaluated on val beside the FG-291 base run
+# The local SFT pilot on Apple silicon's GPU (ADR-0016, FG-491): configs/models.yaml's
+# pilot, Qwen2.5-Coder-0.5B-Instruct at the same commit, trained on train rows only, so
+# its adapter can be evaluated on val beside the FG-291 base run
 # (configs/eval/pilot-qwen25coder05b-val.yaml). The run says local-mps, and its numbers
 # are a pilot's, on val only.
 #
-#   FORGE_DATA_DIR=data/spider uv run forge train sft --config configs/sft/pilot-qwen25coder05b-mps.yaml
+#   FORGE_DATA_DIR=data/spider PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.45 \
+#     PYTORCH_MPS_LOW_WATERMARK_RATIO=0.35 \
+#     uv run forge train sft --config configs/sft/pilot-qwen25coder05b-mps.yaml
+#
+# The watermarks keep PyTorch's MPS memory within 0.45 of what Metal recommends for the
+# GPU, and free its cache past 0.35: without them it grew past what the laptop had free,
+# and training stalled in swap. A 1,536-token row fits under the cap. They change no
+# number the run computes.
 run:
   kind: sft
   model_ref: Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25
@@ -23,9 +30,20 @@ sft:
   num_train_epochs: 1.0
   lr_scheduler_type: cosine
   warmup_ratio: 0.03
-  per_device_train_batch_size: 4
-  gradient_accumulation_steps: 4
-  max_length: 2048
-  logging_steps: 10
+  # 16 rows an optimizer step, one at a time: two long rows at once ran out of the GPU
+  # memory the watermarks above allow, and one at a time trained faster too (FG-491).
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  # 1,536 tokens, prompt and reply, rather than ADR-0010's 2,048, for the laptop's memory;
+  # the train rows longer than that are left out, not cut.
+  max_length: 1536
+  gradient_checkpointing: true
+  # Without it a run's memory grew with each new row length until the laptop swapped.
+  pad_to_multiple_of: 64
+  # A 20-step timing probe put an epoch of the rows that fit past the 2.5 h the pilot may
+  # take, so it trains on this many of them, drawn by hash with the run's seed: 198 steps,
+  # about 2.5 h at the probe's pace (FG-491).
+  subset_rows: 3168
+  logging_steps: 5
 ops:
   checkpoint_every: 50
