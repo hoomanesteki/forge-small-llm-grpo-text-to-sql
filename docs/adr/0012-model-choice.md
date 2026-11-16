@@ -30,7 +30,8 @@ them again whenever it is run:
 - The reference is about 16 GB of weights in 16 bits, more than a T4 holds, so vLLM loads
   it in 4-bit with bitsandbytes (`quantization` in its configs, recorded in its manifest).
   It shows what a larger model scores with the same prompt and harness, and is never a
-  candidate. Whether vLLM loads bitsandbytes weights on the T4 is FG-301's to confirm.
+  candidate. Whether vLLM loads bitsandbytes weights on the T4 is FG-301's to confirm,
+  in the spike's `vllm:Qwen/Qwen3-8B:bnb` stage.
 - Every run is greedy on the whole val split with prompt p1, through vLLM in fp16 on a
   Kaggle T4 (FG-306), one kernel job per config in `configs/eval/`. Qwen3 runs in
   non-thinking mode (ADR-0007).

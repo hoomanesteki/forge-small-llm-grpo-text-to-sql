@@ -56,6 +56,10 @@ REPORT_SCHEMA = "forge-kaggle-spike/1"
 REPORT_NAME = "spike-report.json"
 PROBE_NAME = "limit-probe.json"
 DEFAULT_MODELS = ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B")
+# configs/models.yaml's reference, which FG-307 has vLLM load in 4-bit with bitsandbytes;
+# the kernel can't read that file, so a unit test keeps the two the same.
+REFERENCE_MODEL = "Qwen/Qwen3-8B"
+BNB_PROMPTS = 10  # enough to show it loads and answers
 MODEL_FILES = ["*.json", "*.safetensors", "*.txt", "*.jinja"]
 PACKAGES = (
     "torch",
@@ -72,6 +76,16 @@ PACKAGES = (
 )
 INTERNET_PROBE_URL = "https://huggingface.co"
 UV_PIN = "uv==0.12.3"
+# Minutes a stage of each kind may run before it is killed, guessed before any session: a
+# stage that hangs then costs its cap, not the rest of the budget.
+STAGE_CAPS_MINUTES = {
+    "env": 5,
+    "secrets": 2,
+    "download": 15,
+    "install": 20,
+    "grpo": 25,
+    "vllm": 15,
+}
 # Plan section 3.10: prompts are fitted to 1,536 tokens, LoRA covers every linear layer.
 MAX_PROMPT_TOKENS = 1536
 LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
@@ -158,7 +172,8 @@ class Stack:
 # vLLM 0.33.0 pins torch 2.14.0 and transformers < 5.21, and Unsloth's T4 recipe pins
 # vLLM 0.11.2 (torch 2.9.0), transformers 4.57.6 and TRL 0.22.2.
 STACKS = {
-    "vllm": Stack(("vllm==0.33.0",), system_site_packages=False),
+    # bitsandbytes for the 4-bit reference, at kaggle/requirements-gpu.txt's pin.
+    "vllm": Stack(("vllm==0.33.0", "bitsandbytes==0.50.2"), system_site_packages=False),
     # Forge's training stack as uv.lock has it, on the image's torch: ADR-0006's training
     # stack if vLLM can't run beside it.
     "trl": Stack(
@@ -219,6 +234,11 @@ class Stage:
     removes: str | None = None  # a venv to delete once this stage is over
     env: tuple[tuple[str, str], ...] = ()  # set for the child over the session's own
 
+    @property
+    def kind(self) -> str:
+        """What the stage does, which sets its time cap: its name up to the first colon."""
+        return self.name.partition(":")[0]
+
 
 @dataclass(frozen=True)
 class Outcome:
@@ -253,6 +273,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     run.add_argument("--vllm", action=argparse.BooleanOptionalAction, default=True)
     run.add_argument("--stacks", nargs="*", choices=GRPO_STACKS, default=list(GRPO_STACKS))
     run.add_argument("--max-tokens", type=_positive, default=256, help="vLLM tokens per reply")
+    run.add_argument(
+        "--bnb-models",
+        nargs="*",
+        default=[REFERENCE_MODEL],
+        help="loaded by vLLM in 4-bit with bitsandbytes, on a few prompts",
+    )
     run.add_argument("--secret-labels", nargs="*", default=["HF_TOKEN"])
     run.add_argument(
         "--budget-minutes",
@@ -278,6 +304,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     vllm.add_argument("--max-tokens", type=_positive, default=256)
     vllm.add_argument("--max-model-len", type=_positive, default=2048)
     vllm.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    vllm.add_argument("--quantization", choices=["bitsandbytes"], default=None)
     bench = commands.add_parser("grpo-bench", parents=[child, shared, grpo])
     bench.add_argument("--model", required=True)
     bench.add_argument("--revision", default=None)
@@ -315,48 +342,64 @@ def _positive(text: str) -> int:
 
 
 def plan_stages(args: argparse.Namespace, python: str = sys.executable) -> list[Stage]:
-    """What ``run`` does, in order: probes, downloads, then each stack's install and benches."""
+    """What ``run`` does, in order: probes, downloads, each GRPO stack, then vLLM's.
+
+    The GRPO benches come first, since ADR-0006 rests on them, so a vLLM stage that hangs
+    can't take their time.
+    """
     work = Path(args.work_dir)
     stages = [
         Stage("env", python, ("env",)),
         Stage("secrets", python, ("secrets", "--labels", *args.secret_labels)),
     ]
-    stages += [Stage(f"download:{m}", python, ("download", "--model", m)) for m in args.models]
-    if args.vllm:
-        stages += _stack_stages("vllm", "vllm", work, python, args, _vllm_argv)
+    stages += [_download(model, python) for model in args.models]
     for stack in args.stacks:
-        bench = functools.partial(_grpo_argv, stack, work)
-        stages += _stack_stages(stack, f"grpo:{stack}", work, python, args, bench)
+        grpo = [(f"grpo:{stack}:{m}", m, _grpo_argv(stack, work, m, args)) for m in args.models]
+        stages += _stack_stages(stack, work, python, grpo)
+    if args.vllm:
+        vllm = [(f"vllm:{m}", m, _vllm_argv(m, args, args.prompts)) for m in args.models]
+        vllm += [
+            (f"vllm:{m}:bnb", m, _vllm_argv(m, args, BNB_PROMPTS, "bitsandbytes"))
+            for m in args.bnb_models
+        ]
+        # Fetched only now, so the reference's 16 GB don't hold up the GRPO benches.
+        extra = [m for m in dict.fromkeys(args.bnb_models) if m not in args.models]
+        stages += [_download(model, python) for model in extra]
+        stages += _stack_stages("vllm", work, python, vllm)
     return stages
 
 
+def _download(model: str, python: str) -> Stage:
+    return Stage(f"download:{model}", python, ("download", "--model", model))
+
+
 def _stack_stages(
-    stack: str,
-    label: str,
-    work: Path,
-    python: str,
-    args: argparse.Namespace,
-    bench_argv: Callable[[str, argparse.Namespace], tuple[str, ...]],
+    stack: str, work: Path, python: str, benches: list[tuple[str, str, tuple[str, ...]]]
 ) -> list[Stage]:
-    """Install ``stack`` into its own venv, bench each model in it, then delete it."""
+    """Install ``stack`` into its own venv, run each ``(name, model, argv)`` bench in it,
+    then delete it."""
     venv = work / "venvs" / stack
     install = Stage(f"install:{stack}", python, ("install", "--stack", stack, "--venv", str(venv)))
-    benches = [
+    stages = [
         Stage(
-            f"{label}:{model}",
+            name,
             str(venv / "bin" / "python"),
-            bench_argv(model, args),
+            argv,
             needs=(install.name, f"download:{model}"),
             env=ONE_GPU,
         )
-        for model in args.models
+        for name, model, argv in benches
     ]
-    benches[-1] = replace(benches[-1], removes=str(venv))
-    return [install, *benches]
+    stages[-1] = replace(stages[-1], removes=str(venv))
+    return [install, *stages]
 
 
-def _vllm_argv(model: str, args: argparse.Namespace) -> tuple[str, ...]:
-    options = _options(prompts=args.prompts, max_tokens=args.max_tokens, seed=args.seed)
+def _vllm_argv(
+    model: str, args: argparse.Namespace, prompts: int, quantization: str | None = None
+) -> tuple[str, ...]:
+    options = _options(prompts=prompts, max_tokens=args.max_tokens, seed=args.seed)
+    if quantization is not None:
+        options += ("--quantization", quantization)
     return ("vllm-bench", "--model", model, *options)
 
 
@@ -396,6 +439,7 @@ def new_report(args: argparse.Namespace) -> dict[str, Any]:
         # How Kaggle started the script, which FG-303's entry script needs to know.
         "launch": {"argv0": sys.argv[0], "file": _script_file(), "cwd": os.getcwd()},
         "args": {k: v for k, v in vars(args).items() if k != "command"},
+        "stage_caps_minutes": dict(STAGE_CAPS_MINUTES),
         "stages": [],
     }
 
@@ -416,7 +460,8 @@ def run(
     passed: set[str] = set()
     for stage in plan_stages(args):
         entry: dict[str, Any] = {"name": stage.name, "status": "skipped", "started_at": _now()}
-        entry.update(seconds=None, env=dict(stage.env), result=None, error=None)
+        entry.update(seconds=None, timeout_seconds=None, env=dict(stage.env))
+        entry.update(result=None, error=None)
         missing = [name for name in stage.needs if name not in passed]
         left = deadline - clock()
         if missing:
@@ -424,8 +469,10 @@ def run(
         elif left <= 0:
             entry["error"] = f"out of budget ({args.budget_minutes:g} min)"
         else:
+            timeout = min(left, STAGE_CAPS_MINUTES[stage.kind] * 60)
+            entry["timeout_seconds"] = timeout
             start = clock()
-            outcome = runner(stage, work / "results" / f"{_slug(stage.name)}.json", left)
+            outcome = runner(stage, work / "results" / f"{_slug(stage.name)}.json", timeout)
             entry.update(status=outcome.status, result=outcome.result, error=outcome.error)
             entry["seconds"] = round(clock() - start, 3)
             if outcome.status == "ok":
@@ -483,7 +530,7 @@ def run_child(
     finally:
         timer.cancel()
     if killed.is_set():
-        return Outcome("timeout", error=f"killed after {timeout:.0f} s, the budget left")
+        return Outcome("timeout", error=f"killed after {timeout:.0f} s")
     if result_file.is_file():
         data = json.loads(result_file.read_text(encoding="utf-8"))
         if data["ok"]:
@@ -613,7 +660,8 @@ def install_stage(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
-    """Greedy fp16 generation on the spike prompts: a T4 has no bf16."""
+    """Greedy generation on the spike prompts in fp16, since a T4 has no bf16, from 4-bit
+    bitsandbytes weights with ``--quantization``, as FG-306's backend asks for them."""
     from vllm import LLM, SamplingParams
 
     start = time.perf_counter()
@@ -621,6 +669,7 @@ def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
         model=args.model,
         revision=args.revision,
         dtype="half",
+        quantization=args.quantization,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         seed=args.seed,
@@ -640,6 +689,7 @@ def vllm_stage(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "settings": {
             "dtype": "half",
+            "quantization": args.quantization,
             "max_model_len": args.max_model_len,
             "gpu_memory_utilization": args.gpu_memory_utilization,
             "temperature": 0.0,
