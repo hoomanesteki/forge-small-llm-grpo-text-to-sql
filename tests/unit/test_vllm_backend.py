@@ -24,7 +24,12 @@ from forge.infer.base import (
     render_chat,
     sample_seed,
 )
-from forge.infer.vllm_backend import REQUIREMENTS, VllmBackend, sampling_kwargs
+from forge.infer.vllm_backend import (
+    GPU_MEMORY_UTILIZATION,
+    REQUIREMENTS,
+    VllmBackend,
+    sampling_kwargs,
+)
 from tests.fakes import FakeLoRARequest, FakeVllm, VocabTokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -165,6 +170,22 @@ def test_an_eval_config_in_4bit_loads_its_engine_in_4bit(monkeypatch: pytest.Mon
         backend, _ = model_backend(dataclasses.replace(config, quantization=quantization))
         assert isinstance(backend, VllmBackend)
     assert [engine["quantization"] for engine in vllm.engines] == [None, "bitsandbytes"]
+
+
+@pytest.mark.phase(3)
+def test_an_eval_config_sets_the_engines_share_of_gpu_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vllm = FakeVllm(_sql_reply).install(monkeypatch)
+    config = EvalConfig(model="org/model@0123abc", backend="vllm", host="kaggle")
+    for share in (None, 0.6):
+        model_backend(dataclasses.replace(config, gpu_memory_utilization=share))
+    # Unset, the engine takes the backend's default.
+    assert [engine["gpu_memory_utilization"] for engine in vllm.engines] == [
+        GPU_MEMORY_UTILIZATION,
+        0.6,
+    ]
+    assert GPU_MEMORY_UTILIZATION == 0.85
 
 
 @pytest.mark.phase(3)
