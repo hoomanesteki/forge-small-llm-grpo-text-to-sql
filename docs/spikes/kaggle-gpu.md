@@ -42,7 +42,8 @@ Once `uv run forge doctor` shows Kaggle auth ok, on a clean commit that passed `
 6. Push the session-limit probe as a CPU kernel, which spends no GPU quota:
    `kaggle kernels push -p build/kaggle-spike/limit -t 900`. After 15 minutes, check its
    status, fetch its output the same way, and compare `last_beat_at` in
-   `limit-probe.json` with the 900-second timeout.
+   `limit-probe.json` with the 900-second timeout. Its `spike-report.json` holds only
+   `launch`: how Kaggle started the CPU kernel.
 7. `kaggle quota -v` again. The difference in GPU hours used goes in the ledger:
    `uv run forge ledger add --platform kaggle --gpu T4 --hours <h> --run-id <run_id> --purpose "FG-301 throughput spike"`,
    with the run id step 4 printed (`<YYYY-MM-DD>-throughput-spike-<sha7>`).
@@ -91,6 +92,17 @@ the planned 24 (`planned_completions_per_step`). Each GRPO bench prompts with th
 text: the chats are rendered before training with Qwen3's thinking off, since Unsloth's
 TRL 0.22 has no `chat_template_kwargs`, and a template that ignores the switch fails the
 stage. The result says thinking was off and gives the mean completion length.
+
+The script may run inside an IPython kernel rather than as `python throughput.py`:
+then it has no `__file__`, its `argv` is the kernel's own (`ipykernel_launcher.py -f
+<connection file>`), and its code may be a cell's with no file on disk. So the arguments
+written into `KERNEL_ARGV` win over the interpreter's in the kernel's own process, while a
+stage's child, which `run_child` marks with `FORGE_SPIKE_CHILD=1`, takes its command line.
+Before it parses its arguments, every launch writes `spike-report.json` with `launch`
+only (`argv0`, `argv`, `kernel_argv`, `file`, `cwd`), so a launch the arguments don't suit
+still says how it happened. The children run this script's file, a file is taken for it
+only if it holds the script's `REPORT_SCHEMA` line, and when there is none the cell's
+source is written to the work folder and run from there (`launch.script`).
 
 The stacks are candidates, each pinned in the script and none verified on a T4:
 
@@ -150,8 +162,9 @@ slug, a P100, a public kernel.
 - Does `--accelerator NvidiaTeslaT4` on a kernel whose metadata says the same give a T4
   session? (`env.nvidia_smi`, `env.torch.devices`.) Not measured yet.
 - How many GPUs does the session show, and how much memory each? Not measured yet.
-- How does Kaggle start a script kernel: what are `launch.argv0`, `launch.file` and
-  `launch.cwd` in the report? FG-303's entry script depends on it. Not measured yet.
+- How does Kaggle start a script kernel: what are `launch.argv0`, `launch.argv`,
+  `launch.file` and `launch.cwd` in the report, and which file did the children run
+  (`launch.script`)? FG-303's entry script depends on it. Not measured yet.
 
 ## 2. Kaggle Secrets in pushed runs
 
