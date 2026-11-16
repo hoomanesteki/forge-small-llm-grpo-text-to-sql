@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import sys
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +19,7 @@ from datasets import Dataset, load_from_disk
 from transformers import TrainerCallback, TrainerControl, TrainerState
 from typer.testing import CliRunner
 
+import forge.train
 from forge import cli
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
@@ -30,6 +34,7 @@ from forge.train.sft import RunExists, open_rows, platform_for, run_sft
 from forge.train.sft_data import build_sft_dataset, read_meta, save_sft
 from tests.fakes import WordTokenizer
 
+ROOT = Path(__file__).resolve().parents[2]
 RUN = "2026-11-15-tiny-sft-abc1234"
 MODEL = "org/tiny@0123456789abcdef0123456789abcdef01234567"
 
@@ -458,3 +463,47 @@ def test_train_sft_command(
     assert misspelt.exit_code == 1
     assert "sft.max_step: Extra inputs are not permitted" in misspelt.stderr
     assert chosen == [("trl", "cpu")]
+
+
+@pytest.mark.phase(4)
+def test_training_commands_name_the_cpu_extra_they_miss(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The packages the commands name are the cpu extra's, as pyproject.toml lists them.
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extra = project["project"]["optional-dependencies"]["cpu"]
+    names = tuple(re.split(r"[<>=!~ \[;]", spec, maxsplit=1)[0] for spec in extra)
+    assert names == cli.CPU_EXTRA
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
+    config = tmp_path / "sft.yaml"
+    config.write_text(f"run: {{kind: sft, model_ref: '{MODEL}', device: cpu}}\nsft: {{}}\n")
+    commands = {
+        "build-sft": ["data", "build-sft", "--prompt-version", "p1", "--tokenizer", MODEL],
+        "train": ["train", "sft", "--config", str(config), "--run-id", RUN, "--allow-dirty"],
+        "promote": ["runs", "promote", RUN, "--config", str(config), "--eval", "e"],
+    }
+
+    def without(package: str, *names: str, fresh: Sequence[str] = ()) -> None:
+        with monkeypatch.context() as patch:
+            # None in sys.modules makes `import <package>` fail as it does where it isn't
+            # installed; the modules in ``fresh`` import it at their top, so they are
+            # imported again.
+            patch.setitem(sys.modules, package, None)
+            for module in fresh:
+                patch.delitem(sys.modules, module)
+                patch.delattr(forge.train, module.rpartition(".")[2])
+            for name in names:
+                result = CliRunner().invoke(cli.app, commands[name])
+                assert isinstance(result.exception, SystemExit), (name, result.exception)
+                assert (name, result.exit_code, result.stderr) == (
+                    name,
+                    1,
+                    f"error: {package} is not installed; it comes with the cpu extra: run "
+                    "`make setup`\n",
+                )
+
+    # datasets, which the SFT modules import at their top, and torch, which the backend
+    # imports once the run is under way: one error line either way, never a traceback.
+    without("datasets", *commands, fresh=("forge.train.sft", "forge.train.sft_data"))
+    without("torch", "train")
+    assert not (tmp_path / "runs").exists()

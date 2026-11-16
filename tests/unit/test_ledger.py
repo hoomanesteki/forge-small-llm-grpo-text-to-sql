@@ -319,6 +319,49 @@ def test_ledger_record_adds_a_local_run_once(
     assert [row.hours for row in read_rows(ledger) if row.run_id == resumed.run_id] == [1.0, 0.5]
 
 
+@pytest.mark.phase(4)
+def test_ledger_record_says_to_record_a_running_local_run_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = tmp_path / "compute-ledger.md"
+    runs = LocalRunStore(tmp_path / "runs")
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(runs.root))
+    monkeypatch.setenv("FORGE_LEDGER", str(ledger))
+    # A pilot still training on this machine: there is nothing to pull, so the note says to
+    # run the same command again, for the run and for a session of a resumed one.
+    running = _manifest(
+        run_id="2026-11-16-qwen2-5-coder-0-5b-instruct-sft-abc1234",
+        platform="local-mps",
+        gpu="Apple M4",
+        status="running",
+        ended_at=None,
+    )
+    resumed = running.model_copy(update={"run_id": "2026-11-16-tiny-sft-def5678"})
+    for manifest in (running, resumed):
+        runs.put_manifest(manifest)
+    (runs.root / resumed.run_id / "sessions.json").write_text(
+        json.dumps([FIRST.to_json(), Session(LATER).to_json()]), encoding="utf-8"
+    )
+
+    def record(run_id: str) -> str:
+        result = CliRunner().invoke(cli.app, ["ledger", "record", run_id])
+        assert result.exit_code == 0, result.output
+        return str(result.stdout)
+
+    again = "run forge ledger record {} again once it ends\n"
+    assert record(running.run_id) == (
+        f"ledger: no row yet, run {running.run_id} is running; " + again.format(running.run_id)
+    )
+    assert record(resumed.run_id).endswith(
+        f"ledger: session 2 of run {resumed.run_id} is running; " + again.format(resumed.run_id)
+    )
+    assert [row.run_id for row in read_rows(ledger)] == [resumed.run_id]
+    # A pulled run's note still says to pull it.
+    assert record_run(running, path=ledger)[1] == [
+        f"ledger: no row yet, run {running.run_id} is running; pull it once it ends"
+    ]
+
+
 @pytest.mark.phase(3)
 def test_append_once_holds_under_concurrent_pulls(ledger: Path) -> None:
     from concurrent.futures import ThreadPoolExecutor

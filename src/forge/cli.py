@@ -75,6 +75,18 @@ QuantizationName = Literal["awq"]
 NOT_A_DEV_USE = (
     "note: no model output on dev, so this is not one of the six dev evaluations (ADR-0004)"
 )
+# The packages of pyproject.toml's cpu extra, which the training commands import; a unit
+# test keeps the two in step.
+CPU_EXTRA = ("accelerate", "datasets", "peft", "torch", "transformers", "trl")
+
+
+def _error_line(exc: Exception) -> str:
+    """The one line a command prints for ``exc``: for a package of the cpu extra that isn't
+    installed, the extra to install rather than Python's bare message."""
+    package = (exc.name or "").partition(".")[0] if isinstance(exc, ModuleNotFoundError) else ""
+    if package in CPU_EXTRA:
+        return f"error: {package} is not installed; it comes with the cpu extra: run `make setup`"
+    return f"error: {exc}"
 
 
 @data_app.command("fetch")
@@ -292,9 +304,11 @@ def data_build_sft(
     from forge.data.prompts import chat_token_counter, load_tokenizer, render_prompt_stats
     from forge.data.spider import resolve_data_dir
     from forge.ops.paths import RepoRootNotFound
-    from forge.train.sft_data import build_sft_dataset, render_counts, save_sft
 
     try:
+        # Imported here, where a missing cpu extra is an error line: it needs datasets.
+        from forge.train.sft_data import build_sft_dataset, render_counts, save_sft
+
         data_dir = resolve_data_dir()
         count = chat_token_counter(load_tokenizer(tokenizer))
         dataset = build_sft_dataset(prompt_version, tokenizer, count, data_dir=data_dir)
@@ -302,7 +316,7 @@ def data_build_sft(
     # OSError covers missing data, a tokenizer that can't be loaded and a failed write;
     # ValueError covers SplitLeak.
     except (ImportError, OSError, RepoRootNotFound, ValueError) as exc:
-        typer.echo(f"error: {exc}", err=True)
+        typer.echo(_error_line(exc), err=True)
         raise typer.Exit(1) from exc
     meta = dataset.meta
     typer.echo(f"data: {data_dir}")
@@ -859,7 +873,8 @@ def ledger_record(
 
     The date, platform, GPU and hours come from the manifest and the run's sessions, as
     forge runs pull takes them for a pulled run, so a local-mps pilot's hours are never
-    typed. A local-cpu run holds no GPU and gets no row.
+    typed. A local-cpu run holds no GPU and gets no row, and a run still going none yet:
+    run this again once it ends.
     """
     from forge.ops.hub import LocalRunStore
     from forge.ops.ledger import record_run
@@ -868,7 +883,10 @@ def ledger_record(
 
     try:
         manifest = LocalRunStore(runs_dir()).get_manifest(run_id)
-        _, notes = record_run(manifest, sessions_of(manifest, runs_dir() / run_id))
+        sessions = sessions_of(manifest, runs_dir() / run_id)
+        # A local run has nothing to pull: the same command adds its row once it ends.
+        again = f"run forge ledger record {run_id} again once it ends"
+        _, notes = record_run(manifest, sessions, again=again)
     except _runs_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -1487,17 +1505,20 @@ def runs_promote(
     from forge.eval.run_files import RunUnfinished
     from forge.ops.hub import hub_store
     from forge.ops.paths import runs_dir
-    from forge.train.sft import checkpoint_scores, promote_best
 
-    # An eval run that hasn't finished is a RuntimeError, which a store's errors are not.
-    errors: tuple[type[Exception], ...] = (*_runs_errors(), RunUnfinished)
+    # An eval run that hasn't finished is a RuntimeError, which a store's errors are not;
+    # an ImportError is the cpu extra missing.
+    errors: tuple[type[Exception], ...] = (*_runs_errors(), RunUnfinished, ImportError)
     try:
+        # Imported here, where a missing cpu extra is an error line: it needs datasets.
+        from forge.train.sft import checkpoint_scores, promote_best
+
         base = EvalConfig(**read_config_file(config))
         scores, sources = checkpoint_scores(run_id, evals, base=base, runs_root=runs_dir())
         where = hub_store() if store == "hub" else None
         promoted = promote_best(run_id, scores, sources=sources, runs_root=runs_dir(), store=where)
     except errors as exc:
-        typer.echo(f"error: {exc}", err=True)
+        typer.echo(_error_line(exc), err=True)
         raise typer.Exit(1) from exc
     for rel, score in promoted.record["scores"].items():
         typer.echo(f"{rel}: official EX {score:.2%} on val, in run {sources[rel]}")
@@ -1548,13 +1569,16 @@ def train_sft(
     from forge.ops.paths import RepoRootNotFound
     from forge.train.backends import BackendUnavailable
     from forge.train.config import load_train_config
-    from forge.train.sft import run_sft
 
     try:
+        # Imported here, where a missing cpu extra is an error line: it needs datasets.
+        from forge.train.sft import run_sft
+
         config = load_train_config(config_file)
         run = run_sft(config, run_id=run_id, allow_dirty=allow_dirty, sft_root=sft_dir)
     # OSError covers missing data, a model that can't be found and a run id already used;
-    # ValueError a config no SFT run takes, a device with no platform, and SplitLeak.
+    # ValueError a config no SFT run takes, a device with no platform, and SplitLeak;
+    # ImportError the cpu extra not installed.
     except (
         BackendUnavailable,
         DirtyTreeError,
@@ -1564,7 +1588,7 @@ def train_sft(
         RepoRootNotFound,
         ValueError,
     ) as exc:
-        typer.echo(f"error: {exc}", err=True)
+        typer.echo(_error_line(exc), err=True)
         raise typer.Exit(1) from exc
     manifest = run.manifest
     trainer = manifest.config["trainer"]
