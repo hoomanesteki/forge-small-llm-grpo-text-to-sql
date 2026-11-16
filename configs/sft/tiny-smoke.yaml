@@ -1,0 +1,23 @@
+# make smoke's SFT run: 3 steps of LoRA on the tiny random-weight model (configs/models.yaml's
+# tiny, at the same commit), on the CPU, over the fixture's train questions. It checks the
+# wiring from rows to a saved adapter, not what the model learns; its eval scores noise.
+#
+#   FORGE_DATA_DIR=tests/fixtures/spider_mini uv run forge train sft --config configs/sft/tiny-smoke.yaml
+#
+# What it leaves out takes ADR-0010's starting value, as every SFT config does.
+run:
+  kind: sft
+  model_ref: trl-internal-testing/tiny-Qwen2ForCausalLM-2.5@edca82771e1fad8f0b7ce110ffe770c682043fec
+  seed: 42
+  backend: trl
+  device: cpu
+data:
+  prompt_version: p1
+sft:
+  max_steps: 3
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 1
+  logging_steps: 1
+ops:
+  # One checkpoint in 3 steps, so the smoke pushes one to the run store as a GPU run does.
+  checkpoint_every: 2
