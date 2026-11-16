@@ -273,7 +273,7 @@ def test_wrong_requests_and_outputs_are_refused(monkeypatch: pytest.MonkeyPatch)
     backend = VllmBackend("org/model")
     with pytest.raises(ValueError, match="n=2 needs a temperature above 0"):
         backend.generate(PROMPTS, GenParams(n=2))
-    # No prompts, no request: vLLM would take an empty list for one empty conversation.
+    # No prompts, no request: an empty batch never reaches the engine.
     assert backend.generate([], GenParams()) == []
     assert vllm.calls == []
 

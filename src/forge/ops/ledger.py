@@ -20,9 +20,10 @@ every session of a run on a budget platform has a row, a row names its run's pla
 and the cash spent stays within ``CASH_LIMIT_USD``.
 
 Every date here is a UTC date, as run ids are (``forge.ops.clock``): a pulled row takes
-the UTC day its run started, ``forge ledger add`` today's UTC date unless told another,
-and ``summary``'s window ends on today's UTC date. A row's date and its run id's date
-then agree, and a session that ended in the evening west of UTC counts this week at once.
+the UTC day its session started, ``forge ledger add`` today's UTC date unless told
+another, and ``summary``'s window ends on today's UTC date. So a row's date is the same
+wherever it is written, a later session's row may be dated after its run id, and a
+session that ended in the evening west of UTC counts this week at once.
 """
 
 from __future__ import annotations
