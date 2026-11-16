@@ -208,8 +208,9 @@ same path in the kernel before the model loads, so it needs the `HF_TOKEN` secre
 manifest names the adapter by that path, which `forge runs promote` reads, and records the
 `adapter_sha256` of the files it loaded. The push reads the adapter as both of those do
 (`forge.ops.adapters.checkpoint_ref`) and refuses, before any upload, a checkpoint outside
-`runs/`, a folder on this machine, and a checkpoint of a run this machine knows trained
-another model. A trailing `/` or a leading `./` is pushed spelled the one way.
+`runs/`, a path in `runs/` that names no checkpoint, such as `runs/<run_id>` (whatever this
+machine's `runs/` holds), a folder on this machine, and a checkpoint of a run this machine
+knows trained another model. A trailing `/` or a leading `./` is pushed spelled the one way.
 
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the

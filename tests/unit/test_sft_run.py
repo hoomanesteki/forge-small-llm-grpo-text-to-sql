@@ -572,3 +572,21 @@ def test_training_commands_name_the_cpu_extra_they_miss(
     without("datasets", *commands, fresh=("forge.train.sft", "forge.train.sft_data"))
     without("torch", "train")
     assert not (tmp_path / "runs").exists()
+
+
+@pytest.mark.phase(4)
+def test_a_missing_module_inside_a_cpu_extra_package_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # transformers is installed and one of its modules isn't, as after a version mismatch:
+    # make setup is no fix, so the line names the module Python couldn't find.
+    missing = ModuleNotFoundError("No module named 'transformers.x'", name="transformers.x")
+
+    def run(*args: Any, **kwargs: Any) -> None:
+        raise missing
+
+    monkeypatch.setattr(sft, "run_sft", run)
+    config = tmp_path / "sft.yaml"
+    config.write_text(f"run: {{kind: sft, model_ref: '{MODEL}', device: cpu}}\nsft: {{}}\n")
+    result = CliRunner().invoke(cli.app, ["train", "sft", "--config", str(config)])
+    assert (result.exit_code, result.stderr) == (1, "error: No module named 'transformers.x'\n")

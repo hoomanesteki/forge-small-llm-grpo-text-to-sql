@@ -82,8 +82,10 @@ CPU_EXTRA = ("accelerate", "datasets", "peft", "torch", "transformers", "trl")
 
 def _error_line(exc: Exception) -> str:
     """The one line a command prints for ``exc``: for a package of the cpu extra that isn't
-    installed, the extra to install rather than Python's bare message."""
-    package = (exc.name or "").partition(".")[0] if isinstance(exc, ModuleNotFoundError) else ""
+    installed, the extra to install rather than Python's bare message. A module missing
+    inside an installed package, as after a version mismatch, keeps Python's message,
+    which names it: make setup is no fix for that."""
+    package = exc.name if isinstance(exc, ModuleNotFoundError) else None
     if package in CPU_EXTRA:
         return f"error: {package} is not installed; it comes with the cpu extra: run `make setup`"
     return f"error: {exc}"

@@ -72,7 +72,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -97,7 +97,7 @@ from forge.ops.dev_usage import (
     log_dev_use,
     read_uses,
 )
-from forge.ops.hub import KERNEL_DIR, KERNELS_FILE, LocalRunStore, RunNotFound, replace_run
+from forge.ops.hub import KERNEL_DIR, KERNELS_FILE, RUNS, LocalRunStore, RunNotFound, replace_run
 from forge.ops.kaggle import (
     CODE_SLUG,
     DATA_SLUG,
@@ -216,14 +216,22 @@ def kernel_adapter(adapter: str, runs_root: Path, model: str) -> str:
     fetches from the run store, as ``runs/<run_id>/checkpoints/<name>``, or a Hub repo id
     with an optional ``@revision``, as given.
 
-    When ``runs_root`` has the checkpoint's run, its manifest or the ``kernels.json`` of
-    its push, the run must have trained ``model``. Raises ``JobRefused`` otherwise.
+    Any other path in ``runs/``, such as a run's own folder, is refused. When
+    ``runs_root`` has the checkpoint's run, its manifest or the ``kernels.json`` of its
+    push, the run must have trained ``model``. Raises ``JobRefused`` otherwise.
     """
     try:
         ref = checkpoint_ref(adapter)
     except ValueError as exc:
         raise JobRefused(f"--adapter: {exc}") from None
     if ref is None:
+        # A path in runs/ names a run's files, not the Hub repo of an owner called runs, so
+        # the kernel would fetch nothing: refused whatever this machine's runs/ holds.
+        if PurePosixPath(adapter).parts[:1] == (RUNS,):
+            raise JobRefused(
+                f"--adapter {adapter} is in {RUNS}/ but names no checkpoint; name a checkpoint, "
+                f"{RUNS}/<run_id>/checkpoints/<name>, which the kernel fetches from the run store"
+            )
         if Path(adapter).exists():
             raise JobRefused(
                 f"--adapter {adapter} is a folder on this machine, which the kernel can't "

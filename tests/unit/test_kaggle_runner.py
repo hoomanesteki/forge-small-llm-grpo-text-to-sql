@@ -712,6 +712,16 @@ def test_eval_job_adapter_is_checked_before_the_push(
     ):
         refused = push(config, adapter)
         assert refused.exit_code == 1 and message in refused.stderr, (adapter, refused.stderr)
+    # A run's folder, or a path in runs/ with no run's checkpoint in it, from a folder that
+    # holds no runs/ and from the checkout whose runs/ holds the run: the kernel would fetch
+    # nothing, so each is refused, however this machine's folders lie.
+    hint = "names no checkpoint; name a checkpoint, runs/<run_id>/checkpoints/<name>, which"
+    near_misses = [f"runs/{run}", f"./runs/{run}/", "runs/checkpoints", f"runs/{run}/final"]
+    for cwd in (repo.parent, repo):
+        monkeypatch.chdir(cwd)
+        for adapter in near_misses:
+            refused = push(base, adapter)
+            assert refused.exit_code == 1 and hint in refused.stderr, (cwd, adapter)
     # Refused before anything was pushed.
     assert len(fake.pushed) == pushes
     assert push(base, checkpoint).exit_code == 0
