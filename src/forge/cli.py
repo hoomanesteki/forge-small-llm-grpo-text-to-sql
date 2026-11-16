@@ -1189,16 +1189,17 @@ def runs_pull(
         ),
     ] = "hub",
 ) -> None:
-    """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR), and add its ledger row.
+    """Mirror the run into runs/<run_id>/ (FORGE_RUNS_DIR), and add its ledger rows.
 
     Each file or folder at the top of the run that the store holds replaces the local one,
     and what only runs/<run_id>/ holds, such as kernels.json, stays. A run that held a GPU
-    and has ended gets its row in docs/compute-ledger.md from its manifest, once.
+    gets a row in docs/compute-ledger.md for each of its sessions that has ended, once.
     """
     from forge.eval.run_files import MANIFEST_FILE
     from forge.ops.hub import LocalRunStore, hub_store
     from forge.ops.ledger import record_run
     from forge.ops.paths import runs_dir
+    from forge.ops.sessions import sessions_of
 
     if store == "kaggle":
         kaggle_output(run_id)
@@ -1221,13 +1222,14 @@ def runs_pull(
         typer.echo(f"run {run_id}: {local.root / run_id}, from {pulled_from}")
     typer.echo(f"{manifest.kind} run, {manifest.status}")
     try:
-        _, note = record_run(manifest)
+        _, notes = record_run(manifest, sessions_of(manifest, local.root / run_id))
     except _runs_errors() as exc:
         typer.echo(
-            f"error: run {run_id} is pulled, but its ledger row wasn't added: {exc}", err=True
+            f"error: run {run_id} is pulled, but its ledger rows weren't added: {exc}", err=True
         )
         raise typer.Exit(1) from exc
-    typer.echo(note)
+    for note in notes:
+        typer.echo(note)
 
 
 @runs_app.command("push")
