@@ -182,14 +182,20 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
 
 - A pull replaces each top-level file or folder of the run that the store holds and keeps the
   rest, such as `kernels.json`, as `forge kaggle output` does.
-- A pull, from either store, also writes the run's row in `docs/compute-ledger.md` from its
-  manifest, once a run id: the UTC date it started, its platform and GPU, its wall-clock
-  hours from `started_at` to `ended_at`, what it was and its cost. A `local-cpu` run gets no
-  row, and a run still `running` none yet: pull it again once it ends. Kernel output with
-  no manifest, such as a spike's, gets none either; add it with `forge ledger add`.
-- Invariant I7 (`tests/integration/test_invariants.py`) checks that every `kaggle`, `colab`
-  or `modal` run under `docs/runs/` and `runs/` has a row, that a run's row names its
-  platform, and that the ledger's cash stays within $50.
+- A pull, from either store, also writes a row in `docs/compute-ledger.md` for each of the
+  run's sessions that has ended, once a session: the UTC date the session started, the
+  run's platform and GPU, the session's wall-clock hours, what the run was and how the
+  session ended, and the run's cost. A run's `sessions.json` lists its sessions, one an
+  attempt (`forge.ops.sessions`); a run without one has one session, from its manifest's
+  `started_at` to `ended_at`. A later session's row ends its purpose with `(session N)`. A
+  `local-cpu` run gets no row, and a session still running none yet: pull the run again
+  once it ends. A session killed before it could record its end has no hours to log, so
+  the pull names it; add it with `forge ledger add`, its purpose ending `(session N)`.
+  Kernel output with no manifest, such as a spike's, gets no row either; add it the same
+  way.
+- Invariant I7 (`tests/integration/test_invariants.py`) checks that every session of every
+  `kaggle`, `colab` or `modal` run under `docs/runs/` and `runs/` has a row, that a run's
+  rows name its platform, and that the ledger's cash stays within $50.
 - `forge eval run --store hub` fetches the run from the store when `runs/<run_id>/` has no
   manifest, so a run another machine started resumes here, and puts the folder in the store
   when the run ends, finished or failed. If that upload fails after the run finished, the
@@ -227,9 +233,11 @@ before the next one.
   `stopped_time_guard` in its manifest and goes to its run store like a run that ended.
   It resumes like a failed one: the same `--run-id`, or `forge kaggle run --resume`.
   `forge eval run` and the kernel's entry script don't pass a deadline yet.
-- A manifest's `gpu_hours` is its wall-clock time from `started_at` to `ended_at` on a
-  platform with a GPU (`local-mps` too), and none on `local-cpu`. A resumed run keeps its
-  first `started_at`, so its hours include the time between its sessions.
+- A resumed run keeps its first `started_at`, but each attempt is a session of its own in
+  the run's `sessions.json`, with its own start, end and status. A manifest's `gpu_hours`
+  adds up its sessions' wall-clock hours on a platform with a GPU (`local-mps` too), and is
+  none on `local-cpu`; each session gets its own ledger row. The time between two sessions
+  holds no GPU, so it counts in neither.
 
 ## Baselines
 

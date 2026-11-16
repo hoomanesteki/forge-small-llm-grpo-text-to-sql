@@ -6,14 +6,18 @@ toward the project's GPU total, and Modal is where cash can be spent. Laptop ses
 on its CPU or on Apple silicon's GPU (``local-mps``, ADR-0016), spend neither budget
 and count toward neither.
 
-A run's hours are its wall-clock time, from its manifest's ``started_at`` to its
-``ended_at`` (``run_hours``): a session holds its GPU for all of it, loading and
-uploading included.
+A run gets a row for each of its sessions (``forge.ops.sessions``), so a run resumed in a
+second session has two, and the time between them counts in neither. A session's hours
+are its wall-clock time, from its start to its end (``run_hours``): it holds its GPU for
+all of it, loading and uploading included, and a kernel session's span is the kernel's.
+A later session says which it is at the end of its row's purpose, as `` (session 2)``;
+a row that names none is its run's first, as every row was before runs kept sessions.
 
-``forge runs pull`` writes a run's row from its manifest (``record_run``) once the run
-has ended, on any platform with a GPU, and only once a run id: the check and the append
-share one lock. ``audit`` is invariant I7: every run on a budget platform has a row, a
-row names its run's platform, and the cash spent stays within ``CASH_LIMIT_USD``.
+``forge runs pull``, ``forge kaggle output`` and ``forge kaggle wait`` write the rows of a
+run's sessions that have ended (``record_run``), on any platform with a GPU, and only
+once a session: the check and the append share one lock. ``audit`` is invariant I7:
+every session of a run on a budget platform has a row, a row names its run's platform,
+and the cash spent stays within ``CASH_LIMIT_USD``.
 
 Every date here is a UTC date, as run ids are (``forge.ops.clock``): a pulled row takes
 the UTC day its run started, ``forge ledger add`` today's UTC date unless told another,
@@ -34,6 +38,7 @@ from forge.core.types import RunManifest
 from forge.ops.clock import utc_today
 from forge.ops.logfile import locked_append
 from forge.ops.paths import ledger_path
+from forge.ops.sessions import Session
 
 COLUMNS = ("date", "platform", "gpu", "hours", "run_id", "purpose", "cost_usd")
 PLATFORMS = frozenset({"local-cpu", "local-mps", "kaggle", "colab", "modal"})
@@ -48,6 +53,8 @@ HEADER = "| " + " | ".join(COLUMNS) + " |\n|" + "---|" * len(COLUMNS) + "\n"
 PREAMBLE = "# Compute ledger\n\n" + HEADER
 # The project's cash budget (plan section 4, I7); the GPUs themselves are free.
 CASH_LIMIT_USD = 50.0
+# How a row of a run's later session ends its purpose.
+_SESSION_MARK = re.compile(r" \(session (\d+)\)$")
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,13 @@ class LedgerRow:
         for name, text in (("run_id", self.run_id), ("gpu", self.gpu)):
             if _TABLE_BREAKERS.search(text):
                 raise ValueError(f"{name} must not contain '|' or line breaks: {text!r}")
+
+    @property
+    def session(self) -> int:
+        """Which session of its run the row is for: the first, unless its purpose names
+        a later one."""
+        found = _SESSION_MARK.search(self.purpose)
+        return 1 if found is None else int(found.group(1))
 
     def to_markdown(self) -> str:
         self.validate()
@@ -139,17 +153,20 @@ def has_run(run_id: str, path: Path | None = None) -> bool:
 
 
 class _Logged(Exception):
-    """The ledger has a row for the run already."""
+    """The ledger has a row for the run's session already."""
 
 
 def append_once(row: LedgerRow, path: Path | None = None) -> bool:
-    """Append ``row`` unless the ledger has a row for its run id; returns whether it did.
+    """Append ``row`` unless the ledger has a row for the same session of the same run;
+    returns whether it did.
 
-    The check runs under the append's lock, so two pulls of one run at once add one row.
+    The check runs under the append's lock, so two pulls of one run at once add one row
+    a session.
     """
+    session = (row.run_id, row.session)
 
     def unlogged(before: str) -> None:
-        if any(logged.run_id == row.run_id for logged in _parse(before)):
+        if any((logged.run_id, logged.session) == session for logged in _parse(before)):
             raise _Logged
 
     try:
@@ -159,9 +176,9 @@ def append_once(row: LedgerRow, path: Path | None = None) -> bool:
     return True
 
 
-def purpose(manifest: RunManifest) -> str:
+def purpose(manifest: RunManifest, status: str | None = None) -> str:
     """What a run was, for its row: its kind and model, its config's split, prompt version
-    and limit when it names them, and how it ended."""
+    and limit when it names them, and how it ended, or ``status``, how a session did."""
     words = f"{manifest.kind} {manifest.model_ref}"
     if manifest.adapter_ref:
         words += f" with {manifest.adapter_ref}"
@@ -171,61 +188,101 @@ def purpose(manifest: RunManifest) -> str:
     for name, label in (("prompt_version", "prompt"), ("limit", "limit")):
         if config.get(name) is not None:
             words += f", {label} {config[name]}"
-    return f"{words}, {manifest.status}"
+    return f"{words}, {status or manifest.status}"
 
 
-def run_row(manifest: RunManifest) -> LedgerRow:
-    """The ledger row of a run that has ended: the UTC date it started, where it ran and on
-    which GPU, its wall-clock hours, what it was and its cost.
+def session_row(
+    manifest: RunManifest, number: int, session: Session, cost_usd: float = 0.0
+) -> LedgerRow:
+    """The row of the run's session ``number``, counted from 1, which has ended: the UTC
+    date it started, where the run ran and on which GPU, the session's hours, what the run
+    was and how the session ended, and ``cost_usd``.
 
-    Raises ``ValueError`` for a run that hasn't ended, whose hours aren't known yet.
+    Raises ``ValueError`` for a session with no end, whose hours aren't known.
     """
-    if manifest.ended_at is None:
-        raise ValueError(f"run {manifest.run_id} is {manifest.status}, so its hours aren't known")
+    if session.ended_at is None:
+        raise ValueError(
+            f"session {number} of run {manifest.run_id} is {session.status} with no end, so "
+            "its hours aren't known"
+        )
+    mark = "" if number == 1 else f" (session {number})"
     return LedgerRow(
-        date=manifest.started_at.astimezone(UTC).date(),
+        date=session.started_at.astimezone(UTC).date(),
         platform=manifest.platform,
         gpu=manifest.gpu or "",
-        hours=run_hours(manifest.started_at, manifest.ended_at),
+        hours=run_hours(session.started_at, session.ended_at),
         run_id=manifest.run_id,
-        purpose=purpose(manifest),
-        cost_usd=manifest.cost_usd,
+        purpose=purpose(manifest, session.status) + mark,
+        cost_usd=cost_usd,
     )
 
 
-def record_run(manifest: RunManifest, path: Path | None = None) -> tuple[LedgerRow | None, str]:
-    """Append the row of a run that held a GPU, once; returns the row it appended, if any,
-    and a line saying what it did.
+def record_run(
+    manifest: RunManifest, sessions: Sequence[Session] | None = None, path: Path | None = None
+) -> tuple[list[LedgerRow], list[str]]:
+    """Append a row for each session of a run that held a GPU and has ended, once a
+    session; returns the rows it appended and a line for each thing it did.
 
-    A ``local-cpu`` run gets no row, and a run that hasn't ended gets none yet: pull it
-    again once it has.
+    ``sessions`` are the run's (``forge.ops.sessions.sessions_of``), by default the one its
+    manifest spans. A ``local-cpu`` run gets no row, and a session still running none yet:
+    pull the run again once it ends. A session killed before it could record its end has
+    no hours to log, so it is named, for ``forge ledger add``. The run's cost so far, less
+    what its rows hold already, goes on the row of its latest session that ended.
     """
     run = manifest.run_id
     if manifest.platform not in GPU_RUN_PLATFORMS:
-        return None, f"ledger: no row, a {manifest.platform} run holds no GPU"
-    if manifest.ended_at is None:
-        return None, f"ledger: no row yet, run {run} is {manifest.status}; pull it once it ends"
-    row = run_row(manifest)
-    if not append_once(row, path):
-        return None, f"ledger: run {run} has its row already"
-    return row, f"ledger: added {row.hours:.2f} h on {row.platform} for run {run}"
+        return [], [f"ledger: no row, a {manifest.platform} run holds no GPU"]
+    sessions = list(sessions or [Session(manifest.started_at, manifest.ended_at, manifest.status)])
+    if len(sessions) == 1 and sessions[0].status == "running":
+        return [], [f"ledger: no row yet, run {run} is running; pull it once it ends"]
+    spent = sum(row.cost_usd for row in read_rows(path) if row.run_id == run)
+    latest = max((n for n, s in enumerate(sessions, 1) if s.ended_at is not None), default=0)
+    added, notes = [], []
+    for number, session in enumerate(sessions, 1):
+        which = f"run {run}" if len(sessions) == 1 else f"session {number} of run {run}"
+        if session.status == "running":
+            notes.append(f"ledger: {which} is running; pull it once it ends")
+        elif session.ended_at is None:
+            mark = "" if number == 1 else f", ending its purpose with (session {number})"
+            notes.append(
+                f"ledger: {which} never recorded its end; add its hours with forge ledger add"
+                + mark
+            )
+        else:
+            cost = max(0.0, manifest.cost_usd - spent) if number == latest else 0.0
+            row = session_row(manifest, number, session, cost)
+            if append_once(row, path):
+                added.append(row)
+                notes.append(f"ledger: added {row.hours:.2f} h on {row.platform} for {which}")
+            else:
+                notes.append(f"ledger: {which} has its row already")
+    return added, notes
 
 
-def audit(manifests: Iterable[RunManifest], rows: Sequence[LedgerRow]) -> list[str]:
-    """How ``manifests`` and the ledger's ``rows`` break invariant I7, a line each.
+def audit(
+    runs: Iterable[tuple[RunManifest, Sequence[Session]]], rows: Sequence[LedgerRow]
+) -> list[str]:
+    """How ``runs``, each a manifest with its sessions, and the ledger's ``rows`` break
+    invariant I7, a line each.
 
-    A run on a budget platform (``GPU_PLATFORMS``) needs a row. Any run with a row, a
-    ``local-mps`` pilot among them, needs its row to name its platform. All the rows'
-    cash together must stay within ``CASH_LIMIT_USD``.
+    Every session of a run on a budget platform (``GPU_PLATFORMS``) needs its row. Any run
+    with a row, a ``local-mps`` pilot among them, needs its rows to name its platform. All
+    the rows' cash together must stay within ``CASH_LIMIT_USD``.
     """
     logged: dict[str, list[LedgerRow]] = {}
     for row in rows:
         logged.setdefault(row.run_id, []).append(row)
     problems = []
-    for manifest in manifests:
+    for manifest, sessions in runs:
         run, platform = manifest.run_id, manifest.platform
-        if platform in GPU_PLATFORMS and run not in logged:
-            problems.append(f"run {run} ran on {platform}, and the ledger has no row for it")
+        if platform in GPU_PLATFORMS:
+            have = {row.session for row in logged.get(run, [])}
+            for number in range(1, len(sessions) + 1):
+                if number not in have:
+                    which = "it" if len(sessions) == 1 else f"its session {number}"
+                    problems.append(
+                        f"run {run} ran on {platform}, and the ledger has no row for {which}"
+                    )
         problems += [
             f"run {run} ran on {platform}, but its ledger row of {row.date} says {row.platform}"
             for row in logged.get(run, [])
