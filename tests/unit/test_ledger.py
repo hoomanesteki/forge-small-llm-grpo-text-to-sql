@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from forge import cli
 from forge.core.types import RunManifest
-from forge.ops.hub import manifest_bytes
+from forge.ops.hub import LocalRunStore, manifest_bytes
 from forge.ops.ledger import (
     GPU_PLATFORMS,
     GPU_RUN_PLATFORMS,
@@ -253,6 +253,70 @@ def test_pull_adds_no_row_without_a_gpu_or_an_end(hub: FakeHub, tmp_path: Path) 
     assert row.purpose == "eval Qwen/Qwen3-4B with runs/sft/checkpoints/best on val, finished"
     # Every platform but the laptop's CPU holds a GPU.
     assert {p for p in PLATFORMS if p not in GPU_RUN_PLATFORMS} == {"local-cpu"}
+
+
+@pytest.mark.phase(4)
+def test_ledger_record_adds_a_local_run_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = tmp_path / "compute-ledger.md"
+    runs = LocalRunStore(tmp_path / "runs")
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(runs.root))
+    monkeypatch.setenv("FORGE_LEDGER", str(ledger))
+    pilot = _manifest(
+        run_id="2026-11-16-qwen2-5-coder-0-5b-instruct-sft-abc1234",
+        kind="sft",
+        config={"data": {"split": "train"}},
+        model_ref="Qwen/Qwen2.5-Coder-0.5B-Instruct@" + "e" * 40,
+        platform="local-mps",
+        gpu="Apple M4",
+        status="finished",
+    )
+    laptop = _manifest(run_id="2026-11-16-tiny-sft-abc1234", platform="local-cpu", gpu=None)
+    for manifest in (pilot, laptop):
+        runs.put_manifest(manifest)
+
+    def record(run_id: str) -> Any:
+        return CliRunner().invoke(cli.app, ["ledger", "record", run_id])
+
+    first, second = record(pilot.run_id), record(pilot.run_id)
+    assert (first.exit_code, second.exit_code) == (0, 0), first.output
+    # The hours are the manifest's, from its start to its end.
+    assert first.stdout == f"ledger: added 1.50 h on local-mps for run {pilot.run_id}\n"
+    assert second.stdout == f"ledger: run {pilot.run_id} has its row already\n"
+    purpose = f"sft {pilot.model_ref}, finished"
+    assert read_rows(ledger) == [
+        LedgerRow(date(2026, 11, 16), "local-mps", "Apple M4", 1.5, pilot.run_id, purpose)
+    ]
+    assert record(laptop.run_id).stdout == "ledger: no row, a local-cpu run holds no GPU\n"
+    missing = record("2026-11-16-nothing-abc1234")
+    assert missing.exit_code == 1 and missing.stderr.startswith("error: ")
+    assert len(read_rows(ledger)) == 1
+
+    # A pilot resumed on this machine gets a row for each session, with its own hours,
+    # never the time between them.
+    resumed = pilot.model_copy(
+        update={"run_id": "2026-11-16-qwen2-5-coder-0-5b-instruct-sft-def5678"}
+    )
+    runs.put_manifest(resumed)
+    first_end = resumed.started_at + timedelta(hours=1)
+    second_start = resumed.started_at + timedelta(days=1)
+    (runs.root / resumed.run_id / "sessions.json").write_text(
+        json.dumps(
+            [
+                Session(resumed.started_at, first_end, "stopped_time_guard").to_json(),
+                Session(second_start, second_start + timedelta(minutes=30), "finished").to_json(),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    both = record(resumed.run_id)
+    assert both.exit_code == 0, both.output
+    assert both.stdout == (
+        f"ledger: added 1.00 h on local-mps for session 1 of run {resumed.run_id}\n"
+        f"ledger: added 0.50 h on local-mps for session 2 of run {resumed.run_id}\n"
+    )
+    assert [row.hours for row in read_rows(ledger) if row.run_id == resumed.run_id] == [1.0, 0.5]
 
 
 @pytest.mark.phase(3)
