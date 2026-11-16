@@ -38,7 +38,11 @@ A GPU job runs the code and reads the data from two private Kaggle datasets, bot
 1. `uv run forge kaggle publish-data`, once. It checks every file `spider.sha256` lists in
    `data/spider` (or `FORGE_DATA_DIR`), copies them and that file to `build/kaggle-data/`,
    and creates `<owner>/forge-spider` with Spider's CC BY-SA 4.0 attribution and citation in
-   its description. Once the dataset exists, it uploads nothing.
+   its description. The copy is about 511 MB, so it is removed after the upload
+   (`--keep-build` keeps it). Once `kaggle datasets status` says the dataset is ready, it
+   uploads nothing; while Kaggle is still processing it, it says so and exits 1, so run it
+   again later; and when the last version failed or was deleted, it uploads the files again
+   as a new version.
 2. `uv run forge kaggle publish-code`, on a clean tree, for each commit a job runs. It builds
    the wheel into `build/kaggle-code/` with `kaggle/requirements-gpu.txt` and `GIT_SHA`, then
    uploads it as a new version of `<owner>/forge-code` noted with the SHA, creating the

@@ -269,6 +269,20 @@ CHECKSUM_FILE = "spider.sha256"
 REQUIREMENTS = Path("kaggle") / "requirements-gpu.txt"
 CODE_BUNDLE = Path("build") / "kaggle-code"
 DATA_BUNDLE = Path("build") / "kaggle-data"
+# kagglesdk's DatabundleVersionStatus names, lowercased as `kaggle datasets status` prints
+# them. Only a ready dataset can be mounted, a failed or deleted version never will be,
+# and every other one is a step on the way to ready.
+DATASET_READY = "ready"
+DATASET_BROKEN = frozenset({"failed", "deleted"})
+DATASET_STATUSES = DATASET_BROKEN | {
+    DATASET_READY,
+    "not_yet_persisted",
+    "blobs_received",
+    "blobs_decompressed",
+    "blobs_copied_to_sds",
+    "individual_blobs_compressed",
+    "reprocessing",
+}
 
 # CC BY-SA 4.0 asks for the authors, the license and its link wherever the data goes.
 SPIDER_DESCRIPTION = (
@@ -341,20 +355,32 @@ class KaggleClient:
     executable: str = field(default_factory=kaggle_bin)
 
     def dataset_exists(self, ref: str) -> bool:
-        """Whether the dataset ``owner/slug`` exists; raises on any other failure."""
+        """Whether the dataset ``owner/slug`` exists, in any status; raises on any other
+        failure."""
+        return self.dataset_status(ref) is not None
+
+    def dataset_status(self, ref: str) -> str | None:
+        """The status of the dataset ``owner/slug``, one of ``DATASET_STATUSES``, or None
+        when there is no such dataset; raises on any other failure."""
         command = [self.executable, "datasets", "status", ref]
         result = _run(self.run, command)
         if result.returncode == 0:
-            return True
+            # kaggle 2.2.5 prints the status alone, last, and exits 0 whatever it is.
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            status = lines[-1] if lines else ""
+            if status not in DATASET_STATUSES:
+                raise KaggleError(f"{_display(command)} printed {_tail(result.stdout)!r}")
+            return status
         # A missing dataset is a 404, which kaggle 2.2.5 reports as "... was not found."
         if "not found" in _output(result).lower():
-            return False
+            return None
         raise _failed(command, result)
 
     def create_dataset(self, folder: Path) -> str:
         """Create the dataset ``folder``'s metadata names; returns what the CLI printed."""
         # Never -u: without it a new dataset is private. zip mode uploads each subfolder
-        # as an archive, where the default (skip) would leave it out without a word.
+        # as an archive, where the default (skip) would leave it out with only a printed
+        # "Skipping folder" note, and exit 0.
         return self._upload([self.executable, "datasets", "create", "-p", str(folder), "-r", "zip"])
 
     def version_dataset(self, folder: Path, message: str) -> str:
@@ -575,17 +601,36 @@ def publish_data(
     client: KaggleClient,
     data_dir: Path,
     checksums: Traversable = CHECKSUMS,
+    *,
+    keep_build: bool = False,
 ) -> Published | None:
-    """Create ``<owner>/forge-spider`` from the verified data; ``None`` if it exists.
+    """Upload the verified data as ``<owner>/forge-spider``; ``None`` if it is there.
 
     The checksum list pins Spider, so the data never changes and one upload serves every
-    job. The check comes first, so a dataset that is there costs no copy of the data.
+    job: a dataset whose status says ready is left as it is. The check comes first, so
+    that costs no copy of the data. A dataset whose last version failed or was deleted is
+    not there, so the data goes up again as a new version, and one Kaggle is still
+    processing raises ``KaggleError`` rather than go up twice. The bundle is a whole copy
+    of Spider, so it is removed once the upload is done, unless ``keep_build``.
     """
     ref = f"{owner}/{DATA_SLUG}"
-    if client.dataset_exists(ref):
+    status = client.dataset_status(ref)
+    if status == DATASET_READY:
         return None
+    if status is not None and status not in DATASET_BROKEN:
+        raise KaggleError(
+            f"{ref} is still being processed ({status}); run forge kaggle publish-data "
+            f"again once kaggle datasets status {ref} says ready"
+        )
     bundle = build_data_bundle(root, owner, data_dir, checksums)
-    return Published(ref, True, client.create_dataset(bundle))
+    if status is None:
+        published = Published(ref, True, client.create_dataset(bundle))
+    else:
+        note = f"The verified Spider files again, after a {status} version"
+        published = Published(ref, False, client.version_dataset(bundle, note))
+    if not keep_build:
+        shutil.rmtree(bundle)
+    return published
 
 
 def _kaggle_json_username(env: Mapping[str, str], home: Path) -> str | None:

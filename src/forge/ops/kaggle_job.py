@@ -68,6 +68,7 @@ from forge.ops.hub import KERNEL_DIR, KERNELS_FILE, replace_run
 from forge.ops.kaggle import (
     CODE_SLUG,
     DATA_SLUG,
+    DATASET_BROKEN,
     GIT_SHA_FILE,
     KaggleClient,
     KaggleError,
@@ -94,9 +95,6 @@ KERNEL_BUILD = Path("build") / "kaggle-kernel"
 STATUS_FILE = "status.json"  # what kaggle/entry.py writes in the run's folder
 SESSION_HOURS = 12.0
 OVERRUN = 1.5
-# kagglesdk's DatabundleVersionStatus names, lowercased as the CLI prints them: every
-# other one is a step on the way to ready.
-DATASET_BROKEN = frozenset({"failed", "deleted"})
 DATASET_POLL_S = 15.0
 # The paths a Colab runtime gives the job in place of /kaggle/...
 COLAB_DIRS = ["--input-dir", "/content/input", "--work-dir", "/content/working"]
