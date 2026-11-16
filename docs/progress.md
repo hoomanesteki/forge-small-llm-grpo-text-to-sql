@@ -126,9 +126,10 @@ Work discovered along the way that is not a plan story.
 | FG-295 | Gate 2 fixes: last items | done | The taxonomy reads a whole ORDER BY alias in parentheses or with COLLATE, drops parentheses around a whole ORDER BY term, and lets a derived table's or CTE's columns win over an alias; `rebuild` skips a chart only for a renderer-shaped Software text, and the full-data pilot test skips rather than pass when its chart isn't compared; `compare --out` naming the default file through a symlink or letter case writes that file; `git_sha` excludes the logs where `forge.ops.paths` puts them; the pilot's rule-3 note recounted by `scripts/count_pilot_extraction.py`; `GitError` hand-off for Phase 3 |
 | FG-391 | Gate 3 fixes: UTC dates and ledger sessions | done | One UTC date for run ids, ledger rows, dev-usage rows and the ledger's week (`forge.ops.clock`), and runner tests that take the UTC date, with one pinned ten hours west of UTC; each attempt at a run is a session in its `sessions.json`, a manifest's GPU hours add up its sessions, and each session gets its own ledger row, marked `(session N)` after the first, which `append_once` keys on and I7 checks; a kernel's session spans the whole kernel (`status.json`, `sessions.json`); `forge kaggle wait` and `output` add the rows |
 | FG-392 | Gate 3 fixes: kernel jobs | done | A kernel's eval job stops at a deadline counted from the kernel's start to the push's timeout (`--timeout-s`), a tenth kept back for official EX and the upload, then uploads and resumes; `forge eval run --deadline-minutes` does the same; the restore is the first stage, so a resume that fails early still carries the run; every stage result, the error and `error.txt` are redacted, with secrets cleaned as huggingface_hub sends them; the data is checked against the wheel's pinned list; a dev look is logged as soon as Kaggle accepts the push, one row a run id across resumes (ADR-0004 notes); a push that dropped a source is recorded with a warning; run ids that make no kernel slug and `--resume --emit-notebook` are refused before any upload; the runbook says when the code dataset is published |
-| FG-393 | Gate 3 fixes: run store | done | Hub downloads retry network failures, and `get_manifest` tells a missing run (`RunNotFound`) from an outage (`StoreUnavailable`, with its cause); only refused or dropped connections, timeouts, 408, 429 and 5xx count, a `RuntimeError` only with such a cause; each failure is retried by huggingface_hub or by the store, never both, measured with the real client on an in-process transport (at most 23 s or 14 s of waits); a retried pull starts from an empty folder; `--store hub`, `forge runs push` and the kernel's upload compare the two copies' sessions (`forge.ops.run_copies`), fetch the store's when it is newer, and refuse copies that went separate ways; a pull and `forge kaggle output` leave no file the new copy lacks but `kernels.json`, `kernel/` and the lock; `publish-data` counts only a ready dataset as there, uploads a new version over a failed or deleted one, refuses one Kaggle is still processing, and removes `build/kaggle-data` after the upload (`--keep-build`) |
+| FG-393 | Gate 3 fixes: run store | done | Hub downloads retry network failures, and `get_manifest` tells a missing run (`RunNotFound`) from an outage (`StoreUnavailable`, with its cause); only refused or dropped connections, timeouts, 408, 429 and 5xx count, a `RuntimeError` only with such a cause; each failure is retried by huggingface_hub or by the store, never both, measured with the real client on an in-process transport (at most 14 s of the store's waits, or 23 s of the client's unless the Hub's answer names a wait); a retried pull starts from an empty folder; `--store hub`, `forge runs push` and the kernel's upload compare the two copies' sessions (`forge.ops.run_copies`), fetch the store's when it is newer, and refuse copies that went separate ways; a pull and `forge kaggle output` leave no file the new copy lacks but `kernels.json`, `kernel/` and the lock; `publish-data` counts only a ready dataset as there, uploads a new version over a failed or deleted one, refuses one Kaggle is still processing, and removes `build/kaggle-data` after the upload (`--keep-build`) |
 | FG-394 | Gate 3 fixes: throughput spike | done | Fixed and tested on CPU with fakes, as FG-301 was; the spike itself still waits on the Kaggle account. The `trl` stack's venv is seeded with pip, which counts the image's torch where uv does not, and the install fails if a torch lands in the venv; every bench runs with `CUDA_VISIBLE_DEVICES=0` while `env` sees all GPUs, and a GRPO bench records `n_gpu` and the completions TRL scored a step; GRPO prompts are rendered with thinking off for every stack (a template without the switch fails the stage), with the mean completion length; `vllm:Qwen/Qwen3-8B:bnb` loads the 4-bit reference as FG-306's backend asks; each stage kind has a time cap (`stage_caps_minutes`) and the GRPO stacks run before vLLM's; in an IPython kernel the baked argv wins, children are marked with `FORGE_SPIKE_CHILD`, `launch` is written before parsing, and the children run this script's file or the cell's source written out |
 | FG-395 | Gate 3 fixes: time guard and vLLM backend | done | `TimeGuardCallback` turns evaluation off at its stop step and at that epoch's end, so `save_strategy="best"` can't drop the guard's save and no unbudgeted evaluation runs, and the epoch's end asks for the save again if something cleared it (tested on the tiny model); the vLLM backend renders every prompt with `render_chat` and sends `LLM.generate` the token ids the hf backend feeds its model, Qwen3's too, never `LLM.chat`, compared with the tiny model's real tokenizer on its own and a Qwen3-style template; `check_params` refuses a temperature between 0 and 0.01, which vLLM would raise to 0.01; `gpu_memory_utilization` is an eval option for vllm (config file or `--gpu-memory-utilization`), in the manifest's config only when set; the p2 run is for the model ADR-0012's rule chooses, as plan section 3.7 says (ADR-0007, `pending.yaml`, the runbook, `test_artifacts.py`) |
+| FG-396 | Gate 3 fixes: last items | done | A push Kaggle started is never called refused (kaggle 2.2.5's versionless "successfully pushed" included, recorded with no version), and its dev look and its record are each written whatever the other raises; a resume whose kernel source Kaggle dropped is marked in `kernels.json` and the next resume mounts the attempt before it; a new run's kernel that failed before its job gets a note quoting its `status.json` span for `forge ledger add`; publish-data removes its bundle after a failed upload too; the run store retries what huggingface_hub didn't, told by the request's method, path and failure (a dropped download, a 5xx outside 500/502/503/504), and states the `Retry-After` worst case; a pull keeps this machine's `kernels.json` and `kernel/` unless the store's record lists more pushes; the kernel redacts every log record (stderr tested with a retried canary); the spike's 4-bit load runs right after vLLM's install under a 10-minute cap, and the budget's last 20 minutes are kept for its download, install and load; docstrings and comments corrected |
 
 - GPU packages are pinned outside `uv.lock`, in `kaggle/requirements-gpu.txt` (ADR-0002, FG-301).
 - `core/hashing.py` landed with FG-006 because the manifest builder needs it; FG-102 adds its tests.
@@ -815,6 +816,15 @@ Work discovered along the way that is not a plan story.
   laptop a resumed training run is one session from its first start, and
   `TimeGuardCallback`'s `close` counts from there, until those jobs call
   `forge.ops.sessions.begin` and `end` (FG-391).
+- Hand-off for the Phase 4 replay: since FG-391 `forge.ops.ledger.record_run(manifest,
+  sessions=None, path=None)` returns `(rows, notes)`, the rows it appended and a note a
+  session, where it returned `(row or None, note)`; a run gets a row for each session that
+  has ended, and `append_once` keys a row on its run id and session number, the
+  `(session N)` its purpose ends with after the first. FG-491's `forge ledger record`
+  (exp/fg-491-local-pilot-sft) still does `_, note = record_run(manifest)`: on the replay
+  it must pass `sessions_of(manifest, run_dir)` and echo each note, as `cli._log_run`
+  does, or a resumed local-mps run is one row from its first start to its last end
+  (FG-391, FG-396).
 - Five runner tests read the local date, so west of UTC they failed every evening while
   CI, in UTC, passed. The far-west test stops the clock on a Sunday evening ten hours west
   (`TZ=HST10`, a POSIX zone that needs no zone database), where the local date is the day
@@ -830,7 +840,8 @@ Work discovered along the way that is not a plan story.
 - A resume whose kernel source Kaggle dropped fails at its restore stage, and its output
   holds no run, so the resume after it mounts nothing to restore either. Such a run needs
   a new `--run-id`, unless a later story has `plan_job` mount the last attempt whose
-  output holds the run (FG-392).
+  output holds the run (FG-392). Since FG-396 `kernels.json` marks that attempt
+  (`kernel_source_dropped`), and the next resume mounts the one before it.
 - A dev look is one row a run id only for `forge kaggle run --resume`: the push can't tell
   whether the attempt before it reached dev. On the laptop `load_dev` still logs each load,
   a resume's included, as ADR-0004 decided (FG-392).
@@ -839,7 +850,10 @@ Work discovered along the way that is not a plan story.
   turn an unreachable Hub into `LocalEntryNotFoundError` with the frames of the error cut off.
   So the store tells what the client retried by the path of the request that failed
   (`forge.ops.hub.client_retried`); an upgrade of huggingface_hub has to pass
-  `test_store_and_client_retries_never_stack`, which runs the real client (FG-393).
+  `test_store_and_client_retries_never_stack`, which runs the real client (FG-393). The
+  path was not enough: a download's metadata request is retried only after a refused
+  connection, a timeout or one of the client's statuses, and the download itself only on
+  its own terms, so since FG-396 the method and the failure count too.
 - `snapshot_download` that can't reach the Hub returns a `local_dir` that isn't empty as if it
   were complete, so a retried pull could have passed a half download for a whole run; each try
   now starts from an empty folder (FG-393).
@@ -865,3 +879,21 @@ Work discovered along the way that is not a plan story.
 - The plan's FG-307 block still says "the top candidate with p2", against section 3.7's "for
   the chosen model"; ADR-0007 records why section 3.7 holds. The p2 run now waits for
   FG-301's memory check, as the chosen model's dev run does (FG-395).
+- kaggle 2.2.5 prints "Kernel version successfully pushed" with no number when Kaggle
+  sends none, and the kernel runs all the same. Such a push is recorded with no version,
+  and `status`, `logs`, `output` and a resume take the kernel's latest, which is that
+  push unless another came after it (FG-396).
+- The kernel redacts log records through the record factory every logger uses, so
+  libraries with handlers of their own (huggingface_hub's, transformers') are covered
+  too. What a child process prints, pip or vLLM's engine, is not a record and goes to the
+  log as it is (FG-396).
+- The spike keeps its last 20 minutes for the 4-bit reference's download, install and
+  load, a guess like the caps, so the GRPO benches get 60 of the 80. If FG-301's session
+  still ends without the 4-bit answer, a second push with `argv: [run, --stacks]` runs
+  vLLM's stages alone (docs/spikes/kaggle-gpu.md) (FG-396).
+- `check_config` still takes `quantization` for any vllm model, though FG-306's block keeps
+  4-bit loading for reference models above 4B; the manifest records it, so such a run is
+  visible (G3-03, left as it was by FG-396).
+- A run pulled from the Hub before `forge kaggle wait` or `output` logs its last session
+  up to the upload only, and `append_once` then keeps that shorter row; the runbook says
+  to wait first (G3-10, left as it was by FG-396).

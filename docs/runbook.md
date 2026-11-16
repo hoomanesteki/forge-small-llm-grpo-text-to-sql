@@ -314,7 +314,10 @@ before the next one.
   the run's `sessions.json`, with its own start, end and status. A manifest's `gpu_hours`
   adds up its sessions' wall-clock hours on a platform with a GPU (`local-mps` too), and is
   none on `local-cpu`; each session gets its own ledger row. The time between two sessions
-  holds no GPU, so it counts in neither.
+  holds no GPU, so it counts in neither. A kernel's job writes its manifest before the
+  kernel ends, so there `gpu_hours`, which `forge runs show` prints, counts the job's own
+  span, while the session's row counts the whole kernel, setup, preflight and upload
+  included; the budget reads only the rows.
 
 ## Baselines
 
