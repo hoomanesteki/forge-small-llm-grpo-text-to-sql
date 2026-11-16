@@ -15,7 +15,8 @@ a row that names none is its run's first, as every row was before runs kept sess
 
 ``forge runs pull``, ``forge kaggle output`` and ``forge kaggle wait`` write the rows of a
 run's sessions that have ended (``record_run``), on any platform with a GPU, and only
-once a session: the check and the append share one lock. ``audit`` is invariant I7:
+once a session: the check and the append share one lock. ``forge ledger record`` does the
+same for a run made on this machine, such as a ``local-mps`` pilot. ``audit`` is invariant I7:
 every session of a run on a budget platform has a row, a row names its run's platform,
 and the cash spent stays within ``CASH_LIMIT_USD``.
 
@@ -56,6 +57,8 @@ PREAMBLE = "# Compute ledger\n\n" + HEADER
 CASH_LIMIT_USD = 50.0
 # How a row of a run's later session ends its purpose.
 _SESSION_MARK = re.compile(r" \(session (\d+)\)$")
+# What record_run's note for a session still running says to do, for a pulled run.
+PULL_AGAIN = "pull it once it ends"
 
 
 @dataclass(frozen=True)
@@ -219,30 +222,35 @@ def session_row(
 
 
 def record_run(
-    manifest: RunManifest, sessions: Sequence[Session] | None = None, path: Path | None = None
+    manifest: RunManifest,
+    sessions: Sequence[Session] | None = None,
+    path: Path | None = None,
+    *,
+    again: str = PULL_AGAIN,
 ) -> tuple[list[LedgerRow], list[str]]:
     """Append a row for each session of a run that held a GPU and has ended, once a
     session; returns the rows it appended and a line for each thing it did.
 
     ``sessions`` are the run's (``forge.ops.sessions.sessions_of``), by default the one its
     manifest spans. A ``local-cpu`` run gets no row, and a session still running none yet:
-    pull the run again once it ends. A session killed before it could record its end has
-    no hours to log, so it is named, for ``forge ledger add``. The run's cost so far, less
-    what its rows hold already, goes on the row of its latest session that ended.
+    its note ends with ``again``, what the caller's user does once it ends, by default pull
+    the run again. A session killed before it could record its end has no hours to log, so
+    it is named, for ``forge ledger add``. The run's cost so far, less what its rows hold
+    already, goes on the row of its latest session that ended.
     """
     run = manifest.run_id
     if manifest.platform not in GPU_RUN_PLATFORMS:
         return [], [f"ledger: no row, a {manifest.platform} run holds no GPU"]
     sessions = list(sessions or [manifest_session(manifest)])
     if len(sessions) == 1 and sessions[0].status == "running":
-        return [], [f"ledger: no row yet, run {run} is running; pull it once it ends"]
+        return [], [f"ledger: no row yet, run {run} is running; {again}"]
     spent = sum(row.cost_usd for row in read_rows(path) if row.run_id == run)
     latest = max((n for n, s in enumerate(sessions, 1) if s.ended_at is not None), default=0)
     added, notes = [], []
     for number, session in enumerate(sessions, 1):
         which = f"run {run}" if len(sessions) == 1 else f"session {number} of run {run}"
         if session.status == "running":
-            notes.append(f"ledger: {which} is running; pull it once it ends")
+            notes.append(f"ledger: {which} is running; {again}")
         elif session.ended_at is None:
             mark = "" if number == 1 else f", ending its purpose with (session {number})"
             notes.append(

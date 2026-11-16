@@ -290,6 +290,7 @@ uv run forge runs promote <run_id> --config <base val config> --eval <eval_run_i
 - A run made on this machine, such as a `local-mps` pilot, has nothing to pull:
   `uv run forge ledger record <run_id>` writes its rows the same way, one for each session
   that has ended, from `runs/<run_id>/` (`FORGE_RUNS_DIR`), so its hours are never typed.
+  A session still running gets no row yet: run the same command again once it ends.
 - The end of an eval run and a push replace the store's copy: files it has that the folder lacks
   are deleted, such as the `error.txt` of an attempt that failed. The kernel's upload stage only
   adds, since a kernel that failed early may hold part of a run. None of them uploads over a
