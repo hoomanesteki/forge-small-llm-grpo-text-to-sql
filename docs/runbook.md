@@ -193,7 +193,8 @@ would get the same default id.
 Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
 kernel, which only the web editor can do. Each is read without the line breaks and outer
 spaces huggingface_hub drops, and its value becomes `***` in every stage result in
-`status.json`, the error, the traceback and a failed run's `error.txt`. Without them the
+`status.json`, the error, the traceback, a failed run's `error.txt` and every log record,
+such as the run store's warning on stderr when it tries a Hub call again. Without them the
 job still runs, nothing is uploaded, and `forge kaggle output <run_id>` is how its results
 come back: the run's files go to `runs/<run_id>/`, and the log and the preflight to
 `runs/<run_id>/kernel/`.
