@@ -10,12 +10,14 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import shutil
 import subprocess
 import sys
 import types
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import httpx2
 import pytest
@@ -25,13 +27,15 @@ from forge.core.types import RunManifest, Score
 from forge.data.splits import load_val
 from forge.eval import runner
 from forge.eval.config import EvalConfig
+from forge.ops.adapters import ADAPTER_FILES, adapter_sha256
 from forge.ops.dev_usage import read_uses
 from forge.ops.hub import HubRunStore
+from forge.ops.kaggle_job import fetch_output
 from forge.ops.sessions import read_sessions
 from forge.train import sft
 from forge.train.config import OpsConfig, TrainConfig, load_train_config
 from tests.fakes import REPO_URL, FakeHub, FakeVllm, gold_reply
-from tests.kernel import SHA, argv, build_inputs, kernel_folder, mount_output
+from tests.kernel import OWNER, SHA, argv, build_inputs, kernel_folder, mount_output
 from tests.spike import entry
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -474,11 +478,13 @@ def test_entry_fetches_a_checkpoint_adapter_from_the_run_store(
     hub.files[f"runs/{sft_run}/checkpoints/final/adapter_model.safetensors"] = b"final"
     options = {"model": "org/model@abc123", "adapter": adapter, "backend": "vllm", "limit": 3}
 
-    # Without a token the store can't be read, and the job says so before a model loads.
+    # With no kernel output mounted and no token to read the store with, the job says so
+    # before a model loads.
     assert script.main(argv(kernel_env, options=options), run=lambda command: None) == 0
     work = kernel_env / "working"
     status = json.loads((work / "runs" / "run-1" / "status.json").read_text())
-    assert status["status"] == "failed" and "without an HF_TOKEN secret" in status["error"]
+    assert status["status"] == "failed"
+    assert "and without an HF_TOKEN the kernel can't read the run store" in status["error"]
     assert vllm.engines == []
 
     monkeypatch.setenv("HF_TOKEN", "hf_" + "".join(chr(97 + i % 26) for i in range(30)))
@@ -500,3 +506,139 @@ def test_entry_fetches_a_checkpoint_adapter_from_the_run_store(
     assert vllm.engines[0]["enable_lora"] is True
     run = RunManifest.model_validate_json((work / "runs" / "run-2" / "manifest.json").read_text())
     assert (run.status, run.adapter_ref, run.config["adapter"]) == ("finished", adapter, adapter)
+
+
+@pytest.mark.phase(4)
+def test_entry_copies_a_mounted_checkpoint_before_it_reads_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel_env = kernel_folder(tmp_path, monkeypatch)
+    hub = FakeHub()
+    monkeypatch.setattr("huggingface_hub.HfApi", hub.client)
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    sft_run = "2026-11-20-qwen3-4b-sft-abc1234"
+    checkpoint = f"runs/{sft_run}/checkpoints/step-000242"
+    hub.files[f"{checkpoint}/adapter_model.safetensors"] = b"the store's"
+    notebooks = kernel_env / "input" / "notebooks" / OWNER
+    # The training kernel's output, and a resumed eval's last attempt, which holds the copy
+    # that attempt made.
+    for slug in ("forge-sft", "forge-eval"):
+        (notebooks / slug / checkpoint).mkdir(parents=True)
+        (notebooks / slug / checkpoint / "adapter_config.json").write_text("{}")
+        (notebooks / slug / checkpoint / "adapter_model.safetensors").write_text("weights")
+    kernel = script.Kernel(script.parse_args(argv(kernel_env)), lambda command: None, {})
+
+    script._fetch_adapter(kernel, checkpoint)
+
+    assert (kernel.work / checkpoint / "adapter_model.safetensors").read_text() == "weights"
+    assert hub.calls == []
+    # Two mounted copies with other files can't both be the checkpoint.
+    shutil.rmtree(kernel.work / "runs")
+    (notebooks / "forge-eval" / checkpoint / "adapter_model.safetensors").write_text("others")
+    with pytest.raises(script.JobError, match=f"holds copies of {checkpoint} with other files"):
+        script._fetch_adapter(kernel, checkpoint)
+    # With no copy mounted, a token reads the store, and a checkpoint it lacks is named
+    # with both places the kernel looked.
+    shutil.rmtree(kernel_env / "input" / "notebooks")
+    looked = f"no kernel output under {kernel_env / 'input'} holds"
+    missing = f"runs/{sft_run}/checkpoints/step-000100"
+    with pytest.raises(script.JobError) as raised:
+        script._fetch_adapter(kernel, missing)
+    assert str(raised.value) == (
+        f"{looked} {missing}, and run {sft_run} in {OWNER}/forge-runs has no "
+        "checkpoints/step-000100"
+    )
+    monkeypatch.delenv("HF_TOKEN")
+    with pytest.raises(script.JobError) as raised:
+        script._fetch_adapter(kernel, checkpoint)
+    assert str(raised.value) == (
+        f"{looked} {checkpoint}, and without an HF_TOKEN the kernel can't read the run store "
+        f"{OWNER}/forge-runs; push the job with forge kaggle run, which mounts the output of "
+        f"run {sft_run}'s kernel"
+    )
+
+
+@pytest.mark.phase(4)
+def test_an_eval_kernel_takes_its_adapter_from_a_store_less_sft_kernels_output(
+    tmp_path: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The SFT job with no HF_TOKEN, as a kernel pushed with the CLI runs it: 7 steps, a
+    # checkpoint every 2, and those at a quarter and a half of the run kept.
+    trainer = kernel_folder(tmp_path / "sft", monkeypatch)
+    build_inputs(trainer, spider_mini)
+    smoke = load_train_config(ROOT / "configs" / "sft" / "tiny-smoke.yaml")
+    assert smoke.sft is not None
+    config = smoke.model_copy(
+        update={
+            "sft": smoke.sft.model_copy(update={"max_steps": 7}),
+            "ops": OpsConfig(checkpoint_every=2, keep_checkpoints_at=(0.25, 0.5)),
+        }
+    )
+    job = argv(trainer, "--no-preflight", options={"config": config.model_dump(mode="json")})
+    job[job.index("eval")] = "sft"
+    assert script.main(job, run=lambda command: None) == 0
+
+    run_dir = trainer / "working" / "runs" / "run-1"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert (status["status"], status["error"]) == ("finished", None), status["error"]
+    assert status["stages"]["upload"]["result"].startswith("skipped: no HF_TOKEN")
+    # Every checkpoint the run keeps is in the output, where the run store put it: steps 1
+    # and 3 for the shares, the latest two of the steps saved every 2, and final. Retention
+    # took step 2 alone, and nothing waits outside the run's folder for a store.
+    kept = ["final", "step-000001", "step-000003", "step-000004", "step-000006"]
+    assert sorted(path.name for path in (run_dir / "checkpoints").iterdir()) == kept
+    assert sorted(path.name for path in (trainer / "working").iterdir()) == ["runs"]
+    trained = RunManifest.model_validate_json((run_dir / "manifest.json").read_text())
+    assert (trained.outputs["kept_at_0.25"], trained.outputs["kept_at_0.5"]) == (
+        "checkpoints/step-000001",
+        "checkpoints/step-000003",
+    )
+    digests = {
+        f"checkpoints/{name}": trained.outputs[f"adapter_sha256:checkpoints/{name}"]
+        for name in kept
+    }
+
+    # forge runs pull --store kaggle brings each back at the path an eval names.
+    def kernel_output(kernel: str, folder: Path, pattern: str | None = None) -> None:
+        shutil.copytree(trainer / "working", folder, dirs_exist_ok=True)
+
+    client = types.SimpleNamespace(kernel_output=kernel_output)
+    pulled = fetch_output(client, f"{OWNER}/forge-run-1/1", "run-1", tmp_path / "laptop")
+    assert {rel: adapter_sha256(pulled / rel) for rel in digests} == digests
+
+    # An eval kernel that mounts that output copies the checkpoint's adapter files, not the
+    # trainer's state beside them, to the path the job names, holds them to the run's
+    # digest, and scores them with no HF_TOKEN.
+    vllm = FakeVllm(gold_reply(load_val(spider_mini))).install(monkeypatch)
+    half = "runs/run-1/checkpoints/step-000003"
+    options = {"model": "org/model@abc123", "adapter": half, "backend": "vllm", "limit": 3}
+
+    def evaluate(name: str, digest: str) -> tuple[Path, dict[str, Any]]:
+        root = kernel_folder(tmp_path / name, monkeypatch)
+        build_inputs(root, spider_mini)
+        mount_output(trainer, root)
+        args = argv(root, "--adapter-sha256", digest, options=options)
+        args[args.index("run-1")] = "run-2"
+        assert script.main(args, run=lambda command: None) == 0
+        work = root / "working"
+        return work, json.loads((work / "runs" / "run-2" / "status.json").read_text())
+
+    work, status = evaluate("eval", digests["checkpoints/step-000003"])
+    assert (status["status"], status["error"]) == ("finished", None), status["error"]
+    assert adapter_sha256(work / half) == digests["checkpoints/step-000003"]
+    assert "optimizer.pt" in {path.name for path in (trainer / "working" / half).iterdir()}
+    assert sorted(path.name for path in (work / half).iterdir()) == sorted(ADAPTER_FILES)
+    run = RunManifest.model_validate_json((work / "runs" / "run-2" / "manifest.json").read_text())
+    assert (run.adapter_ref, run.outputs["adapter_sha256"]) == (
+        half,
+        digests["checkpoints/step-000003"],
+    )
+    assert vllm.engines[0]["enable_lora"] is True
+    # Held to another checkpoint's digest, the job stops before a model loads.
+    _, status = evaluate("mismatch", digests["checkpoints/step-000001"])
+    assert (status["status"], status["stage"]) == ("failed", "preflight")
+    recorded = digests["checkpoints/step-000001"]
+    assert (
+        f"not {recorded}, which run run-1 recorded for checkpoints/step-000003" in (status["error"])
+    )
+    assert len(vllm.engines) == 1

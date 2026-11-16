@@ -43,11 +43,16 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
   An SFT job's time guard (``TimeGuardCallback``) counts its config's
   ``ops.time_guard_minutes`` from the job's start, or only up to that deadline, less the
   share it keeps back, when that comes first. An eval job whose adapter is a training run's
-  checkpoint, ``runs/<run_id>/checkpoints/<name>`` as on a laptop, fetches that folder
-  from the Hub run store to the same path under the work folder first, which needs
-  ``HF_TOKEN``. An SFT job builds its rows in the temp folder, and keeps its checkpoints
-  in its run's folder for the upload: an SFT run can't be resumed yet, so a checkpoint in
-  the store before the end would serve nothing.
+  checkpoint, ``runs/<run_id>/checkpoints/<name>`` as on a laptop, copies that folder's
+  adapter files to the same path under the work folder first, from the training run's
+  kernel output, which ``forge kaggle run`` mounts under the input folder, since a kernel
+  it pushes gets no ``HF_TOKEN`` (ADR-0005). Only when no mounted output holds it is the
+  folder fetched from the Hub run store, which needs ``HF_TOKEN``, as a notebook on Colab
+  has. With ``--adapter-sha256``, the digest the training run records for the checkpoint,
+  the folder must hold those files. An SFT job builds its rows in the temp folder, and its
+  checkpoints go to its run's folder, the callbacks' run store, so the output holds every
+  checkpoint the run keeps at ``runs/<run_id>/checkpoints/<name>`` (``forge.train.sft``):
+  what ``forge runs pull --store kaggle`` brings back and an eval job mounts.
 - upload: that folder to the Hub run store (``forge.ops.hub``, which tries again on
   network errors), only when there is an ``HF_TOKEN``, and only when the store's copy
   holds no session this one lacks (``forge.ops.run_copies.put_run``).
@@ -180,6 +185,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true", help="continue the run's last attempt")
     parser.add_argument(
         "--timeout-s", type=int, help="the push's timeout, which the job's deadline counts to"
+    )
+    parser.add_argument(
+        "--adapter-sha256", help="the digest of the files an eval job's checkpoint adapter holds"
     )
     return parser.parse_args(list(argv))
 
@@ -416,13 +424,17 @@ def eval_job(kernel: Kernel, preflight: bool) -> str:
 
 
 def _fetch_adapter(kernel: Kernel, adapter: str | None) -> None:
-    """Fetch the adapter of an eval job from the run store when it names a training run's
-    checkpoint, ``runs/<run_id>/checkpoints/<name>``, that the work folder lacks.
+    """Put the adapter of an eval job in the work folder when it names a training run's
+    checkpoint, ``runs/<run_id>/checkpoints/<name>``, at that path, as on a laptop.
 
-    ``forge.ops.adapters.checkpoint_ref`` reads it, as ``forge kaggle run`` did before the
-    push; a checkpoint anywhere but ``runs/`` is no folder the kernel can fetch.
+    The adapter's files are copied from the training run's kernel output, mounted under
+    the input folder, or else the folder is fetched from the run store, which needs
+    ``HF_TOKEN``; with neither, the job fails naming both places. With
+    ``--adapter-sha256`` it must hold the files with that digest.
+    ``forge.ops.adapters.checkpoint_ref`` reads the adapter, as ``forge kaggle run`` did
+    before the push; a checkpoint anywhere but ``runs/`` is no folder the kernel can find.
     """
-    from forge.ops.adapters import checkpoint_ref
+    from forge.ops.adapters import ADAPTER_FILES, check_adapter, checkpoint_ref
 
     ref = checkpoint_ref(adapter) if adapter is not None else None
     if ref is None:
@@ -433,18 +445,63 @@ def _fetch_adapter(kernel: Kernel, adapter: str | None) -> None:
             f"fetch; push the job with --adapter runs/{ref.run_id}/{ref.rel}"
         )
     target = kernel.work / ref.path
-    if target.is_dir():
-        return
+    if not target.is_dir():
+        mounted = _mounted_checkpoint(kernel, ref.path)
+        if mounted is not None:
+            # The files the eval loads and the digest covers, not the trainer's optimizer
+            # state: the copy is in this kernel's output, which the laptop downloads.
+            target.mkdir(parents=True)
+            for name in ADAPTER_FILES:
+                shutil.copy2(mounted / name, target / name)
+            print(f"[forge] adapter {ref.path} copied from {mounted}", flush=True)
+        else:
+            _fetch_from_store(kernel, ref.run_id, ref.rel, target)
+    if kernel.args.adapter_sha256 is not None:
+        try:
+            check_adapter(target, kernel.args.adapter_sha256)
+        except ValueError as exc:
+            raise JobError(
+                f"{exc}, which run {ref.run_id} recorded for {ref.rel}: these are not its weights"
+            ) from exc
+
+
+def _mounted_checkpoint(kernel: Kernel, path: str) -> Path | None:
+    """The checkpoint folder ``path``, ``runs/<run_id>/checkpoints/<name>``, in the kernel
+    outputs mounted under the input folder, or None when none holds it.
+
+    A resumed eval job mounts its last attempt's output too, which may hold the copy that
+    attempt made, so copies with the same files are one; copies that differ fail the job.
+    """
+    from forge.ops.adapters import adapter_sha256
+
+    pattern = f"**/{path}/adapter_config.json"
+    found = sorted(config.parent for config in Path(kernel.args.input_dir).glob(pattern))
+    if len({adapter_sha256(folder) for folder in found}) > 1:
+        raise JobError(
+            f"the input folder holds copies of {path} with other files: "
+            + ", ".join(str(folder) for folder in found)
+        )
+    return found[0] if found else None
+
+
+def _fetch_from_store(kernel: Kernel, run_id: str, rel: str, target: Path) -> None:
+    """Fetch the checkpoint ``rel`` of run ``run_id`` from the run store to ``target``."""
+    from forge.ops.hub import HubRunStore, RunNotFound
+
+    repo = kernel.args.run_store
+    looked = f"no kernel output under {kernel.args.input_dir} holds runs/{run_id}/{rel}"
     token = os.environ.get("HF_TOKEN")
     if not token:
         raise JobError(
-            f"the adapter {adapter} is a checkpoint in the run store {kernel.args.run_store}, "
-            "and without an HF_TOKEN secret the kernel can't read it; attach one"
+            f"{looked}, and without an HF_TOKEN the kernel can't read the run store {repo}; "
+            f"push the job with forge kaggle run, which mounts the output of run {run_id}'s "
+            "kernel"
         )
-    from forge.ops.hub import HubRunStore
-
-    HubRunStore(kernel.args.run_store, token=token).get_folder(ref.run_id, ref.rel, target)
-    print(f"[forge] adapter {adapter} fetched from {kernel.args.run_store}", flush=True)
+    try:
+        HubRunStore(repo, token=token).get_folder(run_id, rel, target)
+    except RunNotFound as exc:
+        raise JobError(f"{looked}, and {exc}") from exc
+    print(f"[forge] adapter runs/{run_id}/{rel} fetched from {repo}", flush=True)
 
 
 def sft_job(kernel: Kernel, preflight: bool) -> str:

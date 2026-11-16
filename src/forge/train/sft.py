@@ -25,7 +25,13 @@ One run, in order (plan FG-403; the starting values are ADR-0010's):
    in the run every ``ops.checkpoint_every`` steps, the time guard, counted from when the
    run starts, and the trainer's logs in ``metrics.jsonl``. The checkpoint at each share
    of the run ``ops.keep_checkpoints_at`` names is kept from retention, and the manifest's
-   outputs name it ``kept_at_<share>``, such as ``kept_at_0.5``.
+   outputs name it ``kept_at_<share>``, such as ``kept_at_0.5``. The callbacks' run store
+   is ``runs_root`` itself, so a push is a copy into the run's folder that never fails on
+   the network, and no kept checkpoint waits out of the trainer's rotation as
+   ``unpushed-checkpoint-<step>``, which would be in the temp folder the trainer saves in
+   and this function deletes. So the run's folder holds every checkpoint the run keeps:
+   the latest ``KEEP_CHECKPOINTS`` steps, the kept shares and ``final``. In a kernel job
+   that folder is in the kernel's output, which is how an eval job gets a checkpoint.
 6. The adapter in ``checkpoints/final``, and the manifest ``finished``, its outputs
    holding the digest of each checkpoint the run keeps (``forge.ops.adapters``), which an
    eval run of that checkpoint records too. When the time

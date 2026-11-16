@@ -14,6 +14,7 @@ from forge.data import spider
 from forge.data.spider import file_sha256, raw_files
 
 WHEEL = "forge-0.1.0-py3-none-any.whl"
+OWNER = "forge-owner"
 # Built at run time, so no literal here looks like a real commit.
 SHA = "".join("0123456789abcdef"[(i * 3) % 16] for i in range(40))
 # What kaggle/entry.py's main sets, and tests put back.
@@ -46,8 +47,10 @@ def kernel_folder(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def mount_output(previous: Path, root: Path, slug: str = "forge-run-1") -> Path:
     """The output of the kernel that ran in ``previous``, mounted under ``root``'s input
-    folder as a resume's kernel source is."""
-    return Path(shutil.copytree(previous / "working", root / "input" / slug))
+    folder as a kernel source is: at ``notebooks/<owner>/<slug>/``, where a CPU kernel
+    found it on 2026-11-16 (docs/spikes/kaggle-gpu/mount-probe.json)."""
+    mount = root / "input" / "notebooks" / OWNER / slug
+    return Path(shutil.copytree(previous / "working", mount))
 
 
 def write_checksums(data: Path) -> None:
@@ -83,7 +86,7 @@ def argv(root: Path, *extra: str, options: dict[str, Any] | None = None) -> list
     return [
         *("--job", "eval", "--run-id", "run-1", "--code-sha", SHA),
         *("--options", json.dumps(options or {"model": "gold", "backend": "fake"})),
-        *("--run-store", "forge-owner/forge-runs", "--input-dir", str(root / "input")),
+        *("--run-store", f"{OWNER}/forge-runs", "--input-dir", str(root / "input")),
         *("--work-dir", str(root / "working"), "--temp-dir", str(root / "temp")),
         *extra,
     ]
