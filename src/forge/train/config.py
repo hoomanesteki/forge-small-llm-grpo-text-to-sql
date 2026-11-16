@@ -12,7 +12,10 @@ ADR-0010 (LoRA and SFT) or ADR-0011 (GRPO). Every check runs when the file loads
 any model does:
 
 - A key no section has is refused, so a misspelt one can't fall back to its default, and
-  so is a key set twice, which YAML would quietly take the last of.
+  so is a key set twice, which YAML would quietly take the last of. A section with
+  nothing under it, which YAML reads as null, is refused as empty rather than read as
+  left out; only the trainer ``run.kind`` doesn't name may be null, as ``model_dump``
+  writes it.
 - Numbers are strict: YAML's ``true`` is not 1, and ``2.5`` steps are not 2. PyYAML reads
   ``5e-6`` as text (YAML 1.1 wants ``5.0e-6``), so this loader reads it as the number it
   means.
@@ -50,6 +53,7 @@ from pydantic import (
     StrictBool,
     StrictStr,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -222,11 +226,24 @@ class TrainConfig(_Section):
     grpo: GrpoConfig | None = None
     ops: OpsConfig = OpsConfig()
 
+    # YAML reads a section with nothing under it, such as `grpo:` alone, as null. Only the
+    # trainer run.kind doesn't name may be null: a config's model_dump writes it so.
+    @field_validator("run", "data", "lora", "ops", mode="before")
+    @classmethod
+    def _not_empty(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is None:
+            name = str(info.field_name)
+            required = cls.model_fields[name].is_required()
+            raise ValueError(_empty("the section", name, required=required))
+        return value
+
     @model_validator(mode="after")
     def _one_trainer(self) -> TrainConfig:
         kind = self.run.kind
         other = "grpo" if kind == "sft" else "sft"
         if getattr(self, kind) is None:
+            if kind in self.model_fields_set:
+                raise ValueError(_empty(f"the {kind} section", kind, required=False))
             raise ValueError(f"run.kind is {kind}, so the file needs the {kind} section")
         if getattr(self, other) is not None:
             raise ValueError(f"run.kind is {kind}, so the file can't have the {other} section")
@@ -240,6 +257,15 @@ class TrainConfig(_Section):
         if self.grpo is not None:
             return self.grpo.max_prompt_length + self.grpo.max_completion_length
         raise AssertionError("a validated TrainConfig has an sft or a grpo section")
+
+
+def _empty(what: str, name: str, *, required: bool) -> str:
+    """The error for section ``name``, ``what`` the error calls it, written with nothing
+    under it."""
+    fix = "write its settings under it"
+    if not required:
+        fix += f", or `{name}: {{}}` for the starting values"
+    return f"{what} is empty; {fix}"
 
 
 class _Loader(yaml.SafeLoader):
