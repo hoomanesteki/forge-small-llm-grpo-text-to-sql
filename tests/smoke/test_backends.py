@@ -15,12 +15,18 @@ import torch
 from datasets import Dataset
 from peft import PeftModel
 from safetensors.torch import load_file
-from transformers import AutoModelForCausalLM
+from transformers import (
+    AutoModelForCausalLM,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+    TrainingArguments,
+)
 
 from forge.core.types import RunManifest
 from forge.data.prompts import SYSTEM_PROMPT, count_chat_tokens
 from forge.infer.hf_backend import split_ref
-from forge.ops.hub import LocalRunStore
+from forge.ops.hub import LocalRunStore, StoreUnavailable
 from forge.train.backends import ADAPTER_DIR, TrlBackend, select_backend
 from forge.train.callbacks import training_callbacks
 from forge.train.config import GrpoConfig, LoraConfig, OpsConfig, SftConfig
@@ -149,6 +155,88 @@ def test_sft_trains_with_the_job_callbacks(tmp_path: Path, tiny_model_ref: str) 
     assert "train_runtime" in lines[-1]
     assert (store.root / RUN / "metrics.jsonl").read_bytes() == metrics.read_bytes()
     assert store.get_manifest(RUN).status == "running"  # the time guard never fired
+
+
+class FlakyStore(LocalRunStore):
+    """A local store whose pushes fail on the network, as the Hub's can, for the dests in
+    ``failing``: each once, or every one while ``down`` is set."""
+
+    def __init__(self, root: Path, failing: list[str]) -> None:
+        super().__init__(root)
+        self.failing = failing
+        self.down = False
+        self.refused: list[str] = []
+
+    def put_folder(
+        self, run_id: str, local_dir: str | Path, dest: str = "", *, replace: bool = False
+    ) -> str:
+        if self.down or dest in self.failing:
+            if dest in self.failing:
+                self.failing.remove(dest)
+            self.refused.append(dest)
+            raise StoreUnavailable(f"uploading {dest} failed 4 times")
+        return super().put_folder(run_id, local_dir, dest, replace=replace)
+
+
+class StoreBack(TrainerCallback):
+    """Brings the store back at the end of step ``step``, before that step's save."""
+
+    def __init__(self, store: FlakyStore, step: int) -> None:
+        self.store = store
+        self.step = step
+
+    def on_step_end(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
+    ) -> None:
+        if state.global_step == self.step:
+            self.store.down = False
+
+
+@pytest.mark.phase(4)
+@pytest.mark.parametrize("outage", ["once", "until step 6"])
+def test_a_kept_checkpoint_outlives_a_failed_push(
+    tmp_path: Path, tiny_model_ref: str, outage: str
+) -> None:
+    # Six steps, a checkpoint every two and the one at a fifth of the run, step 1, kept for
+    # val; the trainer's own rotation keeps the latest two in its output folder.
+    store = FlakyStore(tmp_path / "store", ["checkpoints/step-000001"])
+    ops = OpsConfig(checkpoint_every=2, keep_checkpoints_at=(0.2,))
+    callbacks = training_callbacks(ops, store, RUN, metrics_path=tmp_path / "m.jsonl", env={})
+    if outage != "once":
+        # Down from step 1's push to step 4's: the rotation at step 4 would delete step 1.
+        store.down = True
+        callbacks.append(StoreBack(store, 6))
+    backend = TrlBackend("cpu")
+    model, tokenizer = backend.load(tiny_model_ref, LoraConfig(r=4), load_in_4bit=False, seed=0)
+    rows = [
+        {
+            "example_id": f"spider-train-{i:05d}",
+            "db_id": "t",
+            "prompt": _prompt(f"Question: How many rows have id {i}?"),
+            "completion": [{"role": "assistant", "content": sql_block("SELECT 1")}],
+        }
+        for i in range(12)
+    ]
+    cfg = SftConfig(max_steps=6, per_device_train_batch_size=2, gradient_accumulation_steps=1)
+    out = tmp_path / "out"
+
+    backend.sft(model, tokenizer, Dataset.from_list(rows), cfg, callbacks, output_dir=out, seed=0)
+
+    refused = ["checkpoints/step-000001"]
+    if outage != "once":
+        refused += ["checkpoints/step-000002", "checkpoints/step-000004"]
+    assert store.refused == refused
+    # Step 1 reached the store once it took pushes again, and pruning kept it there.
+    steps = sorted(p.name for p in (store.root / RUN / "checkpoints").iterdir())
+    assert steps == (
+        ["step-000001", "step-000006"]
+        if outage != "once"
+        else ["step-000001", "step-000004", "step-000006"]
+    )
+    kept = store.root / RUN / "checkpoints" / "step-000001"
+    assert {"adapter_model.safetensors", "adapter_config.json"} <= {p.name for p in kept.iterdir()}
+    # Nothing is left waiting beside the trainer's latest two.
+    assert sorted(p.name for p in out.glob("*checkpoint-*")) == ["checkpoint-4", "checkpoint-6"]
 
 
 @pytest.mark.phase(4)
