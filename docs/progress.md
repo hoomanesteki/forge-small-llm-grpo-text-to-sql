@@ -60,6 +60,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-403 | SFT trainer with CPU smoke | 3 | done |  |  | `forge train sft --config [--run-id] [--sft-dir] [--allow-dirty]` (`forge.train.sft.run_sft`): builds the rows with the model's tokenizer, keeps an existing `data/sft/<hash>/`, reads it in memory once it hashes to its name, trains with the job callbacks and saves `checkpoints/final`; the manifest's config holds the run, data, LoRA and SFT sections, `sft_data.hash` and the trainer's backend, device and dtype, under the config hash. Local runs are `local-cpu` or `local-mps` only. `configs/sft/`: tiny-smoke, pilot-qwen25coder05b-mps, qwen3-1p7b-pilot and qwen3-4b-main, at ADR-0010's values (written here, with `max_length` 2,048). `make smoke` trains 3 steps and evaluates the adapter on 10 val questions |
 | FG-404 | SFT runs on Kaggle | 3 | todo |  |  |  |
 | FG-405 | SFT results and comparison | 2 | todo |  |  |  |
+| FG-491 | Local SFT pilot on Apple silicon | 3 | in progress |  |  |  |
 
 ## Phase 5: Rewards and GRPO (v0.5.0)
 

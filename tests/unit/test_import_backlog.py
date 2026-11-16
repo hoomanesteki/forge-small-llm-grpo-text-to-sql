@@ -35,11 +35,11 @@ def test_second_import_creates_nothing_new() -> None:
     plan = load_plan()
     fake = FakeGh()
     first = import_backlog(plan, run=fake)
-    assert sum(a.startswith("issue ") for a in first) == 57
+    assert sum(a.startswith("issue ") for a in first) == 58
     assert sum(a.startswith("milestone ") for a in first) == 9
     second = import_backlog(plan, run=fake)
     assert not [a for a in second if a.startswith(("issue ", "milestone "))]
-    assert len(fake.issues) == 57
+    assert len(fake.issues) == 58
 
 
 @pytest.mark.phase(0)
@@ -48,7 +48,7 @@ def test_dry_run_makes_no_calls() -> None:
         raise AssertionError(f"dry run called gh {args}")
 
     actions = import_backlog(load_plan(), run=refuse, dry_run=True)
-    assert sum(a.startswith("issue ") for a in actions) == 57
+    assert sum(a.startswith("issue ") for a in actions) == 58
 
 
 @pytest.mark.phase(0)
