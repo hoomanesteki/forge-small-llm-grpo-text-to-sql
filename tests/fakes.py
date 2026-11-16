@@ -7,6 +7,7 @@ import functools
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
 from types import ModuleType
@@ -23,7 +24,7 @@ from huggingface_hub.errors import (
     RevisionNotFoundError,
 )
 
-from forge.core.types import Example
+from forge.core.types import Example, RunManifest
 from forge.sql.executor import SqliteExecutor
 
 
@@ -326,3 +327,37 @@ class FakeHub:
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_bytes(data)
         return str(root)
+
+
+def sft_run_folder(
+    runs: Path, run_id: str, model_ref: str, checkpoints: Sequence[str], **changes: Any
+) -> RunManifest:
+    """A finished SFT run in ``runs/<run_id>/`` as a GPU job leaves one, without training:
+    its manifest, and an adapter in each of ``checkpoints`` whose files name the folder."""
+    fields: dict[str, Any] = {
+        "run_id": run_id,
+        "kind": "sft",
+        "git_sha": "c" * 40,
+        "config": {"sft": {"num_train_epochs": 1.0}},
+        "config_hash": "4" * 64,
+        "data_manifest_hash": "5" * 64,
+        "model_ref": model_ref,
+        "platform": "kaggle",
+        "gpu": "Tesla T4",
+        "seed": 42,
+        "started_at": datetime(2026, 11, 20, 8, 0, tzinfo=UTC),
+        "ended_at": datetime(2026, 11, 20, 10, 30, tzinfo=UTC),
+        "gpu_hours": 2.5,
+        "status": "finished",
+        "outputs": {"config": "config.yaml", "adapter": "checkpoints/final"},
+        **changes,
+    }
+    manifest = RunManifest(**fields)
+    folder = runs / run_id
+    folder.mkdir(parents=True)
+    (folder / "manifest.json").write_text(manifest.model_dump_json(indent=2) + "\n")
+    for rel in checkpoints:
+        (folder / rel).mkdir(parents=True)
+        (folder / rel / "adapter_config.json").write_text(f'{{"from": "{rel}"}}\n')
+        (folder / rel / "adapter_model.safetensors").write_text(f"weights of {rel}")
+    return manifest

@@ -35,12 +35,14 @@ The run's folder is ``runs/<run_id>/`` (``FORGE_RUNS_DIR``), in plan section 3.9
 ``manifest.json``, ``config.yaml``, ``metrics.jsonl``, ``checkpoints/step-NNNNNN/`` and
 ``checkpoints/final/``. The trainer has no eval set, since training reads train only, so
 no run writes ``checkpoints/best/``: that is the checkpoint val picks once each is
-evaluated (FG-404). An SFT run can't be resumed yet, so a run id names one run.
+evaluated, which ``promote_best`` copies there (FG-404). An SFT run can't be resumed yet,
+so a run id names one run.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import shutil
 import tempfile
@@ -60,7 +62,15 @@ from forge.data.prompts import ChatTokenizer, chat_token_counter
 from forge.data.spider import resolve_data_dir
 from forge.eval.config import check_run_id
 from forge.eval.run_files import write_atomic
-from forge.ops.hub import FINAL, METRICS_FILE, LocalRunStore, checkpoint_dir
+from forge.ops.hub import (
+    BEST,
+    FINAL,
+    METRICS_FILE,
+    LocalRunStore,
+    RunStore,
+    checkpoint_dir,
+    checkpoint_step,
+)
 from forge.ops.manifest import EndStatus, Platform, accelerator, build_manifest, close, code_sha
 from forge.ops.paths import runs_dir
 from forge.ops.timeguard import Clock
@@ -81,6 +91,11 @@ OUTPUTS: Mapping[str, str] = {
 }
 # The manifest's name for a checkpoint ops.keep_checkpoints_at keeps.
 KEPT_OUTPUT = "kept_at_{share:g}"
+# What promote_best writes beside the manifest, and what its scores are.
+PROMOTION_FILE = "best.json"
+PROMOTION_METRIC = "official EX on val"
+# A LoRA adapter as PEFT saves one, which forge eval run --adapter loads.
+ADAPTER_FILES = ("adapter_config.json", "adapter_model.safetensors")
 LOCAL_PLATFORMS: Mapping[str, Platform] = {"cpu": "local-cpu", "mps": "local-mps"}
 
 
@@ -309,6 +324,113 @@ def fit_rows(rows: Dataset, tokenizer: ChatTokenizer, cfg: SftConfig, *, seed: i
         return FitRows(rows, over)
     # In memory, as open_rows reads them, so selecting writes no index file beside them.
     return FitRows(rows.select(kept, keep_in_memory=True), over)
+
+
+@dataclass(frozen=True)
+class Promotion:
+    """A run's ``checkpoints/best``: which checkpoint was copied there, and why."""
+
+    checkpoint: str  # the promoted checkpoint's path in the run
+    best: Path  # checkpoints/best in the run's folder
+    record: dict[str, Any]  # what best.json holds
+    manifest: RunManifest  # the run's manifest, its outputs naming best and best.json
+
+
+def promote_best(
+    run_id: str,
+    scores_by_ckpt: Mapping[str, float],
+    *,
+    sources: Mapping[str, str] | None = None,
+    runs_root: Path | None = None,
+    store: RunStore | None = None,
+) -> Promotion:
+    """Copy the checkpoint of SFT run ``run_id`` that val scores highest to
+    ``checkpoints/best``, where GRPO starts from (plan section 3.10).
+
+    ``scores_by_ckpt`` maps checkpoints of the run, as paths in it such as
+    ``checkpoints/step-000242`` and ``checkpoints/final``, to their official EX on val, and
+    ``sources`` maps each to the eval run its score comes from. A tie goes to the later
+    checkpoint: an earlier one is promoted only when val scores it higher.
+
+    The run's folder in ``runs_root`` (``runs/``) gets ``checkpoints/best/``, ``best.json``
+    with the checkpoint, the scores and their sources, and a manifest whose outputs name
+    both. With ``store``, which must hold the same manifest as the folder, they go there
+    too, the manifest last, so neither copy names a best it lacks. Promoting again replaces
+    all three. Raises ``RunNotFound`` for no such run, and ``ValueError`` for a run that is
+    not a finished SFT run, or for a checkpoint, a score or a source it can't take.
+    """
+    if not scores_by_ckpt:
+        raise ValueError(f"no checkpoint of run {run_id} has a score, so none can be promoted")
+    local = LocalRunStore(runs_dir() if runs_root is None else runs_root)
+    manifest = local.get_manifest(run_id)
+    if (manifest.kind, manifest.status) != ("sft", "finished"):
+        raise ValueError(
+            f"run {run_id} is a {manifest.status} {manifest.kind} run; a checkpoint is "
+            "promoted from a finished SFT run"
+        )
+    run_dir = local.root / run_id
+    order = {rel: _checkpoint_order(rel, run_id) for rel in scores_by_ckpt}
+    for rel, score in scores_by_ckpt.items():
+        # Not 0 <= score <= 1 is true of NaN too.
+        if isinstance(score, bool) or not isinstance(score, int | float) or not 0 <= score <= 1:
+            raise ValueError(f"{rel} scores {score!r}; an EX is a share from 0 to 1")
+        missing = [name for name in ADAPTER_FILES if not (run_dir / rel / name).is_file()]
+        if missing:
+            raise ValueError(
+                f"{run_dir / rel} has no {' or '.join(missing)}, so it holds no adapter to "
+                "promote; forge runs pull the run first"
+            )
+    if sources is not None and set(sources) != set(scores_by_ckpt):
+        raise ValueError(
+            f"the sources name {sorted(sources)}, and the scores {sorted(scores_by_ckpt)}"
+        )
+    if store is not None and store.get_manifest(run_id) != manifest:
+        raise ValueError(
+            f"{store} holds another manifest of run {run_id} than {run_dir} does; forge "
+            "runs pull the run, then promote"
+        )
+    chosen = max(scores_by_ckpt, key=lambda rel: (scores_by_ckpt[rel], order[rel]))
+    best = run_dir / BEST
+    with tempfile.TemporaryDirectory(prefix=".best-", dir=run_dir) as work:
+        # Copied whole beside the run first, so a failed copy leaves the old best/ as it was.
+        staged = Path(shutil.copytree(run_dir / chosen, Path(work) / "best"))
+        if best.exists():
+            shutil.rmtree(best)
+        staged.rename(best)
+    ranked = sorted(scores_by_ckpt, key=order.__getitem__)
+    record: dict[str, Any] = {
+        "run_id": run_id,
+        "checkpoint": chosen,
+        "metric": PROMOTION_METRIC,
+        "scores": {rel: scores_by_ckpt[rel] for rel in ranked},
+    }
+    if sources is not None:
+        record["eval_runs"] = {rel: sources[rel] for rel in ranked}
+    write_atomic(run_dir / PROMOTION_FILE, (json.dumps(record, indent=2) + "\n").encode())
+    outputs = {**manifest.outputs, "best": BEST, "promotion": PROMOTION_FILE}
+    promoted = manifest.model_copy(update={"outputs": outputs})
+    if store is not None:
+        store.put_folder(run_id, best, BEST, replace=True)
+        store.put_file(run_id, run_dir / PROMOTION_FILE, PROMOTION_FILE)
+        store.put_manifest(promoted)
+    # Last, so a failed push leaves the folder's manifest as the store's, and promoting
+    # again goes through.
+    local.put_manifest(promoted)
+    log.info("promoted %s of run %s to %s", chosen, run_id, best)
+    return Promotion(chosen, best, record, promoted)
+
+
+def _checkpoint_order(rel: str, run_id: str) -> tuple[int, int]:
+    """Where checkpoint ``rel`` comes in its run: by step, and the final adapter last."""
+    if rel == FINAL:
+        return (1, 0)
+    step = checkpoint_step(rel)
+    if step is None:
+        raise ValueError(
+            f"{rel!r} is no checkpoint of run {run_id} to promote: it takes {FINAL} or a "
+            f"checkpoints/step-NNNNNN, never {BEST}"
+        )
+    return (0, step)
 
 
 def _build_rows(
