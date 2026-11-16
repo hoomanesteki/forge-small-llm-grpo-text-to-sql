@@ -202,6 +202,17 @@ def test_every_lora_target_must_match_a_module() -> None:
     with pytest.raises(ValueError, match=r"LoRA targets qproj match no module of tiny; it"):
         check_targets(model, lora, "tiny")
     check_targets(get_peft_model(_tiny_qwen(), peft_lora(LoraConfig(r=4))), LoraConfig(), "tiny")
+    # A target that ends a module's name at a dot is one PEFT adapts, so it counts; one that
+    # ends it inside a part, or names a path the model lacks, does not.
+    suffixes = LoraConfig(r=4, target=("self_attn.q_proj", "mlp.down_proj"))
+    model = get_peft_model(_tiny_qwen(), peft_lora(suffixes))
+    assert "model.layers.0.self_attn.q_proj" in model.base_model.targeted_module_names
+    check_targets(model, suffixes, "tiny")
+    partial = LoraConfig(r=4, target=("self_attn.q_proj", "attn.q_proj", "mlp.q_proj"))
+    model = get_peft_model(_tiny_qwen(), peft_lora(partial))
+    missing = r"targets attn\.q_proj, mlp\.q_proj match no module of tiny; it matched q_proj$"
+    with pytest.raises(ValueError, match=missing):
+        check_targets(model, partial, "tiny")
 
 
 @pytest.mark.phase(4)

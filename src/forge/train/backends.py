@@ -157,14 +157,21 @@ def check_targets(model: Any, lora: LoraConfig, model_ref: str) -> None:
     """Raise ``ValueError`` unless every LoRA target matched a module of the model.
 
     PEFT fails only when none of them match, so a misspelt one would otherwise leave
-    those layers untrained without a word.
+    those layers untrained without a word. A target matches as PEFT matches a list of
+    them: a module whose whole name it is, or whose name ends with ``.`` and it, so
+    ``self_attn.q_proj`` counts as well as ``q_proj``.
     """
-    found = {name.rsplit(".", 1)[-1] for name in model.base_model.targeted_module_names}
-    missing = [target for target in lora.target if target not in found]
+    names = model.base_model.targeted_module_names
+    missing = [
+        target
+        for target in lora.target
+        if not any(name == target or name.endswith(f".{target}") for name in names)
+    ]
     if missing:
+        found = sorted({name.rsplit(".", 1)[-1] for name in names})
         raise ValueError(
             f"LoRA targets {', '.join(missing)} match no module of {model_ref}; "
-            f"it matched {', '.join(sorted(found))}"
+            f"it matched {', '.join(found)}"
         )
 
 

@@ -12,6 +12,7 @@ from forge.data.prompts import MAX_PROMPT_TOKENS
 from forge.eval.config import EvalConfig, read_config_file, read_config_sections
 from forge.train.config import (
     LORA_TARGETS,
+    GrpoConfig,
     TrainConfig,
     load_train_config,
     parse_train_config,
@@ -206,6 +207,32 @@ def test_config_file_must_be_a_yaml_mapping(tmp_path: Path) -> None:
     text = SFT_FILE.replace("max_steps: 3", "max_steps: 0").replace("0.5}", "0.5, seed: 1}")
     with pytest.raises(ValueError, match=r"config\.yaml: sft\.max_steps: .*; ops\.seed: Extra"):
         load_train_config(_write(tmp_path, text))
+
+
+@pytest.mark.phase(4)
+def test_a_section_with_nothing_under_it_is_called_empty(tmp_path: Path) -> None:
+    # YAML reads `grpo:` alone as null: the file has the section, and it is empty.
+    run = "run: {kind: grpo, model_ref: o/m}\n"
+    with pytest.raises(
+        ValueError,
+        match=r"config\.yaml: top level: the grpo section is empty; write its settings under "
+        r"it, or `grpo: \{\}` for the starting values$",
+    ):
+        load_train_config(_write(tmp_path, run + "grpo:\n"))
+    config = load_train_config(_write(tmp_path, run + "grpo: {}\n"))
+    assert config.grpo == GrpoConfig()
+    # The trainer the run doesn't use is null in a dump, as a kernel job's options carry it.
+    dumped = config.model_dump(mode="json")
+    assert dumped["sft"] is None and parse_train_config(dumped) == config
+    # Any other section, each named; run has no starting values to take.
+    with pytest.raises(ValueError, match=r": lora: the section is empty; .*; ops: the section"):
+        load_train_config(_write(tmp_path, run + "lora:\ngrpo: {}\nops:\n"))
+    required = r": run: the section is empty; write its settings under it$"
+    with pytest.raises(ValueError, match=required):
+        load_train_config(_write(tmp_path, "run:\ngrpo: {}\n"))
+    # A section left out is still told apart from an empty one.
+    with pytest.raises(ValueError, match=r"run\.kind is grpo, so the file needs the grpo section"):
+        load_train_config(_write(tmp_path, run))
 
 
 @pytest.mark.phase(4)
