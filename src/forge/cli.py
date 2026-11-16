@@ -1060,35 +1060,38 @@ def kaggle_run(
     except _kaggle_job_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
-    kernel = pushed.kernel or plan.kernel
-    try:
-        # Kaggle runs the kernel now, and it may read dev, so its look is logged before
-        # anything else that could fail.
-        looks = jobs.log_dev_look(plan)
-        jobs.record_push(
-            runs_dir(), plan, kernel=kernel, version=pushed.version, code=code, budget=budget
-        )
-    except _kaggle_job_errors() as exc:
+    kernel, version = pushed.kernel or plan.kernel, jobs.version_name(pushed.version)
+    # Kaggle runs the kernel now, and it may read dev.
+    looks, problems = jobs.settle_push(
+        runs_dir(), plan, pushed, kernel=kernel, code=code, budget=budget
+    )
+    if problems:
         typer.echo(
-            f"error: {exc}; Kaggle runs {kernel} version {pushed.version} all the same, so "
+            f"error: {'; '.join(problems)}; Kaggle runs {kernel} {version} all the same, so "
             f"don't push it again: follow it at https://www.kaggle.com/code/{kernel}",
             err=True,
         )
-        raise typer.Exit(1) from exc
+        raise typer.Exit(1)
     typer.echo(pushed.output)
     for line in pushed.dropped:
         typer.echo(f"warning: {line}", err=True)
     if pushed.dropped:
         typer.echo(
-            f"warning: Kaggle started version {pushed.version} without them; forge kaggle "
-            f"wait {plan.run_id} says how the job ends",
+            f"warning: Kaggle started {version} without them; forge kaggle wait "
+            f"{plan.run_id} says how the job ends",
+            err=True,
+        )
+    if plan.resume and pushed.kernel_source_dropped:
+        typer.echo(
+            "warning: this attempt can't restore the run, so a --resume mounts "
+            f"{plan.kernel_sources[0]} again",
             err=True,
         )
     if looks is not None:
         typer.echo(f"dev look {looks} of {MAX_DEV_USES} logged in docs/dev-usage.md")
     elif plan.reads_dev:
         typer.echo(f"dev look: run {plan.run_id}'s own, logged when it was first pushed")
-    typer.echo(f"run {plan.run_id}: kernel {kernel}, version {pushed.version}")
+    typer.echo(f"run {plan.run_id}: kernel {kernel}, {version}")
     typer.echo(f"next: forge kaggle wait {plan.run_id}")
 
 
@@ -1214,11 +1217,12 @@ def _log_run(run_dir: Path, done: str) -> None:
     before its run began, gets none. ``done`` says where the run is, for an error."""
     from forge.eval.run_files import MANIFEST_FILE
     from forge.ops.hub import LocalRunStore
+    from forge.ops.kaggle_job import no_run_note
     from forge.ops.ledger import record_run
     from forge.ops.sessions import sessions_of
 
     if not (run_dir / MANIFEST_FILE).is_file():
-        typer.echo("ledger: no row, the output has no manifest; use forge ledger add")
+        typer.echo(no_run_note(run_dir))
         return
     try:
         manifest = LocalRunStore(run_dir.parent).get_manifest(run_dir.name)

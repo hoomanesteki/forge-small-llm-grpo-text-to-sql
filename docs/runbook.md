@@ -38,8 +38,8 @@ A GPU job runs the code and reads the data from two private Kaggle datasets, bot
 1. `uv run forge kaggle publish-data`, once. It checks every file `spider.sha256` lists in
    `data/spider` (or `FORGE_DATA_DIR`), copies them and that file to `build/kaggle-data/`,
    and creates `<owner>/forge-spider` with Spider's CC BY-SA 4.0 attribution and citation in
-   its description. The copy is about 511 MB, so it is removed after the upload
-   (`--keep-build` keeps it). Once `kaggle datasets status` says the dataset is ready, it
+   its description. The copy is about 511 MB, so it is removed after the upload, a failed
+   one too (`--keep-build` keeps it). Once `kaggle datasets status` says the dataset is ready, it
    uploads nothing; while Kaggle is still processing it, it says so and exits 1, so run it
    again later; and when the last version failed or was deleted, it uploads the files again
    as a new version.
@@ -120,7 +120,9 @@ holds HEAD, so the next push from the same commit mounts it.
 The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the kernel
 `<owner>/forge-<run_id>`. A run id that was pushed before is refused. `--resume` pushes the
 run again from the same commit with the same options, as `<owner>/forge-<run_id>-<n>`,
-mounting the last attempt's kernel so the eval carries on from its stored files.
+mounting the last attempt's kernel so the eval carries on from its stored files. An attempt
+whose own kernel source Kaggle dropped failed to restore the run, so `kernels.json` marks it
+(`kernel_source_dropped`) and the next resume mounts the attempt before it.
 
 Dates are UTC everywhere Forge writes one: a run id's, a ledger row's, a
 `docs/dev-usage.md` row's, and the last day of `forge ledger summary`'s week. `forge ledger
@@ -149,7 +151,8 @@ the run's `sessions.json` gets the same span: the session the job began is stret
 the kernel's, or, when a resumed job fails before its run starts again, the kernel's
 session is added as failed. A resumed run's kernel holds the run from its restore stage,
 so one that fails before its job gets that failed session too. A new run's kernel that
-fails before its job holds no run and logs no row; add it with `forge ledger add`. The
+fails before its job holds no run and logs no row; add it with `forge ledger add`, for the
+hours and date the note quotes from its `status.json`. The
 upload stage first stretches the session up to the upload, so the Hub's copy misses only
 the upload's own minutes; `forge kaggle wait` logs the whole session first. A resumed run's
 output holds every session so far, so a session that was never waited for still gets its
@@ -173,8 +176,12 @@ manifest's config then records it.
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
 `forge kaggle run` writes its row, with the run id and the reason, as soon as Kaggle
-accepts the push, before it records the kernel or does anything else that could fail. So a
-kernel that may read dev always has its row, and a push Kaggle refuses spends nothing. A
+accepts the push, and records the kernel whether or not that write worked: if either step
+fails, the error names it and says not to push again, since the kernel runs. A push fails
+only when Kaggle refuses it ("Kernel push error") or the kaggle CLI exits with an error
+before it says the kernel was pushed; any other answer, one that names no version among
+them, is a kernel that runs, and its look is spent. So a kernel that may read dev has its
+row unless the error says it hasn't, and a push that fails spends nothing. A
 `--resume` carries on the same run, from the same commit with the same options, so it is
 the same look: it adds no row, and it goes even once the six are spent. In the kernel the
 preflight answers 5 val questions instead, so dev loads once, in the job, whose own row
