@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from forge.data.prompts import MAX_PROMPT_TOKENS
+from forge.eval.config import EvalConfig, read_config_file, read_config_sections
 from forge.train.config import (
     LORA_TARGETS,
     TrainConfig,
@@ -268,3 +269,28 @@ def test_main_sft_run_keeps_its_half_way_checkpoint() -> None:
     # Shares in any order, kept in order.
     shares = parse_train_config(_sft(ops={"keep_checkpoints_at": [0.75, 0.25]}))
     assert shares.ops.keep_checkpoints_at == (0.25, 0.75)
+
+
+@pytest.mark.phase(4)
+def test_sft_runs_wait_in_pending_within_the_story_budget() -> None:
+    pending = yaml.safe_load((ROOT / "docs" / "runs" / "pending.yaml").read_text(encoding="utf-8"))
+    entries = {entry["run"]: entry for entry in pending["pending"] if entry["story"] == "FG-404"}
+    # Each val entry scores an SFT run's checkpoints: its final adapter, and one for each
+    # share of the run it keeps.
+    scores = {"sft-pilot-val": "sft-pilot", "sft-main-checkpoints-val": "sft-main"}
+    assert sorted(entries) == sorted([*scores, *scores.values()])
+    for evaluated, trained in scores.items():
+        (sft_path,) = entries[trained]["configs"]
+        config = load_train_config(ROOT / sft_path)
+        assert entries[trained]["est_gpu_hours"] == config.ops.est_gpu_hours, trained
+        (eval_path,) = entries[evaluated]["configs"]
+        _, ops = read_config_sections(ROOT / eval_path)
+        assert ops.est_gpu_hours is not None
+        # The base model's FG-307 val config, which the runbook adds the adapter to.
+        assert EvalConfig(**read_config_file(ROOT / eval_path)).model == config.run.model_ref
+        checkpoints = 1 + len(config.ops.keep_checkpoints_at)
+        assert entries[evaluated]["est_gpu_hours"] == pytest.approx(
+            ops.est_gpu_hours * checkpoints
+        ), evaluated
+    # Plan section 3.8: 1 h for the pilot, 2.5 h for the main run and 1 h of val runs.
+    assert sum(entry["est_gpu_hours"] for entry in entries.values()) == pytest.approx(4.5)

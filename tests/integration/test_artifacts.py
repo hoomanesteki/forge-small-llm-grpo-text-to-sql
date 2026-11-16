@@ -31,12 +31,13 @@ from forge.eval.reproducibility import compare_runs
 from forge.eval.run_files import StoredRun, read_run
 from forge.eval.runner import run_eval
 from forge.ops.dev_usage import read_uses
-from forge.ops.hub import FINAL, LocalRunStore
+from forge.ops.hub import BEST, FINAL, LocalRunStore
 from forge.ops.ledger import LedgerRow, read_rows, run_hours
 from forge.ops.manifest import config_hash
 from forge.train.config import load_train_config
-from forge.train.sft import fit_rows
+from forge.train.sft import PROMOTION_FILE, checkpoint_scores, fit_rows
 from forge.train.sft_data import build_sft_dataset
+from tests.fakes import sft_run_folder
 from tests.report_trace import untraced
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -294,10 +295,16 @@ def gpu_story_runs(
             pytest.fail(f"run {ids[0]}, {story}'s {name}, is committed without its report")
         found[name] = matches[0]
     if missing:
-        if story in pending_stories(pending):
-            pytest.skip(f"GPU run pending: {story}'s {', '.join(missing)} ({pending.name})")
-        pytest.fail(f"{story} is not in {pending.name}, but {runs} lacks its {', '.join(missing)}")
+        _missing(story, missing, runs=runs, pending=pending)
     return found
+
+
+def _missing(story: str, names: Sequence[str], *, runs: Path, pending: Path) -> None:
+    """Skip while ``story`` is in ``pending``, since its runs can't happen yet, and fail
+    once it isn't: a story off that list has run its jobs."""
+    if story in pending_stories(pending):
+        pytest.skip(f"GPU run pending: {story}'s {', '.join(names)} ({pending.name})")
+    pytest.fail(f"{story} is not in {pending.name}, but {runs} lacks its {', '.join(names)}")
 
 
 @pytest.mark.phase(3)
@@ -613,3 +620,122 @@ def test_phase3_baseline_reports_rebuild() -> None:
     assert compare.is_file()
     for name in LATER_BASELINES:
         assert_rebuilds(gpu_story_runs("FG-307", {name: BASELINES[name]}))
+
+
+# FG-404's Kaggle SFT runs (plan section 3.8): the pilot on the small candidate, and the
+# main run on the chosen model, each from its config.
+SFT_RUNS = {
+    "pilot": ROOT / "configs" / "sft" / "qwen3-1p7b-pilot.yaml",
+    "main": ROOT / "configs" / "sft" / "qwen3-4b-main.yaml",
+}
+# What a training run's manifest config holds of its file, under the config hash.
+TRAIN_SECTIONS = {"run", "data", "lora", "sft"}
+
+
+def kernel_training_runs(
+    story: str,
+    wanted: Mapping[str, Path],
+    *,
+    runs: Path = RUNS,
+    pending: Path = PENDING,
+) -> dict[str, RunManifest]:
+    """The committed kernel training run of each name in ``wanted``, made from its config.
+
+    Each must be the only one of its name under ``runs``. When any is missing the calling
+    test skips while ``story`` is in ``pending``, and fails once it isn't, as for
+    ``gpu_story_runs``.
+    """
+    store = LocalRunStore(runs)
+    trained = [
+        manifest
+        for manifest in (store.get_manifest(run) for run in store.runs())
+        if manifest.kind in ("sft", "grpo") and manifest.platform in HOSTS
+    ]
+    found: dict[str, RunManifest] = {}
+    missing: list[str] = []
+    for name, path in wanted.items():
+        made = load_train_config(path).model_dump(mode="json", include=TRAIN_SECTIONS)
+        matches = [m for m in trained if {k: m.config.get(k) for k in made} == made]
+        ids = [manifest.run_id for manifest in matches]
+        if len(matches) > 1:
+            pytest.fail(f"{story}'s {name} is one run, but {runs} has {len(ids)}: {ids}")
+        if not matches:
+            missing.append(name)
+            continue
+        found[name] = matches[0]
+    if missing:
+        _missing(story, missing, runs=runs, pending=pending)
+    return found
+
+
+@pytest.mark.phase(4)
+def test_kernel_training_runs_skip_only_while_pending(tmp_path: Path) -> None:
+    config = load_train_config(SFT_RUNS["pilot"])
+    made = config.model_dump(mode="json", include=TRAIN_SECTIONS)
+    wanted = {"pilot": SFT_RUNS["pilot"]}
+    runs, pending = tmp_path / "runs", tmp_path / "pending.yaml"
+    pending.write_text("pending:\n  - story: FG-998\n    run: pilot\n", encoding="utf-8")
+    model = config.run.model_ref
+
+    # The same config trained on the laptop is no kernel run, and another config's is not it.
+    sft_run_folder(runs, "on-the-laptop", model, [], config=made, platform="local-mps")
+    other = {**made, "sft": {**made["sft"], "learning_rate": 1e-4}}
+    sft_run_folder(runs, "other-config", model, [], config=other)
+    with pytest.raises(pytest.skip.Exception, match=r"GPU run pending: FG-998's pilot \("):
+        kernel_training_runs("FG-998", wanted, runs=runs, pending=pending)
+    with pytest.raises(pytest.fail.Exception, match=r"FG-999 is not in pending\.yaml, but"):
+        kernel_training_runs("FG-999", wanted, runs=runs, pending=pending)
+
+    sft_run_folder(runs, "on-kaggle", model, [], config={**made, "sft_data": {"rows": 1}})
+    found = kernel_training_runs("FG-999", wanted, runs=runs, pending=pending)
+    assert found["pilot"].run_id == "on-kaggle"
+    sft_run_folder(runs, "again", model, [], config=made)
+    with pytest.raises(pytest.fail.Exception, match=r"pilot is one run, but .* has 2"):
+        kernel_training_runs("FG-999", wanted, runs=runs, pending=pending)
+
+
+def _checkpoint_of(run: StoredRun, trained: RunManifest) -> str | None:
+    """The checkpoint of ``trained`` an eval run's adapter is, as a path in its run."""
+    parts = (run.manifest.adapter_ref or "").split("/")
+    if len(parts) < 3 or parts[-3] != trained.run_id or parts[-2] != "checkpoints":
+        return None
+    return "/".join(parts[-2:])
+
+
+@pytest.mark.phase(4)
+def test_phase4_sft_runs_present() -> None:
+    trained = kernel_training_runs("FG-404", SFT_RUNS)
+    store = LocalRunStore(RUNS)
+    evals = [read_run(RUNS / run) for run in store.runs() if store.get_manifest(run).kind == "eval"]
+    dev_looks = {run_id for _, run_id, _ in read_uses(ROOT / "docs" / "dev-usage.md")}
+    for name, manifest in trained.items():
+        root = RUNS / manifest.run_id
+        assert (manifest.kind, manifest.status) == ("sft", "finished"), name
+        assert manifest.config_hash == config_hash(manifest.config), name
+        assert [row.platform for row in _ledger_rows(manifest.run_id)] == [manifest.platform]
+        # Committed without its weights, which the run store holds.
+        assert (root / "config.yaml").is_file() and (root / "metrics.jsonl").is_file(), name
+        assert not (root / "checkpoints").exists(), name
+
+        # Its checkpoints on val, each from a kernel, with a report and a ledger row; none
+        # of them on dev, and no dev look spent on them.
+        scored = {_checkpoint_of(run, manifest): run for run in evals}
+        scored.pop(None, None)
+        assert scored, f"{name}: no eval run of its checkpoints"
+        for rel, run in scored.items():
+            made = run.manifest
+            assert made.config["split"] == "val" and made.platform in HOSTS, rel
+            assert made.model_ref == manifest.model_ref, rel
+            assert run.paths.report.is_file(), rel
+            assert [row.platform for row in _ledger_rows(made.run_id)] == [made.platform], rel
+            assert made.run_id not in dev_looks, rel
+        expected = {FINAL} if name == "pilot" else {manifest.outputs["kept_at_0.5"], FINAL}
+        assert set(scored) == expected, name
+
+        # best/ set from those runs' own scores: the highest official EX among them.
+        assert (manifest.outputs["best"], manifest.outputs["promotion"]) == (BEST, PROMOTION_FILE)
+        record = json.loads((root / PROMOTION_FILE).read_text(encoding="utf-8"))
+        ids = [run.manifest.run_id for run in scored.values()]
+        scores, sources = checkpoint_scores(manifest.run_id, ids, runs_root=RUNS)
+        assert (record["scores"], record["eval_runs"]) == (scores, sources), name
+        assert scores[record["checkpoint"]] == max(scores.values()), name

@@ -19,3 +19,72 @@ pending:
     how: docs/runbook.md, "Run store", forge runs push with the SFT pilot's run id (docs/runs/README.md)
     fills:
       - the run store's copy of the SFT pilot run, its adapter in checkpoints/final with it, which only the laptop that trained it holds until then
+  - story: FG-404
+    run: sft-pilot
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    configs:
+      - configs/sft/qwen3-1p7b-pilot.yaml
+    est_gpu_hours: 1.0
+    status: blocked
+    since: 2026-11-16
+    blocked_on:
+      - a phone-verified Kaggle account with an API token, and FORGE_KAGGLE_USER in .env
+      - both datasets published once (FG-302's pending publish)
+      - a Hugging Face account with a write token, attached to the kernel as the HF_TOKEN secret, and the private run store repo FORGE_RUN_STORE names
+      - FG-301's spike, which tries kaggle/requirements-gpu.txt and 4-bit training on the T4 first
+    how: docs/runbook.md, "SFT runs", step 1
+    fills:
+      - docs/runs/<run_id>/, the SFT run without its checkpoints, which the run store holds
+      - docs/compute-ledger.md, one kaggle row (forge runs pull)
+  - story: FG-404
+    run: sft-pilot-val
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    configs:
+      - configs/eval/qwen3-1-7b-val.yaml
+    est_gpu_hours: 0.3
+    status: blocked
+    since: 2026-11-16
+    blocked_on:
+      - the sft-pilot run, whose final adapter it scores
+      - the HF_TOKEN secret, since the kernel fetches that adapter from the run store
+    how: docs/runbook.md, "SFT runs", step 2, with --adapter runs/<pilot_run_id>/checkpoints/final
+    fills:
+      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
+      - docs/runs/<pilot_run_id>/best.json and the pilot's checkpoints/best (forge runs promote)
+      - docs/compute-ledger.md, one kaggle row (forge runs pull)
+  - story: FG-404
+    run: sft-main
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    configs:
+      - configs/sft/qwen3-4b-main.yaml
+    est_gpu_hours: 2.5
+    status: blocked
+    since: 2026-11-16
+    blocked_on:
+      - everything sft-pilot waits on, and the pilot's val run, which shows the setup works
+      - ADR-0012's model choice (FG-307's pending baselines); the config must train that model
+    how: docs/runbook.md, "SFT runs", step 3
+    fills:
+      - docs/runs/<run_id>/, the SFT run without its checkpoints, which the run store holds
+      - docs/compute-ledger.md, one kaggle row (forge runs pull)
+  - story: FG-404
+    run: sft-main-checkpoints-val
+    platform: kaggle
+    accelerator: NvidiaTeslaT4
+    configs:
+      - configs/eval/qwen3-4b-val.yaml
+    est_gpu_hours: 0.7
+    status: blocked
+    since: 2026-11-16
+    blocked_on:
+      - the sft-main run, whose checkpoints at 50% (kept_at_0.5) and 100% (final) it scores
+      - the HF_TOKEN secret, since the kernel fetches each checkpoint from the run store
+    how: docs/runbook.md, "SFT runs", steps 4 and 5, the config once a checkpoint, each with its --adapter
+    fills:
+      - docs/runs/<run_id>/ for each, the run whole with its report rendered on the laptop
+      - docs/runs/<main_run_id>/best.json and the main run's checkpoints/best (forge runs promote)
+      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
+      - docs/progress.md, the product owner's call on a second epoch if val EX still rose
