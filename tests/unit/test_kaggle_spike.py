@@ -25,6 +25,7 @@ import yaml
 
 from forge.data import prompts as forge_prompts
 from forge.ops.kaggle import METADATA_FILE, bake_argv, check_kernel_metadata
+from forge.ops.ledger import read_rows
 from tests.spike import THROUGHPUT, load_script, throughput
 from tests.tiny_hf import CHATML, QWEN3, byte_tokenizer
 
@@ -1020,5 +1021,13 @@ def test_pending_runs_say_what_blocks_them() -> None:
         assert entry["status"] == "blocked", entry["run"]
         assert entry["blocked_on"], entry["run"]
         assert (ROOT / entry["how"].split(",")[0]).is_file(), entry["how"]
-    # FG-301's runs stay inside the story's 1.5 GPU hours (plan section 3.8).
-    assert sum(e["est_gpu_hours"] for e in pending if e["story"] == "FG-301") <= 1.5
+    # FG-301's runs stay inside the story's 1.5 GPU hours (plan section 3.8): any still
+    # pending by its estimate, the spike that ran by its ledger row.
+    spike_run = json.loads((ROOT / "docs" / "spikes" / "kaggle-gpu" / "kernels.json").read_text())
+    spent = sum(
+        row.hours
+        for row in read_rows(ROOT / "docs" / "compute-ledger.md")
+        if row.run_id == spike_run["run_id"]
+    )
+    assert spent > 0
+    assert spent + sum(e["est_gpu_hours"] for e in pending if e["story"] == "FG-301") <= 1.5

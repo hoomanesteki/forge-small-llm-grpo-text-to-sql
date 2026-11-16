@@ -580,11 +580,11 @@ def _with_sessions(store: LocalRunStore) -> list[tuple[RunManifest, list[Session
 @pytest.mark.phase(3)
 def test_i7_gpu_runs_in_ledger(tmp_path: Path) -> None:
     # The gate's check: every session of every run committed under docs/runs or kept in
-    # the local runs store, against the real ledger. No Kaggle run exists yet, so only the
-    # FG-291 pilot, whose local-mps row must name its platform, is checked for now.
+    # the local runs store, against the real ledger: the FG-291 pilot, whose local-mps row
+    # must name its platform, and the Kaggle runs since FG-303's 50-question job.
     stores = [LocalRunStore(ROOT / "docs" / "runs"), LocalRunStore(runs_dir())]
     kept = [run for store in stores for run in _with_sessions(store)]
-    assert kept, "docs/runs holds the FG-291 pilot"
+    assert {manifest.platform for manifest, _ in kept} >= {"local-mps", "kaggle"}
     assert audit(kept, read_rows(ledger_path())) == []
 
     # On fixture runs, the same check catches what a gate must refuse.

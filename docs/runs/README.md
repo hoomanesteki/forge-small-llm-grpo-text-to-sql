@@ -46,10 +46,29 @@ FORGE_DATA_DIR=data/spider uv run forge eval run --config configs/eval/pilot-qwe
 FORGE_DATA_DIR=data/spider uv run forge report run <run_id>
 ```
 
+## Kaggle runs
+
+A run whose manifest says `platform: kaggle` ran as a kernel job on a T4 (ADR-0005) and came
+back with `forge runs pull <run_id> --store kaggle`. Its folder also holds what the kernel
+kept beside the run: `kernels.json` (the pushes `forge kaggle run` made), `status.json` (each
+stage of `kaggle/entry.py`, with its seconds and result) and the preflight's files in
+`kernel/`. The kernel's log stays out of git. Its ledger row is the kernel's session, from
+its start to its end.
+
+| Run | Model | Made with | Report |
+|---|---|---|---|
+| [2026-11-16-smoke-kaggle-50-val-c8f4b41](2026-11-16-smoke-kaggle-50-val-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/smoke-kaggle-50-val.yaml`: the first 50 val questions, greedy, prompt p1, vLLM in fp16 on a T4. Integration checkpoint 3's job (`scripts/smoke/phase_3.sh`) and FG-303's real eval job: a check of the GPU path, not a baseline | [val-report.md](2026-11-16-smoke-kaggle-50-val-c8f4b41/eval/val-report.md) |
+
+Its report was written in the kernel and matches its rebuild on the laptop with the full
+data; its chart was drawn on Linux, which a Mac's rebuild says it can't compare. It was made
+from `c8f4b41`, a commit on `dev`, so it needs no `run/` tag. To make it again from there:
+`scripts/smoke/phase_3.sh <run_id>`.
+
 ## Pending runs
 
-[pending.yaml](pending.yaml) lists the runs a story needs that can't happen yet, what blocks
-each one, since when, and what it will fill in. FG-301's Kaggle spike and FG-307's baselines
-are there until the Kaggle account exists. `tests/integration/test_artifacts.py` finds a GPU
+[pending.yaml](pending.yaml) lists the runs a story needs that haven't been made and
+committed yet, what blocks each one, since when, and what it will fill in. FG-307's
+baselines are there until they come back from Kaggle; FG-301's spike, FG-302's publish and
+FG-303's eval job left it on 2026-11-16. `tests/integration/test_artifacts.py` finds a GPU
 story's runs here by the configs they were made from, and skips its checks on them only
 while the story has an entry in pending.yaml; once it has none, a missing run fails.
