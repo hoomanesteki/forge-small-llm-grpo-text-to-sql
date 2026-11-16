@@ -16,9 +16,13 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
 - install: ``pip install --no-deps`` the wheel, then its ``requirements-gpu.txt``; every
   package the wheel needs must then be there, or the stage says which is not.
 - data: the Spider dataset, found by its ``spider.sha256``, with ``database.zip`` unpacked
-  if Kaggle left it packed, and every file checked against that list before any job runs.
+  if Kaggle left it packed, and every file checked before any job runs against the list
+  the installed wheel pins (``forge.data.spider.CHECKSUMS``), not the dataset's own copy.
 - secrets: ``HF_TOKEN`` and ``WANDB_API_KEY`` from Kaggle Secrets (or Colab's) when they
-  are attached. No value is ever printed or written, and the job goes on without them.
+  are attached, without the line breaks and outer spaces huggingface_hub drops. No value
+  is ever printed or written: every stage result in status.json, the error, the
+  traceback and a failed run's ``error.txt`` go through ``_redact``. The job goes on
+  without them.
 - preflight: the job on ``PREFLIGHT_EXAMPLES`` examples through the same path, in a run
   of its own under ``preflight/``, so a broken job fails in minutes. The job then runs on
   the model the preflight loaded: a vLLM engine holds most of the GPU's memory while it
@@ -87,6 +91,7 @@ CHECKSUM_FILE = "spider.sha256"
 CODE_SHA_ENV = "FORGE_CODE_SHA"
 MANIFEST_FILE = "manifest.json"
 SESSIONS_FILE = "sessions.json"
+ERROR_FILE = "error.txt"
 DEV_USAGE_ENV = "FORGE_DEV_USAGE"
 DEV_USAGE_FILE = "dev-usage.md"
 HOSTS = ("kaggle", "colab")
@@ -241,17 +246,21 @@ def unmet_requirements(
 
 
 def data_stage(kernel: Kernel) -> dict[str, Any]:
-    """Find Spider, unpack its databases if needed, and check every file it lists."""
+    """Find Spider, unpack its databases if needed, and check every file the wheel pins."""
     from forge.data.spider import check_files, load_checksums
 
     folder = _one(Path(kernel.args.input_dir), CHECKSUM_FILE, "the Spider dataset").parent
     if not (folder / "database").is_dir():
         folder = _unpacked(folder, Path(kernel.args.temp_dir) / "forge-spider")
-    expected = load_checksums(folder / CHECKSUM_FILE)
+    # The wheel's list, which publish-data checked the upload against: the dataset's own
+    # copy would only show that the dataset agrees with itself.
+    expected = load_checksums()
     problems = check_files(folder, expected)
     if problems:
         shown = ", ".join(f"{rel} ({why})" for rel, why in sorted(problems.items())[:5])
-        raise JobError(f"{len(problems)} Spider files don't match {CHECKSUM_FILE}: {shown}")
+        raise JobError(
+            f"{len(problems)} Spider files don't match the {CHECKSUM_FILE} forge pins: {shown}"
+        )
     os.environ["FORGE_DATA_DIR"] = str(folder)
     return {"folder": str(folder), "files": len(expected)}
 
@@ -280,6 +289,8 @@ def secrets_stage(kernel: Kernel) -> dict[str, str]:
         value, where = os.environ.get(label), "environment"
         if not value:
             value, where = _read_secret(label)
+        # The token huggingface_hub sends, and so the text an error might quote.
+        value = (value or "").replace("\r", "").replace("\n", "").strip()
         if value:
             # The Hub and W&B clients read these variables.
             os.environ[label] = value
@@ -440,13 +451,17 @@ def main(
         trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         print(_redact(trace, kernel.secrets), file=sys.stderr, flush=True)
         status["status"] = "failed"
-        status["error"] = _redact(f"{type(exc).__name__}: {exc}", kernel.secrets)
+        status["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         signal.signal(signal.SIGTERM, previous)
         _close_manifest(kernel.run_dir)
+        # A failed run keeps its traceback beside its manifest, the job's or the preflight's.
+        for error in kernel.work.glob(f"*/*/{ERROR_FILE}"):
+            _redact_file(error, kernel.secrets)
         status["ended_at"] = _now()
         status["session"] = _record_session(kernel, status["ended_at"])
-        _write_json(kernel.run_dir / STATUS_FILE, status)
+        # Any stage's result may quote an exception, whose text may hold a secret.
+        _write_json(kernel.run_dir / STATUS_FILE, _redacted(status, kernel.secrets))
         print(f"[forge] {args.job} {args.run_id}: {status['status']}", flush=True)
     return 0
 
@@ -531,6 +546,23 @@ def _redact(text: str, secrets: Iterable[str]) -> str:
     for secret in secrets:
         text = text.replace(secret, "***")
     return text
+
+
+def _redact_file(path: Path, secrets: Sequence[str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    if (clean := _redact(text, secrets)) != text:
+        path.write_text(clean, encoding="utf-8")
+
+
+def _redacted(value: Any, secrets: Sequence[str]) -> Any:
+    """``value``, a JSON value, with ``_redact`` applied to every string in it."""
+    if isinstance(value, str):
+        return _redact(value, secrets)
+    if isinstance(value, dict):
+        return {key: _redacted(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redacted(item, secrets) for item in value]
+    return value
 
 
 def _now() -> str:
