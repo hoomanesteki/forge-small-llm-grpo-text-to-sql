@@ -4,6 +4,7 @@
     data: {prompt_version: p1, split: train}
     lora: {r: 16, alpha: 32, dropout: 0.0, target: [q_proj, k_proj, ...]}
     grpo: {num_generations: 6, max_prompt_length: 1536, max_completion_length: 256, ...}
+    rewards: {execution: 1.0, validity: 0.1, format: 0.05, guards: {non_select: -1.0, ...}}
     ops:  {checkpoint_every: 50, time_guard_minutes: 675, est_gpu_hours: 2.5}
 
 A file holds the ``sft`` section or the ``grpo`` one, whichever ``run.kind`` names. The
@@ -30,12 +31,15 @@ any model does:
 - ``keep_checkpoints_at`` takes shares of the run's steps above 0 and below 1, each once:
   the checkpoint at 1, the run's end, is ``checkpoints/final``.
 - ``data.split`` is ``train``: training never reads val or dev (ADR-0004).
+- ``rewards`` weighs GRPO's reward functions (``forge.train.rewards``): its weights are
+  zero or more and its guard penalties zero or less. Only GRPO has rewards, so an SFT
+  config that changes them is refused.
 - Unsloth and 4-bit loading need CUDA, so a run on the CPU or MPS asks for neither.
 
 The run store is the one ``FORGE_RUN_STORE`` names (``forge.ops.hub``), so the plan's
 ``ops.hub_run_repo`` is not a setting here: one place names it. The plan's
-``run.init_adapter``, ``data.curriculum``, ``data.filter_by_sft_pass_rate`` and
-``rewards`` come with the stories that use them (FG-504, FG-505 and FG-501).
+``run.init_adapter``, ``data.curriculum`` and ``data.filter_by_sft_pass_rate`` come with
+the stories that use them (FG-504 and FG-505).
 """
 
 from __future__ import annotations
@@ -75,6 +79,8 @@ Positive = Annotated[float, Strict(), Field(gt=0, allow_inf_nan=False)]
 Fraction = Annotated[float, Strict(), Field(ge=0, lt=1)]
 # A share of a run's steps short of its end, which checkpoints/final is.
 Share = Annotated[float, Strict(), Field(gt=0, lt=1)]
+Weight = Annotated[float, Strict(), Field(ge=0, allow_inf_nan=False)]
+Penalty = Annotated[float, Strict(), Field(le=0, allow_inf_nan=False)]
 
 
 class _Section(BaseModel):
@@ -199,6 +205,25 @@ class GrpoConfig(_Section):
         return self
 
 
+class GuardPenalties(_Section):
+    """What each reward guard costs when it fires, in reward units (FG-501)."""
+
+    non_select: Penalty = -1.0
+    multiple_statements: Penalty = -0.5
+    constant_query: Penalty = -0.5
+    comment_payload: Penalty = -0.2
+
+
+class RewardsConfig(_Section):
+    """GRPO's reward weights: a matching query earns ``execution``, one that runs
+    ``validity`` and a reply in the asked-for format ``format`` (FG-501)."""
+
+    execution: Weight = 1.0
+    validity: Weight = 0.1
+    format: Weight = 0.05
+    guards: GuardPenalties = GuardPenalties()
+
+
 class OpsConfig(_Section):
     """How a job runs, which no result depends on."""
 
@@ -224,11 +249,12 @@ class TrainConfig(_Section):
     lora: LoraConfig = LoraConfig()
     sft: SftConfig | None = None
     grpo: GrpoConfig | None = None
+    rewards: RewardsConfig = RewardsConfig()
     ops: OpsConfig = OpsConfig()
 
     # YAML reads a section with nothing under it, such as `grpo:` alone, as null. Only the
     # trainer run.kind doesn't name may be null: a config's model_dump writes it so.
-    @field_validator("run", "data", "lora", "ops", mode="before")
+    @field_validator("run", "data", "lora", "rewards", "ops", mode="before")
     @classmethod
     def _not_empty(cls, value: Any, info: ValidationInfo) -> Any:
         if value is None:
@@ -247,6 +273,10 @@ class TrainConfig(_Section):
             raise ValueError(f"run.kind is {kind}, so the file needs the {kind} section")
         if getattr(self, other) is not None:
             raise ValueError(f"run.kind is {kind}, so the file can't have the {other} section")
+        # Compared with the starting values rather than looked for, because a dump of any
+        # config writes them.
+        if kind == "sft" and self.rewards != RewardsConfig():
+            raise ValueError("run.kind is sft, so the file can't set rewards: only GRPO has them")
         return self
 
     @property

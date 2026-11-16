@@ -239,6 +239,42 @@ def test_a_section_with_nothing_under_it_is_called_empty(tmp_path: Path) -> None
         load_train_config(_write(tmp_path, run))
 
 
+@pytest.mark.phase(5)
+def test_rewards_section_weighs_grpo_rewards(tmp_path: Path) -> None:
+    # Plan section 3.10's weights and penalties, with FG-501's comment guard.
+    rewards = load_train_config(_write(tmp_path, GRPO_FILE)).rewards
+    assert (rewards.execution, rewards.validity, rewards.format) == (1.0, 0.1, 0.05)
+    assert rewards.guards.model_dump() == {
+        "non_select": -1.0,
+        "multiple_statements": -0.5,
+        "constant_query": -0.5,
+        "comment_payload": -0.2,
+    }
+    text = GRPO_FILE + "rewards:\n  format: 0\n  guards: {constant_query: -1}\n"
+    changed = load_train_config(_write(tmp_path, text)).rewards
+    assert (changed.format, changed.guards.constant_query, changed.validity) == (0.0, -1.0, 0.1)
+
+    refused = [
+        ({"validity": -0.1}, r"rewards\.validity: Input should be greater than or equal to 0"),
+        ({"execution": float("nan")}, r"rewards\.execution: Input should be a finite number"),
+        ({"guards": {"non_select": 1.0}}, r"rewards\.guards\.non_select: Input should be less"),
+        ({"guards": {"long_comment": -0.2}}, r"rewards\.guards\.long_comment: Extra inputs"),
+        ({"format": True}, r"rewards\.format: Input should be a valid number"),
+    ]
+    for section, message in refused:
+        with pytest.raises(ValueError, match=message):
+            parse_train_config({**_grpo(), "rewards": section})
+    with pytest.raises(ValueError, match=r"rewards: the section is empty; .*`rewards: \{\}`"):
+        load_train_config(_write(tmp_path, GRPO_FILE + "rewards:\n"))
+
+    # SFT has no rewards: a file that changes them is refused, and a dump, which writes the
+    # starting values, still reads back.
+    with pytest.raises(ValueError, match=r"run\.kind is sft, so the file can't set rewards"):
+        parse_train_config(_sft(rewards={"execution": 2.0}))
+    sft = parse_train_config(_sft())
+    assert parse_train_config(sft.model_dump(mode="json")) == sft
+
+
 @pytest.mark.phase(4)
 def test_sft_configs_start_from_adr_0010() -> None:
     models = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))
