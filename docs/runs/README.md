@@ -37,6 +37,9 @@ accounts the GPU plan needs were pending. Its report names the platform in its h
 | [2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8](2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/) | The same model, LoRA-trained on train rows (FG-491) | `configs/sft/pilot-qwen25coder05b-mps.yaml`: the subset its `subset_rows` sets of the train rows that fit in 1,536 tokens, bf16 on MPS | [metrics.jsonl](2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/metrics.jsonl) |
 | [2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/) | The same model with that run's adapter | `configs/eval/pilot-qwen25coder05b-val.yaml` with `--adapter runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final`, the first pilot's settings | [val-report.md](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/val-report.md), and against the first pilot [compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md) |
 
+[docs/notes/sft.md](../notes/sft.md) reads that comparison, by hardness and by error class,
+citing no number it doesn't hold (FG-405).
+
 A pilot that trains (FG-491) commits its training run without its weights: the manifest,
 `config.yaml` and `metrics.jsonl`, one line a logging step. The adapter stays in
 `runs/<run_id>/checkpoints/final/` on the laptop that trained it, where the eval run's

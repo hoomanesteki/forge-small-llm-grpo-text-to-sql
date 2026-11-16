@@ -40,7 +40,7 @@ from forge.train.config import load_train_config
 from forge.train.sft import PROMOTION_FILE, checkpoint_scores, fit_rows
 from forge.train.sft_data import build_sft_dataset
 from tests.fakes import sft_run_folder
-from tests.report_trace import untraced
+from tests.report_trace import GENERATED, NUMBER, untraced
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / "docs" / "runs"
@@ -746,6 +746,11 @@ def test_phase4_sft_runs_present() -> None:
 # FG-405: what SFT changed on val, from the comparisons of each committed val run of an SFT
 # adapter with its base run. The SFT pilot's is FG-491's; FG-404's main run adds its own.
 COMPARISON = RUNS / SFT_PILOT_EVAL / "eval" / f"{COMPARE_PREFIX}{PILOT_RUN}.md"
+NOTES = ROOT / "docs" / "notes" / "sft.md"
+# What in the notes or a report names something rather than measures it: code spans, link
+# targets, story and ADR ids, and a model's size such as 0.5B.
+_NAMES = re.compile(r"`[^`\n]*`|\]\([^)\n]*\)|\b(?:FG|ADR)-\d+\b|\b\d+(?:\.\d+)?B\b")
+_COMPARISON_LINK = re.compile(rf"\]\(([^)\s]+/eval/{COMPARE_PREFIX}[^)\s/]+\.md)\)")
 
 
 def sft_comparisons(runs: Path = RUNS) -> dict[str, list[Path]]:
@@ -764,6 +769,12 @@ def sft_comparisons(runs: Path = RUNS) -> dict[str, list[Path]]:
         if parts[-3] in trained and reports:
             found[manifest.run_id] = reports
     return found
+
+
+def _numbers(text: str) -> set[str]:
+    """The numbers ``text`` states, as a report writes them, leaving out its names and
+    a report's Generated time."""
+    return set(NUMBER.findall(_NAMES.sub(" ", GENERATED.sub(" ", text))))
 
 
 @pytest.mark.phase(4)
@@ -790,3 +801,18 @@ def test_phase4_compare_report_rebuildable(monkeypatch: pytest.MonkeyPatch) -> N
         assert result.exit_code == 0, result.output
         for report in reports:
             assert f"{report}: matches its rebuild\n" in result.output, result.output
+
+
+@pytest.mark.phase(4)
+def test_sft_notes_cite_only_report_numbers() -> None:
+    text = NOTES.read_text(encoding="utf-8")
+    # The notes read the comparisons they link, the SFT pilot's among them.
+    linked = [(NOTES.parent / target).resolve() for target in _COMPARISON_LINK.findall(text)]
+    assert COMPARISON in linked, linked
+    assert all(path.is_file() for path in linked), linked
+    reported = set().union(*(_numbers(path.read_text(encoding="utf-8")) for path in linked))
+    # Three to five bullets a list, the pilot's and each one a later comparison adds, and no
+    # number in them or around them that those reports lack.
+    sizes = [block.count("\n- ") + block.startswith("- ") for block in text.split("\n\n")]
+    assert any(sizes) and all(3 <= size <= 5 for size in sizes if size), sizes
+    assert sorted(_numbers(text) - reported) == []
