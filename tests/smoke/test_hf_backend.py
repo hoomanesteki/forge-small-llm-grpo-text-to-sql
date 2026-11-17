@@ -90,3 +90,34 @@ def test_loads_adapter(spider_mini: Path, tiny_model_ref: str, tmp_path: Path) -
     assert all(torch.equal(saved[name], loaded[name]) for name in saved)
     assert [g.adapter_ref for g in adapted] == [str(adapter)] * len(prompts)
     assert _texts(adapted) != _texts(plain)
+
+
+@pytest.mark.phase(5)
+def test_around_a_training_model_leaves_it_as_it_was(
+    spider_mini: Path, tiny_model_ref: str
+) -> None:
+    # The model as a trainer holds it: under a fresh LoRA, in train mode, with the sampling
+    # defaults the checkpoint ships, which greedy decoding must not pick up.
+    repo, _, revision = tiny_model_ref.partition("@")
+    base = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=torch.float32)
+    shipped = base.generation_config
+    assert shipped.repetition_penalty not in (None, 1.0)
+    model = get_peft_model(
+        base, LoraConfig(task_type="CAUSAL_LM", r=4, lora_alpha=8, target_modules=["q_proj"])
+    )
+    model.train()
+    plain = HfBackend(tiny_model_ref, device="cpu", batch_size=2)
+    prompts = _prompts(3)
+    params = GenParams(max_new_tokens=12)
+
+    around = HfBackend.around(model, plain.tokenizer, model_ref=tiny_model_ref, batch_size=2)
+    replies = around.generate(prompts, params)
+
+    # LoRA's B starts at zero, so the replies are the base model's, greedy as the backend
+    # that loads its own model decodes them.
+    assert _texts(replies) == _texts(plain.generate(prompts, params))
+    assert [g.model_ref for g in replies] == [tiny_model_ref] * len(prompts)
+    # Put back as it was: training, with the checkpoint's own generation config.
+    assert model.training and base.generation_config is shipped
+    with pytest.raises(ValueError, match="batch_size must be at least 1"):
+        HfBackend.around(model, plain.tokenizer, model_ref=tiny_model_ref, batch_size=0)

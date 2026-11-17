@@ -34,8 +34,8 @@
   again after the next push the store takes and at the end of training. One the store
   still hasn't taken then stays there, named in an error, for the job to keep.
 - ``MetricsCallback`` appends each log the trainer writes to ``metrics.jsonl`` as one
-  JSON line, and pushes the file to the run at every save and at the end, failing as
-  ``CheckpointCallback`` does.
+  JSON line, and what another callback hands its ``write``, and pushes the file to the
+  run at every save and at the end, failing as ``CheckpointCallback`` does.
 - ``wandb_callback`` adds transformers' W&B callback when ``WANDB_API_KEY`` is set and
   wandb is installed. Neither is needed (ADR-0013): the JSONL metrics are always there.
 """
@@ -348,9 +348,13 @@ class MetricsCallback(TrainerCallback):
         logs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        if not logs:
-            return
-        line = {"step": state.global_step, "time": self.now().isoformat(), **logs}
+        if logs:
+            self.write(state.global_step, logs)
+
+    def write(self, step: int, logs: Mapping[str, Any]) -> None:
+        """Append ``logs`` at ``step`` as one line, as the trainer's own are: for what a
+        callback measures beside them, such as the in-training eval."""
+        line = {"step": step, "time": self.now().isoformat(), **logs}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(line) + "\n")
