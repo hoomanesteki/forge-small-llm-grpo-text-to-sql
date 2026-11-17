@@ -406,8 +406,7 @@ and 5 run `qwen3-8b-val`, `qwen2-5-coder-1-5b-dev` and `qwen3-8b-dev`, whose con
 since FG-307 recorded those runs: push them from that commit or a later one, never from
 `c8f4b41`, where they still say p1. They ran on 2026-11-17: the reference's val run and the
 chosen model's dev run from `2f77281`, and the reference's dev run from `d2d6a3a`, once its
-val run had loaded the AWQ checkpoint. All but the reference's dev run are committed
-(`docs/runs/pending.yaml` says why).
+val run had loaded the AWQ checkpoint. All of them are committed under `docs/runs/`.
 
 The same model's runs from one commit on one day would share a default run id, so name each:
 `--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Kaggle
@@ -419,7 +418,9 @@ the Hub store gets the run only from `forge runs push`). Render its report on th
 with `FORGE_DATA_DIR=data/spider uv run forge report run <run_id>`, so its rebuild compares
 the chart, and copy the folder whole to `docs/runs/`.
 `tests/integration/test_artifacts.py::test_phase3_baseline_reports_present` then checks
-every run is there with its report, I5 on its replies and I6 on step 4 against step 1.
+every run is there with its report and I6 on step 4 against step 1, and
+`tests/integration/test_invariants.py::test_i5_agreement_on_committed_runs` checks I5 on
+their replies: pooled, and for each run of the chosen model alone (ADR-0008).
 
 ## Troubleshooting
 
