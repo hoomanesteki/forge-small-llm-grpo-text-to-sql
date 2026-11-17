@@ -21,24 +21,27 @@ others, as a run that ended must: an earlier attempt's ``error.txt`` would other
 outlive it.
 
 A Hub call that fails on the network (``network_error`` says which failures count) is
-tried again by one layer only, so the waits never multiply. huggingface_hub 2.4 already
-tries some failures of most requests 5 more times, 1, 2, 4, 8 and 8 s apart, and a
-failure that comes through those retries is ``StoreUnavailable`` at once.
-``client_retried`` tells which from the request that failed and how. The client never
-retries a commit or the repo lookup a snapshot download starts with, nor a 5xx other than
-500, 502, 503 and 504. It retries a download's first request, for the file's metadata,
-only after a refused connection, a timeout or one of its statuses (408, 429, 500, 502,
-503 and 504); the download itself only after a refused connection, a timeout, a broken
-answer (``RemoteProtocolError``), 408 or 429; and any other request after any network
-error or one of its statuses. Any other failure the store tries again, the whole call
-``RETRIES`` more times, after ``BACKOFF_S`` seconds and then twice as long each time, 2,
-4 and 8 s: a dropped connection on a download, for one. So a call that keeps failing
+tried again by one layer, so the waits don't multiply, but for one rare case below.
+huggingface_hub 2.4 already tries some failures of most requests 5 more times, 1, 2, 4, 8
+and 8 s apart, and a failure that comes through those retries is ``StoreUnavailable`` at
+once. ``client_retried`` tells which from the request that failed and how. The client
+never retries a commit or the repo lookup a snapshot download starts with, nor a 5xx
+other than 500, 502, 503 and 504. It retries a download's first request, for the file's
+metadata, only after a refused connection, a timeout or one of its statuses (408, 429,
+500, 502, 503 and 504); the download itself only after a refused connection, a timeout, a
+broken answer (``RemoteProtocolError``), 408 or 429; and any other request after any
+network error or one of its statuses. Any other failure the store tries again, the whole
+call ``RETRIES`` more times, after ``BACKOFF_S`` seconds and then twice as long each time,
+2, 4 and 8 s: a dropped connection on a download, for one. So a call that keeps failing
 waits at most 14 s between the store's tries, and at most 23 s inside the client's
 retries of one request, unless the Hub's answer says how long to wait (``Retry-After``,
 or a 429's ``RateLimit`` header): the client then waits that long and 1 s more before
-each of its 5 tries, so 305 s for a ``Retry-After: 60``. A missing run is
-``RunNotFound``, and anything else, such as a missing repo or a refused token, fails at
-once.
+each of its 5 tries, so 305 s for a ``Retry-After: 60``. ``client_retried`` judges by
+the failure that ended the call, so when a download's first metadata request is refused
+and the client's retries of it then drop their connections, both layers retry: each of
+the store's 4 tries waits out the client's 23 s, 106 s of waiting in all with the store's
+14 s. A missing run is ``RunNotFound``, and anything else, such as a missing repo or a
+refused token, fails at once.
 
 ``pull`` makes a local folder hold the store's copy of a run, as ``forge kaggle output``
 does with a kernel's (``replace_run``): what the copy lacks goes, such as a failed

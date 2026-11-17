@@ -7,6 +7,7 @@ skips the checks on them only while the story is listed there.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -173,6 +174,60 @@ def test_gpu_story_runs_skip_only_while_pending(spider_mini: Path, tmp_path: Pat
     make("again", "kaggle")
     with pytest.raises(pytest.fail.Exception, match=r"gold is one run, but .* has 2"):
         gpu_story_runs("FG-999", {"gold": [config]}, runs=runs, pending=pending)
+
+
+# Integration checkpoint 3's Kaggle job (scripts/smoke/phase_3.sh), FG-303's criterion 4.
+SMOKE_JOB = {"50-question eval": [EVAL_CONFIGS / "smoke-kaggle-50-val.yaml"]}
+SPIKE_REPORTS = ROOT / "docs" / "spikes" / "kaggle-gpu"
+
+
+def _kaggle_rows(run_id: str) -> list[str]:
+    rows = read_rows(ROOT / "docs" / "compute-ledger.md")
+    return [row.platform for row in rows if row.run_id == run_id]
+
+
+@pytest.mark.phase(3)
+def test_phase3_spike_reports_present() -> None:
+    # The spike's kernel output holds no run, so its report and its push record are
+    # committed instead, and its GPU hours are a ledger row added by hand.
+    if "FG-301" in pending_stories():
+        pytest.skip(f"GPU run pending: FG-301's spike ({PENDING.name})")
+    pushed = json.loads((SPIKE_REPORTS / "kernels.json").read_text(encoding="utf-8"))
+    report = json.loads((SPIKE_REPORTS / "spike-report.json").read_text(encoding="utf-8"))
+    assert (pushed["job"], report["story"]) == ("spike", "FG-301")
+    assert report["finished_at"] is not None
+    assert pushed["code_sha"].startswith(pushed["run_id"].rsplit("-", 1)[1])
+    assert _kaggle_rows(pushed["run_id"]) == ["kaggle"]
+
+
+@pytest.mark.phase(3)
+def test_phase3_kaggle_eval_job_present() -> None:
+    (run,) = gpu_story_runs("FG-303", SMOKE_JOB).values()
+    manifest = run.manifest
+    assert (manifest.platform, manifest.gpu, manifest.status) == ("kaggle", "Tesla T4", "finished")
+    # The first 50 val questions, once each: val only, never dev.
+    val = [example_id for example_id, _ in read_split_ids("val")]
+    first = [example_id for example_id in val if example_id not in FAILING_GOLD_IDS][:50]
+    assert [score.example_id for score in run.scores] == first
+    assert manifest.run_id.endswith(manifest.git_sha[:7])
+    # The kernel's own record of the job came back with it.
+    status = json.loads((run.paths.root / "status.json").read_text(encoding="utf-8"))
+    assert (status["run_id"], status["status"], status["host"]) == (
+        manifest.run_id,
+        "finished",
+        "kaggle",
+    )
+    assert _kaggle_rows(manifest.run_id) == ["kaggle"]
+
+
+@pytest.mark.phase(3)
+@pytest.mark.requires_full_data
+def test_phase3_kaggle_eval_job_rebuilds() -> None:
+    (run,) = gpu_story_runs("FG-303", SMOKE_JOB).values()
+    report, chart = rebuild(run.manifest.run_id, runs_root=RUNS, data_dir=resolve_data_dir())
+    assert (report.diff, report.skipped) == ((), None)
+    # The kernel drew the chart on Linux; only a machine that draws as it did compares it.
+    assert chart.diff == () or chart.skipped is not None
 
 
 def _models() -> dict[str, Any]:

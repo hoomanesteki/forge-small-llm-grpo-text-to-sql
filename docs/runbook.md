@@ -18,13 +18,15 @@ Everything is free. Set these up once, then run `uv run forge doctor` until ever
    - Put it in `.env` at the repo root as `HF_TOKEN=...`. `.env` is git-ignored.
    - Create the **private** model repo `hoomanesteki/forge-runs`. Override the name with
      `FORGE_RUN_STORE` if needed.
-3. **Kaggle Secrets.** In any Kaggle notebook, open Add-ons, Secrets and add `HF_TOKEN`,
-   plus `WANDB_API_KEY` if you use W&B. Kernels read them through
-   `kaggle_secrets.UserSecretsClient`. The CLI cannot attach a secret to a kernel, so attach
-   each one once in the web editor. FG-301 checks whether pushed runs can read them; if not,
-   jobs return their results through `kaggle kernels output` instead.
-4. **Weights & Biases (optional).** A free account; set `WANDB_API_KEY` in `.env` or Kaggle
-   Secrets for live charts. Without it, metrics go to JSONL in the run store.
+3. **Kaggle Secrets.** Not needed for kernel jobs. The CLI cannot attach a secret to a
+   kernel, and FG-301 found that one attached in the web editor doesn't reach the next
+   version pushed from the CLI: the secrets service refuses it as it refuses a label that
+   doesn't exist (`docs/spikes/kaggle-gpu.md`, question 2). So kernel jobs run without
+   `HF_TOKEN` or `WANDB_API_KEY`, their results come back through `forge kaggle output`,
+   and the laptop puts them in the run store (Run store).
+4. **Weights & Biases (optional).** A free account; set `WANDB_API_KEY` in `.env` for live
+   charts on the laptop (a kernel can't read it, step 3). Without it, metrics go to JSONL in
+   the run store.
 
 `forge doctor` also wants 10 GB of free disk for Spider, model weights and caches. Lower the
 bar with `FORGE_MIN_FREE_GB` if you know you need less. It never prints token values: any
@@ -54,7 +56,12 @@ Both datasets are private: Forge never passes `-u`, and each `dataset-metadata.j
 ## GPU stack
 
 A kernel installs `kaggle/requirements-gpu.txt` over Kaggle's image, after the wheel. vLLM
-decides most of it (FG-306), and none of it has run on a T4 yet (FG-301 measures it):
+decides most of it (FG-306). FG-301 ran it on a T4: vLLM 0.33.0 generated in fp16 on these
+versions, and only GRPO through it failed, at vLLM's load of the 4-bit policy, since vLLM
+0.33.0 has no bitsandbytes. So it is the evaluation stack; training jobs get the spike's
+`trl` stack (ADR-0006) once FG-398 lands, and until then every job installs this list. pip
+took 392 s over the image in the 50-question eval job, where uv takes 96 s for the same
+list into an empty venv (`docs/spikes/kaggle-gpu.md`, question 3).
 
 | Package | Version | Why this one |
 |---|---|---|
@@ -98,7 +105,11 @@ holds HEAD, so the next push from the same commit mounts it.
    `--job grpo` come with FG-403 and FG-504. The run id must make a kernel slug Kaggle
    takes (`forge-<run_id>`, and `-<n>` on a resume: lowercase letters and digits with
    single hyphens between them, so not `a--b` or `run-`), the run must not clash with an
-   earlier push, and a dev job needs a dev look left (see Dev).
+   earlier push, and a dev job needs a dev look left (see Dev). Kaggle also refuses a
+   kernel title over 50 characters, and the title is `Forge <run_id>` (with ` <n>` on a
+   resume), so a run id may have 44 characters at most, 42 for a resume: a longer one gets
+   `400 Client Error: Bad Request` from the push after the code dataset step (FG-301).
+   Until FG-398 checks it and shortens such a kernel's name, pick a shorter `--run-id`.
 3. The current version of `<owner>/forge-code` must hold HEAD's wheel (its `GIT_SHA`), or
    HEAD is published as a new version, which is waited for until Kaggle says `ready`. The
    kernel mounts that version by number, with `<owner>/forge-spider`, which must exist
@@ -170,8 +181,9 @@ A temperature between 0 and 0.01 is refused, on every backend, since vLLM would 
 at 0.01. The preflight and the job share one engine, loaded once, since a second might not
 fit beside the first. `forge eval run --backend vllm` on the laptop is refused: its manifest
 would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: bitsandbytes`
-loads the weights in 4-bit, for a reference model too big for the T4 in fp16; the
-manifest's config then records it.
+asks for 4-bit weights, for a reference model too big for the T4 in fp16, but vLLM 0.33.0
+has no bitsandbytes and refuses it ("Unknown quantization method: bitsandbytes", FG-301);
+FG-398 moves the reference to an AWQ checkpoint.
 
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
@@ -190,14 +202,15 @@ notebook can run any number of times and log none of them. Name a dev run with `
 when the same model's val run was pushed from the same commit on the same day, since both
 would get the same default id.
 
-Secrets. `HF_TOKEN` and `WANDB_API_KEY` come from Kaggle Secrets when attached to the
-kernel, which only the web editor can do. Each is read without the line breaks and outer
-spaces huggingface_hub drops, and its value becomes `***` in every stage result in
-`status.json`, the error, the traceback, a failed run's `error.txt` and every log record,
-such as the run store's warning on stderr when it tries a Hub call again. Without them the
-job still runs, nothing is uploaded, and `forge kaggle output <run_id>` is how its results
-come back: the run's files go to `runs/<run_id>/`, and the log and the preflight to
-`runs/<run_id>/kernel/`.
+Secrets. `HF_TOKEN` and `WANDB_API_KEY` would come from Kaggle Secrets attached to the
+kernel, but a binding made in the web editor doesn't reach a version pushed from the CLI
+(FG-301), so the secrets stage records `kaggle secrets: ConnectionError` for both. Each is
+read without the line breaks and outer spaces huggingface_hub drops, and its value becomes
+`***` in every stage result in `status.json`, the error, the traceback, a failed run's
+`error.txt` and every log record, such as the run store's warning on stderr when it tries a
+Hub call again. Without them the job still runs, nothing is uploaded, and `forge kaggle
+output <run_id>` is how its results come back: the run's files go to `runs/<run_id>/`, and
+the log and the preflight to `runs/<run_id>/kernel/`.
 
 Provenance. A kernel has the wheel but no git checkout, so `entry.py` passes the code
 dataset's `GIT_SHA` in `FORGE_CODE_SHA`, and the manifest's `git_sha` takes it only where
@@ -267,19 +280,29 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
   adds, since a kernel that failed early may hold part of a run. None of them uploads over a
   store whose copy holds a session the folder lacks: the command says so and uploads nothing.
 - A Hub call that fails on the network (a dropped or refused connection, a timeout, 408, 429
-  or 5xx, downloads included) is tried again by one layer only. huggingface_hub 2.4 tries most
-  such failures 5 more times itself, 1, 2, 4, 8 and 8 seconds apart; what it doesn't retry,
-  the store tries 3 more times, 2, 4 and 8 seconds apart: a commit, the repo lookup that
-  starts a pull, a connection dropped on a download, and a 5xx other than 500, 502, 503 and
-  504. No failure is retried by both, so a call that keeps failing waits at most 14 s between
-  the store's tries and 23 s inside the client's, then says the store is unavailable; when
-  the Hub's answer says how long to wait (`Retry-After`, or a 429's `RateLimit` header), the
-  client waits that long and 1 s more before each of its 5 tries, so a `Retry-After: 60`
-  costs 305 s. A missing run is reported as missing, and a missing
-  repo, a refused token or a refused upload fails at once.
+  or 5xx, downloads included) is tried again by one layer, but for one rare case.
+  huggingface_hub 2.4 tries most such failures 5 more times itself, 1, 2, 4, 8 and 8 seconds
+  apart; what it doesn't retry, the store tries 3 more times, 2, 4 and 8 seconds apart: a
+  commit, the repo lookup that starts a pull, a connection dropped on a download, and a 5xx
+  other than 500, 502, 503 and 504. The store tells which from the failure that ended the
+  call (`forge.ops.hub.client_retried`), so both retry when a download's first metadata
+  request is refused and the client's retries of it then drop their connections: each of
+  the store's 4 tries then waits out the client's 23 s, 106 s of waiting in all with the
+  store's 14 s. Otherwise a call that keeps failing waits at most 14 s between the store's
+  tries or 23 s inside the client's, then says the store is unavailable; when the Hub's
+  answer says how long to wait (`Retry-After`, or a 429's `RateLimit` header), the client
+  waits that long and 1 s more before each of its 5 tries, so a `Retry-After: 60` costs
+  305 s. A missing run is reported as missing, and a missing repo, a refused token or a
+  refused upload fails at once.
 - The token is `HF_TOKEN` from the environment or `.env`; without one, huggingface_hub uses a
   saved login. Nothing creates the repo: make it private by hand (Accounts, step 2), and
   `forge doctor` checks it.
+- A kernel has no `HF_TOKEN` (Accounts, step 3), so its upload stage is skipped and a
+  kernel run reaches the store from the laptop: `forge kaggle wait <run_id>`, `forge runs
+  pull <run_id> --store kaggle`, then `forge runs push <run_id>`. That was the store's
+  first real use, on 2026-11-16, for FG-303's 50-question run: `run
+  2026-11-16-smoke-kaggle-50-val-c8f4b41 (eval, finished): uploaded to
+  hoomanesteki/forge-runs as runs/2026-11-16-smoke-kaggle-50-val-c8f4b41`.
 - Retention keeps a run's latest 2 `step-NNNNNN` checkpoints and `best/`
   (`prune_checkpoints`), for training jobs, which push a checkpoint every 50 steps (plan
   section 3.8). `latest_checkpoint` picks the highest step, which a resumed job starts from.
@@ -330,18 +353,25 @@ Push them in this order, from one clean commit that passed `make smoke`:
 1. The candidates on val with p1: `qwen3-1-7b-val`, `qwen3-4b-val` and
    `qwen2-5-coder-1-5b-val`.
 2. The model ADR-0012's rule chooses from step 1's runs, with p2: its `<name>-val-p2`
-   (ADR-0007). The rule also needs FG-301's GRPO memory check, so this waits for it.
-3. The reference on val, in 4-bit: `qwen3-8b-val`.
+   (ADR-0007). The rule also needs FG-301's GRPO memory check, which every candidate
+   passed (ADR-0012).
+3. The reference on val, in 4-bit: `qwen3-8b-val`. Its `quantization: bitsandbytes` fails
+   on vLLM 0.33.0 (FG-301), so it waits for FG-398's AWQ checkpoint.
 4. I6's repeat: `qwen2-5-coder-1-5b-val-100`, the first 100 val questions again.
 5. The model ADR-0012's rule chooses, and the reference, on dev, once each:
    `<name>-dev` and `qwen3-8b-dev`, with `--reason baseline`. These are dev looks 1 and 2.
 
-The same model's runs from one commit on one day would share a default run id, so name
-each: `--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`.
-For each run, `forge kaggle wait <run_id>`, which adds its ledger row, then `forge runs pull
-<run_id> --store kaggle` (or the hub store, with an `HF_TOKEN` in the kernel). Render its
-report on the laptop with `FORGE_DATA_DIR=data/spider uv run forge report run <run_id>`, so
-its rebuild compares the chart, and copy the folder whole to `docs/runs/`.
+The same model's runs from one commit on one day would share a default run id, so name each:
+`--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Until
+FG-398 lands the id may have 44 characters at most (Kaggle jobs, step 2), and of that
+pattern's ids only the I6 repeat's is longer, at 45: shorten it, for example to
+`<date>-qwen2-5-coder-1-5b-val100-<sha7>`. Kaggle runs at most two GPU sessions at once and
+refuses a third push ("Maximum batch GPU session count of 2 reached."), so push two and wait
+for one to end before the next. For each run, `forge kaggle wait <run_id>`, which adds its
+ledger row, then `forge runs pull <run_id> --store kaggle` (the kernel has no `HF_TOKEN`, so
+the Hub store gets the run only from `forge runs push`). Render its report on the laptop
+with `FORGE_DATA_DIR=data/spider uv run forge report run <run_id>`, so its rebuild compares
+the chart, and copy the folder whole to `docs/runs/`.
 `tests/integration/test_artifacts.py::test_phase3_baseline_reports_present` then checks
 every run is there with its report, I5 on its replies and I6 on step 4 against step 1.
 

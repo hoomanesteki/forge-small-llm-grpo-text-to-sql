@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
@@ -24,8 +25,10 @@ import pytest
 import yaml
 
 from forge.data import prompts as forge_prompts
+from forge.data.splits import read_split_ids
 from forge.ops.kaggle import METADATA_FILE, bake_argv, check_kernel_metadata
-from tests.spike import THROUGHPUT, throughput
+from forge.ops.ledger import read_rows
+from tests.spike import THROUGHPUT, load_script, throughput
 from tests.tiny_hf import CHATML, QWEN3, byte_tokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -684,6 +687,41 @@ def test_secrets_stage_records_whether_a_read_worked_only(
 
 
 @pytest.mark.phase(3)
+def test_secret_probe_never_writes_a_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Shaped like a Hugging Face token, so the probe's scrub has to catch it in error text.
+    canary = "hf_" + os.urandom(12).hex()
+
+    class UserSecretsClient:
+        def get_secret(self, label: str) -> str:
+            if label == "HF_TOKEN":
+                return canary
+            raise ConnectionError(f"service said no, {canary}") from OSError(canary)
+
+    fake = types.ModuleType("kaggle_secrets")
+    fake.UserSecretsClient = UserSecretsClient  # type: ignore[attr-defined]
+    fake.__file__ = "kaggle_secrets.py"
+    monkeypatch.setitem(sys.modules, "kaggle_secrets", fake)
+    monkeypatch.setenv("KAGGLE_USER_SECRETS_TOKEN", canary)
+    # Loading it runs nothing: off Kaggle its output folder doesn't exist.
+    secret_probe = load_script(ROOT / "kaggle" / "spike" / "secret_probe.py", "secret_probe")
+    out = tmp_path / "secret-probe.json"
+    secret_probe.main(out)
+
+    written = out.read_text()
+    assert canary not in written and canary not in capsys.readouterr().out
+    found = json.loads(written)
+    assert found["has_user_secrets_token"] is True
+    assert "KAGGLE_USER_SECRETS_TOKEN" in found["kaggle_env_names"]
+    assert found["HF_TOKEN"] == {"readable": True, "length": len(canary)}
+    refused = found["FORGE_NO_SUCH_LABEL"]
+    assert (refused["error"], refused["module"]) == ("ConnectionError", "builtins")
+    assert refused["message"] == "service said no, hf_<redacted>"
+    assert "hf_<redacted>" in refused["cause"]
+
+
+@pytest.mark.phase(3)
 def test_env_stage_reports_off_kaggle_too(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(spike, "_internet", lambda: {"url": "offline in tests", "status": 0})
     info = spike.env_stage(Namespace())
@@ -851,7 +889,6 @@ def _requirement_lines(path: Path) -> list[str]:
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
         if line:
-            assert "unverified until FG-301 runs" in raw, raw
             lines.append(line)
     return lines
 
@@ -865,7 +902,13 @@ def test_requirements_file_is_the_trl_vllm_stack() -> None:
     # FG-302 ships kaggle/requirements-gpu.txt and FG-306 adds vLLM to it; the spike
     # installs and times the same pins.
     gpu = spike.STACKS["trl-vllm"].requirements
-    assert tuple(_requirement_lines(ROOT / "kaggle" / "requirements-gpu.txt")) == gpu
+    path = ROOT / "kaggle" / "requirements-gpu.txt"
+    assert tuple(_requirement_lines(path)) == gpu
+    # FG-301 ran these pins on a T4, and the file says which stages measured them.
+    text = path.read_text(encoding="utf-8")
+    assert "unverified" not in text
+    for stage in ("install:trl-vllm", "vllm:<model>", "grpo:trl-vllm:<model>"):
+        assert stage in text, stage
     lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
 
     def locked(name: str, version: str) -> bool:
@@ -943,18 +986,34 @@ def test_spike_doc_keeps_research_apart_from_measurements() -> None:
     questions = [part for part in doc.split("\n## ") if part[:1].isdigit()]
     assert [part.split(".", 1)[0] for part in questions] == ["1", "2", "3", "4", "5", "6"]
     for part in questions:
-        research, found, measured = part.partition("**To be measured on the first GPU session.**")
+        research, found, measured = part.partition("**Measured on 2026-11-16.**")
         title = part.splitlines()[0]
         assert found, f"{title}: no measurements section"
         assert "**What research says today.**" in research, title
         assert "](https://" in research, f"{title}: research without a source"
         # Each measurement names the report field it comes from.
         assert re.search(r"`[a-z_-]+[.:]", measured), f"{title}: no report field named"
-    for name, status in (("0005-kaggle-compute", "accepted"), ("0006-train-backend", "proposed")):
+    assert "Not measured yet" not in doc and "To be measured" not in doc
+
+    # The reports it quotes are committed as the kernels wrote them, each in the README.
+    reports = ROOT / "docs" / "spikes" / "kaggle-gpu"
+    readme = (reports / "README.md").read_text(encoding="utf-8")
+    listed = re.findall(r"^\| `([a-z-]+\.json)` \|", readme, flags=re.MULTILINE)
+    assert sorted(listed) == sorted(path.name for path in reports.glob("*.json"))
+    for name in ("spike-report.json", "limit-probe.json", "secret-probe.json"):
+        assert f"`{name}`" in doc, name
+    report = json.loads((reports / "spike-report.json").read_text(encoding="utf-8"))
+    assert (report["schema"], report["story"]) == (spike.REPORT_SCHEMA, "FG-301")
+    assert report["finished_at"] is not None
+    run = json.loads((reports / "kernels.json").read_text(encoding="utf-8"))
+    assert run["job"] == "spike" and run["kernels"][0]["kernel"].endswith("/forge-throughput-spike")
+    # Both records the spike informs are decided, each with what it measured.
+    for name in ("0005-kaggle-compute", "0006-train-backend"):
         assert f"(../adr/{name}.md)" in doc
         adr = (ROOT / "docs" / "adr" / f"{name}.md").read_text(encoding="utf-8")
         assert adr.startswith(f"# ADR-{name[:4]}:")
-        assert re.search(rf"\n- Status: ({status}|accepted|superseded)", adr), name
+        assert "\n- Status: accepted\n" in adr, name
+        assert "\n## Measured\n" in adr, name
 
 
 @pytest.mark.phase(3)
@@ -964,5 +1023,85 @@ def test_pending_runs_say_what_blocks_them() -> None:
         assert entry["status"] == "blocked", entry["run"]
         assert entry["blocked_on"], entry["run"]
         assert (ROOT / entry["how"].split(",")[0]).is_file(), entry["how"]
-    # FG-301's runs stay inside the story's 1.5 GPU hours (plan section 3.8).
-    assert sum(e["est_gpu_hours"] for e in pending if e["story"] == "FG-301") <= 1.5
+    # FG-301's runs stay inside the story's 1.5 GPU hours (plan section 3.8): any still
+    # pending by its estimate, the spike that ran by its ledger row.
+    spike_run = json.loads((ROOT / "docs" / "spikes" / "kaggle-gpu" / "kernels.json").read_text())
+    spent = sum(
+        row.hours
+        for row in read_rows(ROOT / "docs" / "compute-ledger.md")
+        if row.run_id == spike_run["run_id"]
+    )
+    assert spent > 0
+    assert spent + sum(e["est_gpu_hours"] for e in pending if e["story"] == "FG-301") <= 1.5
+
+
+def _budget_rows() -> dict[str, float]:
+    """Plan section 3.8's GPU hour budget, as {the job's name before any colon or
+    parenthesis: its hours}, the total row as ``Total``."""
+    plan = (ROOT / "docs" / "PLAN.md").read_text(encoding="utf-8")
+    section = plan.split("\n### 3.8 ", 1)[1].split("\n### ", 1)[0]
+    table = section.split("**GPU hour budget**", 1)[1].split("\n\n")[1]
+    rows = {}
+    for line in table.splitlines()[2:]:
+        job, _, hours, _ = (cell.strip() for cell in line.strip("|").split("|"))
+        name = re.split(r"[:(]", job.strip("*"), maxsplit=1)[0].strip()
+        number = re.search(r"[\d.]+", hours)
+        assert number, line
+        rows[name] = float(number.group())
+    return rows
+
+
+@pytest.mark.phase(3)
+def test_budget_rows_follow_the_measurements() -> None:
+    # Each worked-out row of plan section 3.8, from the files its note names and by its
+    # formulas, so a row can't drift from them or be typed by hand.
+    report = json.loads((ROOT / "docs" / "spikes" / "kaggle-gpu" / "spike-report.json").read_text())
+    stages = {stage["name"]: stage["result"] for stage in report["stages"]}
+    job = ROOT / "docs" / "runs" / "2026-11-16-smoke-kaggle-50-val-c8f4b41" / "status.json"
+    kernel = json.loads(job.read_text())["stages"]
+    fixed = sum(kernel[name]["seconds"] for name in ("code", "install", "data", "secrets"))
+    models = {"1.7B": "Qwen/Qwen3-1.7B", "4B": "Qwen/Qwen3-4B"}
+
+    def up(hours: float) -> float:
+        return math.ceil(round(hours * 20, 6)) / 20
+
+    def grpo(steps: int, size: str, sessions: int = 1) -> float:
+        step = stages[f"grpo:trl:{models[size]}"]["median_step_seconds"]
+        return up(steps * step * 1.5 / 3600 + 0.25 * sessions)
+
+    def evaluate(questions: int, size: str) -> float:
+        bench = stages[f"vllm:{models[size]}"]
+        setup = fixed + stages[f"download:{models[size]}"]["seconds"] + bench["load_seconds"]
+        generate = questions * 256 / bench["completion_tokens_per_second"]
+        return up((setup + generate) * 1.5 / 3600)
+
+    # Spider's dev split is 1,034 questions (ADR-0004); only its size is used here.
+    val, dev = len(read_split_ids("val")), 1034
+    # The reference's own config estimates: no run has loaded an 8B model on the T4.
+    reference = 0.45 + 0.50
+    candidates = 2 * evaluate(val, "1.7B") + evaluate(val, "4B")
+    expected = {
+        "Baselines": candidates
+        + evaluate(val, "4B")
+        + evaluate(100, "1.7B")
+        + evaluate(dev, "4B")
+        + reference,
+        "SFT checkpoint evals": 2 * evaluate(val, "4B"),
+        "GRPO pilot": grpo(100, "1.7B", sessions=2),
+        "GRPO main": grpo(600, "4B", sessions=2),
+        "Checkpoint selection": 3 * evaluate(val, "4B") + 2 * evaluate(dev, "4B"),
+        "Hacking fix re-run": grpo(200, "4B") + evaluate(val, "4B"),
+    }
+    rows = _budget_rows()
+    for name, hours in expected.items():
+        assert rows[name] == pytest.approx(hours), name
+
+    # The spike's row is its ledger row, and the total adds the rows up within the 45 h
+    # the Phase 3 gate allows.
+    spike_run = json.loads((ROOT / "docs" / "spikes" / "kaggle-gpu" / "kernels.json").read_text())
+    ledger = read_rows(ROOT / "docs" / "compute-ledger.md")
+    assert [row.hours for row in ledger if row.run_id == spike_run["run_id"]] == [
+        rows["Throughput spike"]
+    ]
+    total = rows.pop("Total")
+    assert total == pytest.approx(sum(rows.values())) and total <= 45

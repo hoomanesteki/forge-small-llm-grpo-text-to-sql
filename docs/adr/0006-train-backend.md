@@ -1,7 +1,7 @@
 # ADR-0006: One TrainBackend, with TRL and PEFT on the GPU by default
 
-- Status: proposed, to be confirmed by FG-301 measurements
-- Date: 2026-11-15
+- Status: accepted
+- Date: 2026-11-16 (proposed 2026-11-15)
 
 ## Context
 
@@ -24,56 +24,76 @@ research in [the FG-301 spike](../spikes/kaggle-gpu.md):
 - vLLM 0.33.0 runs on a T4 in fp16, but pins torch 2.14.0 and `transformers<5.21`. TRL
   1.18's vLLM extra accepts `vllm>=0.23,<0.34`.
 
-## Decision (proposed)
+## Measured
+
+FG-301's GPU session on 2026-11-16 benched each stack on one T4 of a Kaggle T4 x2 session
+(`n_gpu` 1 in every GRPO bench), with Qwen3 1.7B and 4B in 4-bit, LoRA rank 16, fp16, 6
+generations of up to 256 tokens and 24 completions a step, for 10 steps
+(`docs/spikes/kaggle-gpu/spike-report.json`, question 5 of the spike doc):
+
+| Stage | Versions | Median s a step | Peak allocated | Load s | Install s |
+|---|---|---:|---:|---:|---:|
+| `grpo:trl:Qwen/Qwen3-1.7B` | trl 1.18.0, transformers 5.23.0, the image's torch 2.11.0 | 18.43 | 3.02 GB | 5.3 | 20.0 |
+| `grpo:trl:Qwen/Qwen3-4B` | the same | 32.92 | 4.94 GB | 9.3 | 20.0 |
+| `grpo:unsloth:Qwen/Qwen3-1.7B` | trl 0.22.2, transformers 4.57.6, vllm 0.11.2, torch 2.9.0 | 11.64 | 12.75 GB | 139.4 | 124.4 |
+| `grpo:unsloth:Qwen/Qwen3-4B` | the same | 21.22 | 13.66 GB | 129.5 | 124.4 |
+| `grpo:trl-vllm:Qwen/Qwen3-1.7B` | trl 1.18.0, vllm 0.33.0, transformers 5.20.2, torch 2.14.0 | error | | | 95.9 |
+| `grpo:trl-vllm:Qwen/Qwen3-4B` | the same | error | | | 95.9 |
+
+The median is of steps 2 to 10, and the device holds 15.64 GB. Unsloth's peaks are mostly
+the KV cache its colocated vLLM reserves (its standby mode set vLLM's share to 0.76), not
+what training needs. Every loss the four benches that ran logged is finite. Both
+`grpo:trl-vllm:*` stages failed before training, when vLLM loaded the 4-bit policy:
+
+```text
+ValidationError: 1 validation error for ModelConfig
+  Value error, Unknown quantization method: bitsandbytes. Must be one of ['awq', ...]
+```
+
+## Decision
 
 - One `TrainBackend` interface (FG-402) for SFT and GRPO, with the same code path on the
   CPU and the GPU, so CI tests what the T4 runs.
-- The GPU default is TRL 1.18 with PEFT LoRA (plan section 3.10: r=16 on every linear
-  layer) in fp16 on the T4: `fp16=True`, `bf16=False`, SDPA attention. A base that
-  doesn't fit in fp16 loads in 4-bit NF4 with fp16 compute, and its trainable parameters
-  are cast back to fp32 once the trainer is built (TRL issue 7776). Rollouts use
-  transformers generation, or TRL's colocated vLLM (`use_vllm=True`,
-  `vllm_mode="colocate"`) if FG-301 finds a vLLM that installs beside this stack and
-  runs on the T4.
-- Unsloth is an optional accelerator behind the same interface. It is enabled only if
-  FG-301 finds an Unsloth release that works with TRL 1.16 or later and runs on the T4.
-  Today's release doesn't qualify.
+- GRPO and SFT on the T4 use TRL 1.18 with transformers generation and the lock's
+  versions: the spike's `trl` stack, trl 1.18.0, transformers 5.23.0, peft 0.21.3,
+  accelerate 1.15.0, datasets 5.2.0, huggingface-hub 2.4.0 and bitsandbytes 0.50.2,
+  installed over the image's torch. It ran Qwen3 1.7B and 4B in 4-bit NF4 with fp16
+  (`fp16=True`, `bf16=False`) and a finite loss over 10 steps, the 4B at 4.94 GB of the
+  T4's 15.64 GB. LoRA comes from PEFT as plan section 3.10 says (r=16 on every linear
+  layer), attention is SDPA, and a 4-bit base's trainable parameters are cast back to fp32
+  once the trainer is built (TRL issue 7776).
+- TRL's colocated vLLM is out: vLLM 0.33.0 has no bitsandbytes, so it can't load the 4-bit
+  policy (the error above).
+- Unsloth stays out. It ran and was faster a step (11.6 s against 18.4 s for 1.7B, 21.2 s
+  against 32.9 s for 4B, with about 130 s of load), but on trl 0.22.2 and transformers
+  4.57.6, which this record's condition, an Unsloth release on TRL 1.16 or later, still
+  rules out.
+- Training jobs install the measured `trl` stack, and evaluation jobs keep the vLLM stack,
+  `kaggle/requirements-gpu.txt` (the spike's `trl-vllm` list, whose vLLM 0.33.0 generated
+  in fp16 on the T4). FG-398 makes the kernel install the list its job needs; until it
+  lands, `kaggle/requirements-gpu.txt` is the eval stack and every kernel installs it.
+- One GPU a job: a session has two T4s, and every bench used one.
 - On the CPU (CI and the laptop) the same TRL backend trains in fp32 with `use_cpu=True`
   and a tiny model.
-- The plan's fallback stands: if no vLLM path works on the T4, GRPO runs through TRL with
-  transformers generation on the 1.7B model only, and the section 3.8 budget is redone
-  for it.
-- The GPU packages are `kaggle/requirements-gpu.txt`, the same versions as `uv.lock`
-  where the lock has them (ADR-0002), except torch 2.14.0 and transformers 5.20.2: since
-  FG-306 the file holds vllm 0.33.0 for evaluation, which needs both, so it is the
-  spike's `trl-vllm` stack. If vLLM fails on the T4, the `trl` stack (the lock's
-  versions on the image's torch) is the fallback.
-
-## What FG-301 has to measure
-
-Each is a stage of `kaggle/spike/throughput.py`:
-
-- `grpo:trl:<model>`: seconds per step and peak memory for Qwen3 1.7B and 4B in 4-bit,
-  6 generations of up to 256 tokens. This sets the GRPO budget.
-- `grpo:trl-vllm:<model>`: whether TRL's colocated vLLM installs and runs on the T4, and
-  what it saves per step.
-- `grpo:unsloth:<model>`: the same steps through Unsloth's own T4 recipe, to show what
-  Unsloth would gain if a compatible release appears.
-
-Accept this record, or replace it, once those numbers are in. If it is accepted, the
-GPU training rows of plan sections 3.12 and 3.13 change to match.
+- The plan's fallback, GRPO on the 1.7B model alone, isn't needed: the 4B fits.
 
 ## Consequences
 
-- Rollouts through transformers are slower than through vLLM, so GRPO steps cost more
-  GPU time than the plan assumed until a vLLM path is confirmed. FG-301's numbers go into
-  the section 3.8 budget at Gate 3.
-- fp16 training can overflow where bf16 would not. Unsloth patches some of those cases;
+- Rollouts go through transformers, at the `trl` stack's step times above. Plan section
+  3.8's GRPO rows are worked out from them: the steps, the median step for the model's
+  size, and a margin for Spider's longer prompts and real rewards.
+- fp16 training can overflow where bf16 would not, and 10 steps of a cheap reward show
+  nothing about hundreds of steps on a real one. Unsloth patches some of those cases;
   plain TRL does not, so GRPO jobs watch for NaN and infinite losses.
 - The CPU smoke and the T4 job share one backend, one TRL version and one set of configs.
+- Training and evaluation need two package lists, which FG-398 ships side by side in the
+  code dataset.
+- Plan sections 3.12 and 3.13 still name Unsloth for GPU training; they change to match
+  this record at Gate 3.
 
 ## Revisit if
 
-An Unsloth release supports TRL 1.16 or later, a vLLM release supports transformers 5.23
-or later, TRL fixes issues 7889 or 7776, or FG-301's measurements make the default too
-slow for the budget.
+An Unsloth release supports TRL 1.16 or later: it measured 37% less time a step for 1.7B
+and 36% for 4B, for 120 to 135 s more load. Also if a vLLM release loads bitsandbytes
+weights again or supports transformers 5.23 or later, TRL fixes issue 7889 or 7776, or the
+real GRPO steps make the section 3.8 budget not fit.

@@ -7,7 +7,8 @@
 
 Forge's cash budget is $0, so GPU hours are the scarce resource: about 43 of them in
 plan section 3.8. What the free platforms offer, from the research in
-[the FG-301 spike](../spikes/kaggle-gpu.md) (nothing here is measured yet):
+[the FG-301 spike](../spikes/kaggle-gpu.md) on 2026-11-15 (what its sessions measured the
+next day is under Measured, below):
 
 - Kaggle gives a phone-verified account T4 GPUs with internet, in sessions of at most
   12 hours, against a weekly quota users report at about 30 hours. `kaggle quota -v`
@@ -54,13 +55,39 @@ plan section 3.8. What the free platforms offer, from the research in
 - One GPU at a time. A "GPU T4 x2" session has two T4s, but the jobs use the first.
 - Without a readable secret, a job's results reach the Hub only after `forge runs pull`,
   and a session that dies without a clean exit may lose them. FG-301's session-limit
-  probe shows how much survives a kill; until then, plan for nothing.
+  probe found that a session killed at its timeout keeps what it wrote (Measured).
 - The kernel image changes without notice (it moved to CUDA 13 in late October 2026), so
   each job logs the image build and its package versions.
 - The fp16-only T4 shapes the training stack: see ADR-0006.
 
+## Measured
+
+Added 2026-11-16, from FG-301's sessions (`docs/spikes/kaggle-gpu/`, questions 1, 2 and 6
+of the spike doc). The decision stands.
+
+- Question 2 is no: a pushed run can't read a Kaggle Secret. `HF_TOKEN`, attached in the
+  editor, didn't reach the version the CLI pushed next (`secrets.labels.HF_TOKEN`:
+  `ConnectionError`), and the secret probe found the secrets service answering 400 Bad
+  Request for it exactly as for a label no secret has (`secret-probe.json`). So the second
+  way of decision 3 holds: no token on Kaggle. A job's results come back with `forge
+  kaggle output` or `forge runs pull --store kaggle`, and go to the Hub from the laptop
+  with `forge runs push`, first done for FG-303's 50-question run.
+- Question 6: a session killed at its timeout keeps what it wrote before the kill. The
+  CPU probe pushed with `-t 900` wrote its last heartbeat 900 s after its start, and that
+  file came back with `kaggle kernels output` (`limit-probe.json`); `kaggle kernels status`
+  reads `CANCEL_ACKNOWLEDGED`. That was a timeout the push set, so the 12-hour limit is
+  assumed, not shown, to end a session the same way. The third way of decision 3, a token
+  in a dataset, isn't needed on this evidence, and the time guard stays.
+- Decision 1 works as written: `--accelerator NvidiaTeslaT4` gave a T4 x2 session, two
+  T4s of 15.6 GB, and every bench used the first (`env.torch.devices`, `n_gpu`).
+  Kaggle refuses a kernel title over 50 characters, which FG-398 checks before a push.
+- Decision 5's numbers: the weekly GPU quota is 30 hours, refreshed at 00:00 UTC on
+  Saturday (`kaggle quota -v`: `GPU,0.59h,29.41h,30.00h,2026-11-21T00:00:00+00:00` after the
+  spike), and at most two GPU sessions run at once ("Maximum batch GPU session count of 2
+  reached.").
+
 ## Revisit if
 
 Kaggle changes its quota, accelerators or policy (Google Cloud plans to retire the T4 on
-2027-08-01), or FG-301 finds that pushed runs can read Secrets or that a killed session
-keeps its output.
+2027-08-01), pushed runs become able to read Secrets, or a job killed at the 12-hour limit
+turns out to lose what it wrote, which FG-301 measured only for a push's timeout.

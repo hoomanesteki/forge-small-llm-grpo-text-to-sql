@@ -1,0 +1,32 @@
+{
+  "schema": "forge-kaggle-spike/1",
+  "story": "FG-301",
+  "started_at": "2026-11-16T15:56:12+00:00",
+  "updated_at": "2026-11-16T15:56:12+00:00",
+  "finished_at": null,
+  "launch": {
+    "argv0": "/kaggle/src/script.py",
+    "argv": [
+      "/kaggle/src/script.py"
+    ],
+    "kernel_argv": [
+      "limit-probe",
+      "--interval-seconds",
+      "30"
+    ],
+    "file": "/kaggle/src/script.py",
+    "cwd": "/kaggle/working"
+  },
+  "args": null,
+  "stage_caps_minutes": {
+    "env": 5,
+    "secrets": 2,
+    "download": 15,
+    "install": 20,
+    "grpo": 25,
+    "vllm": 15,
+    "bnb": 10
+  },
+  "bnb_reserve_minutes": 20,
+  "stages": []
+}
