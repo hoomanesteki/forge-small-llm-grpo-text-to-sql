@@ -28,9 +28,10 @@ Three things the plan's signatures leave out turned out to be needed:
   device and dtype), since the dtype changes the weights. So a backend says its `name`,
   `device` and `precision`.
 
-FG-491's pilot trains on the laptop's GPU through MPS (ADR-0016), and ADR-0006 makes TRL
-with PEFT the GPU default, Unsloth only an option. One TRL backend on every device does
-both, where a CPU-only one would need a second backend for each.
+FG-491's pilot trains on the laptop's GPU through MPS (ADR-0016), and ADR-0006 trains on
+the T4 with TRL and PEFT, keeping Unsloth out until an Unsloth release supports TRL 1.16 or
+later. One TRL backend on every device does both, where a CPU-only one would need a second
+backend for each.
 
 ## Decision
 
@@ -78,3 +79,14 @@ part of it, so the gate's diff of `src/forge/core` never showed it.
 
 Unsloth becomes the GPU default (ADR-0006), or a backend needs a setting these signatures
 have no place for.
+
+## Notes
+
+- 2026-11-17, Unsloth on Kaggle (FG-492). This record first said ADR-0006 makes Unsloth an
+  option on the GPU. ADR-0006, as accepted, keeps it out until an Unsloth release supports
+  TRL 1.16 or later, and the Context above now says so. `UnslothBackend` stays in the code,
+  and `select_backend("auto")` still picks it where torch sees a CUDA GPU and Unsloth is
+  installed, but no Kaggle training kernel has it: the T4 image has none (the spike's `env`
+  stage in `docs/spikes/kaggle-gpu/spike-report.json`), and the kernel installs
+  `kaggle/requirements-train-gpu.txt` (FG-398), which adds none. So `auto` picks
+  `TrlBackend` on the T4.

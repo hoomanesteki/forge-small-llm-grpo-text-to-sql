@@ -1039,7 +1039,10 @@ Work discovered along the way that is not a plan story.
   and `datasets<5`, so it can't share `uv.lock`. `UnslothBackend` is tested with a stand-in
   module only; its install and first real run come with the first GPU job (FG-404). TRL
   casts a 4-bit model's adapters to bf16, which fp16 can't unscale on a T4 (TRL issue 7776),
-  so `TrlBackend` casts them back to fp32 (FG-402).
+  so `TrlBackend` casts them back to fp32 (FG-402). Superseded by ADR-0006, as accepted,
+  which keeps Unsloth out until a release on TRL 1.16 or later: a training kernel installs
+  FG-398's `kaggle/requirements-train-gpu.txt`, which has no unsloth, so no GPU job installs
+  it and `select_backend("auto")` picks `TrlBackend` on Kaggle (ADR-0017's note, FG-492).
 - `SFTTrainer` tokenizes with `datasets.map`, which writes four `cache-*.arrow` files into
   the folder of a dataset opened with `load_from_disk`, so `data/sft/<hash>/` would gain
   files. FG-403 should open it with `keep_in_memory=True`, which writes none (FG-402).
