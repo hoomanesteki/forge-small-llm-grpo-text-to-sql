@@ -200,7 +200,8 @@ fit beside the first. `forge eval run --backend vllm` on the laptop is refused: 
 would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: awq` loads an
 AWQ checkpoint's 4-bit weights, for a reference model too big for the T4 in fp16, as
 FG-307's `Qwen/Qwen3-8B-AWQ` (ADR-0012); vLLM's AWQ kernels need compute capability 7.5,
-which the T4 has, and no run has loaded that checkpoint on a T4 yet. `quantization:
+which the T4 has, and FG-307's reference runs of 2026-11-17 loaded and scored that
+checkpoint on a T4, in 0.21 h on val and 0.25 h on dev by their ledger rows. `quantization:
 bitsandbytes` is refused before any push, in one line: vLLM 0.33.0 has no bitsandbytes and
 refused it as "Unknown quantization method: bitsandbytes" (FG-301).
 
@@ -393,9 +394,9 @@ Push them in this order, from one clean commit that passed `make smoke`:
    (ADR-0007). The rule also needs FG-301's GRPO memory check, which every candidate
    passed (ADR-0012).
 3. The reference on val, in 4-bit: `qwen3-8b-val`, the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`
-   (FG-398), since vLLM 0.33.0 has no bitsandbytes (FG-301). This run is the first to load
-   it on a T4, so push the reference's dev run (step 5) only once this one has loaded it:
-   that push spends a dev look.
+   (FG-398), since vLLM 0.33.0 has no bitsandbytes (FG-301). Push the reference's dev run
+   (step 5) only once this one has loaded it, since that push spends a dev look. The val
+   run of 2026-11-17 was the first to load the checkpoint on a T4, and it did.
 4. I6's repeat: `qwen2-5-coder-1-5b-val-100`, the first 100 val questions again.
 5. The model ADR-0012's rule chooses, and the reference, on dev, once each:
    `<name>-dev` and `qwen3-8b-dev`, with `--reason baseline`. These are dev looks 1 and 2.
