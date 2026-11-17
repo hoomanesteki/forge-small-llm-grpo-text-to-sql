@@ -6,9 +6,10 @@
 ## Context
 
 Forge's cash budget is $0, so GPU hours are the scarce resource: about 43 of them in
-plan section 3.8. What the free platforms offer, from the research in
-[the FG-301 spike](../spikes/kaggle-gpu.md) on 2026-11-15 (what its sessions measured the
-next day is under Measured, below):
+plan section 3.8 when this was decided (2026-11-15), which section 3.8 has worked out again
+since from FG-301's measurements and FG-307's choice of model. What the free platforms
+offer, from the research in [the FG-301 spike](../spikes/kaggle-gpu.md) on 2026-11-15 (what
+its sessions measured the next day is under Measured, below):
 
 - Kaggle gives a phone-verified account T4 GPUs with internet, in sessions of at most
   12 hours, against a weekly quota users report at about 30 hours. `kaggle quota -v`

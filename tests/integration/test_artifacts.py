@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 import yaml
 
-from forge.data.spider import FAILING_GOLD_IDS, resolve_data_dir
+from forge.data.spider import FAILING_GOLD_IDS, load_checksums, resolve_data_dir
 from forge.data.splits import read_split_ids
 from forge.eval.config import HOSTS, EvalConfig, read_config_file
 from forge.eval.report import rebuild, write_run_report
@@ -218,6 +218,16 @@ def test_phase3_kaggle_eval_job_present() -> None:
         "kaggle",
     )
     assert _kaggle_rows(manifest.run_id) == ["kaggle"]
+    # FG-302's datasets, as the kernel mounted them: the code dataset's version the push
+    # named, holding the run's commit, and every verified Spider file.
+    pushed = json.loads((run.paths.root / "kernels.json").read_text(encoding="utf-8"))
+    owner, slug, _ = pushed["kernels"][0]["code"].split("/")
+    stages = status["stages"]
+    assert slug == "forge-code"
+    assert stages["code"]["result"]["folder"].endswith(f"/{owner}/forge-code")
+    assert stages["code"]["result"]["sha"] == manifest.git_sha
+    assert stages["data"]["result"]["folder"].endswith(f"/{owner}/forge-spider")
+    assert stages["data"]["result"]["files"] == len(load_checksums())
 
 
 @pytest.mark.phase(3)

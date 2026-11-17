@@ -322,8 +322,9 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
   commit, the repo lookup that starts a pull, a connection dropped on a download, and a 5xx
   other than 500, 502, 503 and 504. The store tells which from the failure that ended the
   call (`forge.ops.hub.client_retried`), so both retry when a download's first metadata
-  request is refused and the client's retries of it then drop their connections: each of
-  the store's 4 tries then waits out the client's 23 s, 106 s of waiting in all with the
+  request is refused, times out or gets a status the client retries (408, 429, 500, 502,
+  503 or 504), and the client's retries of it then drop their connections: each of the
+  store's 4 tries then waits out the client's 23 s, 106 s of waiting in all with the
   store's 14 s. Otherwise a call that keeps failing waits at most 14 s between the store's
   tries or 23 s inside the client's, then says the store is unavailable; when the Hub's
   answer says how long to wait (`Retry-After`, or a 429's `RateLimit` header), the client

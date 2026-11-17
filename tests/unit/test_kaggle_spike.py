@@ -724,6 +724,32 @@ def test_secret_probe_never_writes_a_value(
 
 
 @pytest.mark.phase(3)
+def test_secret_probe_scrubs_a_token_across_its_cut(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The traceback keeps its last 1,200 characters. A message that ends 1,182 characters
+    # after a token puts the cut inside it, where the tail alone no longer looks like one.
+    canary = "hf_" + os.urandom(12).hex()
+
+    class UserSecretsClient:
+        def get_secret(self, label: str) -> str:
+            raise ConnectionError(f"{canary} {'y' * 1180}")
+
+    fake = types.ModuleType("kaggle_secrets")
+    fake.UserSecretsClient = UserSecretsClient  # type: ignore[attr-defined]
+    fake.__file__ = "kaggle_secrets.py"
+    monkeypatch.setitem(sys.modules, "kaggle_secrets", fake)
+    secret_probe = load_script(ROOT / "kaggle" / "spike" / "secret_probe.py", "secret_probe")
+    out = tmp_path / "secret-probe.json"
+    secret_probe.main(out)
+
+    written = out.read_text()
+    assert canary[-12:] not in written
+    tail = json.loads(written)["HF_TOKEN"]["trace_tail"]
+    assert len(tail) == 1200 and tail.endswith("y" * 1180 + "\n")
+
+
+@pytest.mark.phase(3)
 def test_env_stage_reports_off_kaggle_too(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(spike, "_internet", lambda: {"url": "offline in tests", "status": 0})
     info = spike.env_stage(Namespace())
@@ -1017,7 +1043,8 @@ def test_spike_doc_keeps_research_apart_from_measurements() -> None:
         assert "](https://" in research, f"{title}: research without a source"
         # Each measurement names the report field it comes from.
         assert re.search(r"`[a-z_-]+[.:]", measured), f"{title}: no report field named"
-    assert "Not measured yet" not in doc and "To be measured" not in doc
+    # Across a line break too, as the doc wraps its lines.
+    assert re.search(r"Not\s+measured\s+yet|To\s+be\s+measured", doc) is None
 
     # The reports it quotes are committed as the kernels wrote them, each in the README.
     reports = ROOT / "docs" / "spikes" / "kaggle-gpu"

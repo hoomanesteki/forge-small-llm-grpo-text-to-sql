@@ -13,8 +13,9 @@ It asks for ``HF_TOKEN`` and for a label no secret has, so the two answers can b
 and records for each only whether a value came back and its length, or the error: its
 type, message, cause and the end of its traceback, with anything shaped like a Hugging Face
 token cut out. The code is the script that ran, with type hints and ``main`` added so a
-test can run it against a fake client; nothing imports it, and ``scripts/kaggle_spike.py``
-bundles ``throughput.py`` alone.
+test can run it against a fake client, and the traceback scrubbed before it is cut to its
+end rather than after (a review found a token across the cut kept its tail); nothing
+imports it, and ``scripts/kaggle_spike.py`` bundles ``throughput.py`` alone.
 """
 
 from __future__ import annotations
@@ -58,7 +59,8 @@ def probe() -> dict[str, Any]:
                     "module": type(exc).__module__,
                     "message": scrub(str(exc))[:600],
                     "cause": scrub(repr(exc.__cause__ or exc.__context__))[:600],
-                    "trace_tail": scrub("".join(traceback.format_exception(exc))[-1200:]),
+                    # Scrubbed before the cut, so a token across it can't keep its tail.
+                    "trace_tail": scrub("".join(traceback.format_exception(exc)))[-1200:],
                 }
     except Exception as exc:
         out["client"] = f"{type(exc).__name__}: {scrub(str(exc))[:300]}"
