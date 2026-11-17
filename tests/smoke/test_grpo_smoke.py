@@ -96,6 +96,7 @@ def test_grpo_two_steps_cpu(
     # 10 on rowless geo; every one of them, as no filter eval picked them.
     data = config["grpo_data"]
     assert (len(load_train()), data["rowless"], data["rows"], data["filter"]) == (40, 10, 30, None)
+    assert config["grpo"]["curriculum"] == {"share": 0.4, "hardness": ["easy", "medium"]}
     assert manifest.config_hash == config_hash(config)
     assert manifest.data_manifest_hash == data_manifest_hash(spider_mini)
 

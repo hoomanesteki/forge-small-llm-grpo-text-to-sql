@@ -1,6 +1,6 @@
 """The GRPO dataset (FG-505): the filter that picks GRPO's rows from a greedy eval of
-train questions, ``forge data build-grpo`` that keeps them, and the training run that
-reads them back."""
+train questions, ``forge data build-grpo`` that keeps them, the training run that reads
+them back, and the curriculum's order as TRL's own dataloader takes it."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from accelerate import skip_first_batches
+from datasets import Dataset
+from transformers import Qwen2Config, Qwen2ForCausalLM
 from typer.testing import CliRunner
 
 from forge import cli
@@ -23,7 +26,13 @@ from forge.eval.gold_cache import split_gold
 from forge.eval.run_files import StoredRun, read_run
 from forge.eval.runner import EvalRun, run_eval
 from forge.infer.base import FakeBackend
-from forge.train.config import parse_train_config
+from forge.train.backends import TrlBackend, grpo_settings
+from forge.train.config import (
+    CurriculumConfig,
+    GrpoConfig,
+    load_train_config,
+    parse_train_config,
+)
 from forge.train.curriculum import (
     KEEP_SOLVED,
     LEVELS,
@@ -31,13 +40,16 @@ from forge.train.curriculum import (
     ROWS_FILE,
     SUMMARY_FILE,
     check_filter_run,
+    curriculum_order,
     filter_hash,
     read_filter,
     save_filter,
     select_rows,
+    warmup_steps,
 )
 from forge.train.grpo import grpo_rows
 from tests.fakes import WordTokenizer
+from tests.tiny_hf import byte_tokenizer
 
 MODEL = "org/tiny-sft@0123456789abcdef0123456789abcdef01234567"
 EVAL = "2026-11-20-tiny-sft-eval-abc1234"
@@ -300,3 +312,172 @@ def test_grpo_rows_are_the_filters(
     )
     with pytest.raises(ValueError, match="names a folder"):
         grpo_rows(placeholder, WordTokenizer(), data_dir=spider_mini, grpo_root=out)
+
+
+def _rows(hardness: list[Hardness]) -> Dataset:
+    return Dataset.from_list(
+        [
+            {
+                "prompt": [{"role": "user", "content": f"question {i}"}],
+                "example_id": f"spider-train-{i:05d}",
+                "hardness": level,
+            }
+            for i, level in enumerate(hardness)
+        ]
+    )
+
+
+def _steps(batches: list[list[dict[str, Any]]], per_step: int) -> list[list[dict[str, Any]]]:
+    """Each optimizer step's rows, from the dataloader's micro-batches: ``per_step`` of
+    them a step, every row as many times as its group has replies."""
+    return [
+        [row for batch in batches[s : s + per_step] for row in batch]
+        for s in range(0, len(batches), per_step)
+    ]
+
+
+@pytest.mark.phase(5)
+def test_curriculum_boundary(tmp_path: Path) -> None:
+    # 3 rows of each level; 2 prompts a step, each with its 2 replies, over 2 micro-batches.
+    dataset = _rows(["easy", "medium", "hard", "extra"] * 3)
+    cfg = GrpoConfig(
+        num_generations=2,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=2,
+        max_steps=10,
+        curriculum=CurriculumConfig(),
+    )
+    assert cfg.prompts_per_step == 2 and warmup_steps(0.4, 10) == 4
+    tokenizer = byte_tokenizer()
+    model = Qwen2ForCausalLM(
+        Qwen2Config(
+            vocab_size=len(tokenizer),
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+        )
+    )
+
+    def reward(prompts: list[Any], completions: list[Any], **kwargs: Any) -> list[float]:
+        return [0.0] * len(completions)
+
+    def trainer() -> Any:
+        return TrlBackend("cpu").grpo_trainer(
+            model, tokenizer, dataset, [reward], cfg, [], output_dir=tmp_path, seed=7
+        )
+
+    # TRL's own dataloader, as GRPOTrainer builds it for training.
+    built = trainer()
+    assert built.args.shuffle_dataset is False
+    batches = list(built.get_train_dataloader())
+    steps = _steps(batches, cfg.gradient_accumulation_steps)
+    assert len(steps) == cfg.max_steps
+    by_id = dict(zip(dataset["example_id"], dataset["hardness"], strict=True))
+    prompts = []
+    for step in steps:
+        ids = [row["example_id"] for row in step]
+        # Two prompts, each with its 2 replies in both of the step's micro-batches.
+        assert sorted(Counter(ids).values()) == [4, 4]
+        prompts.append(sorted(set(ids), key=ids.index))
+    # The first 4 of the 10 steps, 40%, draw easy and medium rows alone, every one of the
+    # 6 there before any comes again; the last 6 draw from all 12, each once.
+    first, rest = prompts[:4], prompts[4:]
+    assert all(by_id[i] in ("easy", "medium") for step in first for i in step)
+    drawn = [i for step in first for i in step]
+    assert len(set(drawn[:6])) == 6 and {by_id[i] for i in drawn} == {"easy", "medium"}
+    assert sorted(i for step in rest for i in step) == sorted(dataset["example_id"])
+
+    # A session that resumes after step 3 skips its batches, as the trainer does, and goes
+    # on with the same steps: step 4 is still the first to draw from every row.
+    resumed = skip_first_batches(trainer().get_train_dataloader(), 3 * 2)
+    assert list(resumed) == batches[6:]
+
+    # A part of the run with fewer rows than a step's is refused, and with no curriculum
+    # the rows go to TRL as they are, for it to shuffle.
+    with pytest.raises(ValueError, match="the curriculum has 1 rows of easy or medium"):
+        curriculum_order(
+            ["a", "b", "c"],
+            ["easy", "hard", "extra"],
+            steps=10,
+            per_step=2,
+            curriculum=CurriculumConfig(),
+            seed=0,
+        )
+    plain = cfg.model_copy(update={"curriculum": None})
+    assert grpo_settings(plain)["shuffle_dataset"] is True
+    shuffled = TrlBackend("cpu").grpo_trainer(
+        model, tokenizer, dataset, [reward], plain, [], output_dir=tmp_path, seed=7
+    )
+    assert list(shuffled.train_dataset["example_id"]) == list(dataset["example_id"])
+
+
+@pytest.mark.phase(5)
+def test_curriculum_order_is_fixed_by_its_inputs() -> None:
+    ids = [f"spider-train-{i:05d}" for i in range(9)]
+    levels = ["easy", "medium", "hard"] * 3
+    curriculum = CurriculumConfig(share=0.5, hardness=("easy",))
+    order = curriculum_order(ids, levels, steps=6, per_step=2, curriculum=curriculum, seed=3)
+    # 3 of 6 steps from the 3 easy rows, two passes of them; then two thirds of a pass of
+    # all 9, no row twice.
+    assert len(order) == 12 and all(levels[i] == "easy" for i in order[:6])
+    assert sorted(order[:3]) == sorted(order[3:6]) == [0, 3, 6]
+    assert len(set(order[6:])) == 6
+    assert order == curriculum_order(
+        ids, levels, steps=6, per_step=2, curriculum=curriculum, seed=3
+    )
+    assert order != curriculum_order(
+        ids, levels, steps=6, per_step=2, curriculum=curriculum, seed=4
+    )
+    # The ids, not the rows' places, set where each row goes.
+    flipped = curriculum_order(
+        ids[::-1], levels[::-1], steps=6, per_step=2, curriculum=curriculum, seed=3
+    )
+    assert [ids[::-1][i] for i in flipped] == [ids[i] for i in order]
+    # The share is read as written: 0.7 of 10 steps is 7, and any part of a step counts.
+    assert (warmup_steps(0.7, 10), warmup_steps(0.4, 600), warmup_steps(0.4, 2)) == (7, 240, 1)
+
+
+@pytest.mark.phase(5)
+def test_curriculum_config_is_checked() -> None:
+    def grpo(**section: Any) -> dict[str, Any]:
+        return {"run": {"kind": "grpo", "model_ref": MODEL}, "grpo": section}
+
+    config = parse_train_config(grpo(curriculum={}))
+    assert config.grpo is not None and config.grpo.curriculum == CurriculumConfig()
+    assert (config.grpo.curriculum.share, config.grpo.curriculum.hardness) == (
+        0.4,
+        ("easy", "medium"),
+    )
+    assert parse_train_config(config.model_dump(mode="json")) == config
+    plain = parse_train_config(grpo())
+    assert plain.grpo is not None and (plain.grpo.curriculum, plain.grpo.filter_from) == (
+        None,
+        None,
+    )
+    refused = [
+        ({"hardness": []}, "first steps need at least one hardness level"),
+        ({"hardness": ["easy", "easy"]}, "hardness names easy more than once"),
+        ({"hardness": ["easy", "medium", "hard", "extra"]}, "set curriculum: null for none"),
+        ({"hardness": ["trivial"]}, "Input should be 'easy', 'medium', 'hard' or 'extra'"),
+        ({"share": 1.0}, "Input should be less than 1"),
+        ({"share": 0.0}, "Input should be greater than 0"),
+        ({"steps": 0.4}, "Extra inputs are not permitted"),
+    ]
+    for section, message in refused:
+        with pytest.raises(ValueError, match=message):
+            parse_train_config(grpo(curriculum=section))
+    with pytest.raises(ValueError, match="filter_from: String should have at least 1 character"):
+        parse_train_config(grpo(filter_from=""))
+
+
+@pytest.mark.phase(5)
+def test_grpo_configs_take_the_curriculum() -> None:
+    root = Path(__file__).resolve().parents[2] / "configs" / "grpo"
+    for path in sorted(root.glob("*.yaml")):
+        grpo = load_train_config(path).grpo
+        assert grpo is not None and grpo.curriculum == CurriculumConfig(), path.name
+        # Only the main run filters, by the eval FG-507 makes and names here.
+        expected = "<filter-eval-run-id>" if path.name == "qwen3-4b-main.yaml" else None
+        assert grpo.filter_from == expected, path.name

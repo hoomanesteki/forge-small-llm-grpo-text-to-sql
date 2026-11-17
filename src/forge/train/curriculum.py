@@ -1,14 +1,14 @@
-"""The GRPO dataset (FG-505): which train questions GRPO trains on.
+"""The GRPO dataset (FG-505): which train questions GRPO trains on, and in what order.
 
 GRPO learns from the spread of rewards within a group. A prompt the starting model always
 solves, or never does, gives every reply of its group the same reward and so no
-advantage, and the GPU time spent on it teaches nothing. The filter deals with that.
+advantage, and the GPU time spent on it teaches nothing. Two parts deal with that.
 
-``forge data build-grpo --filter-from <run_id>`` reads a finished eval run of the
-starting model on train questions, a subset of them such as the first 3,000 (``forge eval
-run --split train --limit 3000``), made greedy, one reply a question and no retry, so each
-score is the model's one best answer (``check_filter_run``). Of the questions it scored
-(``select_rows``):
+**The filter.** ``forge data build-grpo --filter-from <run_id>`` reads a finished eval run
+of the starting model on train questions, a subset of them such as the first 3,000
+(``forge eval run --split train --limit 3000``), made greedy, one reply a question and
+no retry, so each score is the model's one best answer (``check_filter_run``). Of the
+questions it scored (``select_rows``):
 
 - those on a rowless database (``ROWLESS_DBS``) are left out, as everywhere in GRPO,
   since any query with an empty result matches their gold one;
@@ -31,20 +31,31 @@ run must train on the rows it started with. ``grpo.filter_from`` names the eval 
 ``read_filter`` reads its rows back for ``forge.train.grpo``, checked against their hash
 and the data they were picked on. Only train is read: the eval run must be of train
 questions, each of them in ``load_train()``.
+
+**The curriculum.** With ``grpo.curriculum``, ``curriculum_rows`` lays the rows out in the
+order the trainer takes them, each step's prompts after the step before's, and the
+backend turns TRL's shuffling off, so that TRL 1.18's ``RepeatSampler`` walks them in that
+order. The steps that start before ``curriculum.share`` of the run draw from the rows of
+``curriculum.hardness`` alone, the rest from every row (``curriculum_order``). Each part
+draws in passes over its pool, every row once a pass, in an order hashed from the seed,
+the part, the pass and the row's id, so a row comes again only after its whole pool has.
+The order depends on the rows, the config and the seed alone, so a resumed run, whose
+trainer skips the batches it trained, carries on with the step it stopped before.
 """
 
 from __future__ import annotations
 
 import hashlib
+import itertools
 import logging
 import math
 import tempfile
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import get_args
+from typing import TYPE_CHECKING, get_args
 
 from pydantic import BaseModel, ValidationError
 
@@ -57,6 +68,10 @@ from forge.eval.config import check_run_id
 from forge.eval.gold_cache import split_gold
 from forge.eval.run_files import ADAPTER_DIGEST, StoredRun, read_run
 from forge.ops.paths import repo_root, runs_dir
+from forge.train.config import CurriculumConfig, GrpoConfig
+
+if TYPE_CHECKING:
+    from datasets import Dataset
 
 log = logging.getLogger(__name__)
 
@@ -370,6 +385,81 @@ def render_summary(summary: FilterSummary) -> str:
         + "".join(f"  {cell:>{width}}" for cell, width in zip(row[1:], widths[1:], strict=True))
         for row in table
     )
+
+
+def warmup_steps(share: float, steps: int) -> int:
+    """How many of a run's ``steps`` start before ``share`` of it, the share read as the
+    decimal it is written as: 0.4 of 600 is 240, and 0.7 of 10 is 7, where float
+    arithmetic would make it 8."""
+    return math.ceil(Fraction(repr(share)) * steps)
+
+
+def curriculum_order(
+    example_ids: Sequence[str],
+    hardness: Sequence[str],
+    *,
+    steps: int,
+    per_step: int,
+    curriculum: CurriculumConfig,
+    seed: int,
+) -> list[int]:
+    """The positions of the rows each step's prompts are, ``per_step`` a step for
+    ``steps`` steps, step after step, as the module docstring says. Row ``i`` has
+    ``example_ids[i]`` and ``hardness[i]``.
+
+    Raises ``ValueError`` when a part of the run would draw from fewer rows than a step's.
+    """
+    if len(example_ids) != len(hardness):
+        raise ValueError(f"{len(example_ids)} ids for {len(hardness)} hardness levels")
+    everything = list(range(len(example_ids)))
+    first = [i for i in everything if hardness[i] in curriculum.hardness]
+    warm = warmup_steps(curriculum.share, steps)
+    parts = (
+        (first, warm, f"rows of {' or '.join(curriculum.hardness)}"),
+        (everything, steps - warm, "rows"),
+    )
+    for pool, part_steps, what in parts:
+        if part_steps and len(pool) < per_step:
+            raise ValueError(
+                f"each step draws {per_step} prompts, and the curriculum has {len(pool)} "
+                f"{what} for {part_steps} of its {steps} steps"
+            )
+    order = list(itertools.islice(_passes(example_ids, first, seed, "first"), warm * per_step))
+    rest = (steps - warm) * per_step
+    order.extend(itertools.islice(_passes(example_ids, everything, seed, "all"), rest))
+    return order
+
+
+def curriculum_rows(dataset: Dataset, cfg: GrpoConfig, *, seed: int) -> Dataset:
+    """``dataset``'s rows in the order ``cfg.curriculum`` gives the run's ``max_steps``
+    steps of ``prompts_per_step`` prompts, for TRL to take with shuffling off; a row may
+    come more than once. The dataset needs ``example_id`` and ``hardness`` columns."""
+    if cfg.curriculum is None:
+        raise ValueError("the config has no curriculum to order the rows by")
+    order = curriculum_order(
+        list(dataset["example_id"]),
+        list(dataset["hardness"]),
+        steps=cfg.max_steps,
+        per_step=cfg.prompts_per_step,
+        curriculum=cfg.curriculum,
+        seed=seed,
+    )
+    log.info(
+        "curriculum: the first %d of %d steps draw from %s",
+        warmup_steps(cfg.curriculum.share, cfg.max_steps),
+        cfg.max_steps,
+        " and ".join(cfg.curriculum.hardness),
+    )
+    # In memory: a dataset loaded from disk would otherwise write an index file beside it.
+    return dataset.select(order, keep_in_memory=True)
+
+
+def _passes(example_ids: Sequence[str], pool: Sequence[int], seed: int, part: str) -> Iterator[int]:
+    """The rows of ``pool``, pass after pass, each pass every row once in the order their
+    ids hash with the seed, the part and the pass."""
+    for number in itertools.count():
+        ranks = {i: _rank(f"{seed}:{part}:{number}:{example_ids[i]}") for i in pool}
+        yield from sorted(pool, key=ranks.__getitem__)
 
 
 def _rank(text: str) -> str:

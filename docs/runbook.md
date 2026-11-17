@@ -455,6 +455,16 @@ databases in one sandbox pool, and every `grpo.eval_every` steps fast EX on a fi
 subset goes to `metrics.jsonl` as `val/ex_fast`, beside each reward's
 `rewards/<name>/mean`.
 
+The rows leave out rowless databases. To train only where the starting adapter has
+something to learn (FG-505), evaluate it greedily on train questions first, `uv run forge
+eval run --model <model> --adapter <adapter> --split train --limit 3000 --run-id <id>`,
+then `uv run forge data build-grpo --filter-from <id>`. It keeps in `data/grpo/<id>/`
+every question the adapter got wrong and 30% of those it got right, drops gold slower
+than 1 s, and counts what it kept by hardness in `summary.json`. `grpo.filter_from: <id>`
+trains on those rows, and every session of the run needs that folder, since a resume
+refuses other rows. `grpo.curriculum` draws the first 40% of steps from easy and medium
+questions alone.
+
 When the time guard stops a run, carry it on from its latest checkpoint with the same
 config, commit and data: `uv run forge train grpo --config <the config> --run-id <run_id>
 --resume`. The steps go on from where it stopped, and `sessions.json` lists each session.

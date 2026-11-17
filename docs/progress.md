@@ -70,7 +70,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-502 | Adversarial reward tests | 3 | done |  |  | `tests/fixtures/adversarial_completions.yaml`: 48 completions on the fixture databases, each with its gold query, its four rewards and their weighted total, 9 of them audit candidates that name the FG-601 detector for their kind (`test_adversarial_cases`); `test_rewards_bounded_property` holds every reward and the total to [-2, 1.2] over 500 generated replies. Fixed in `train/rewards.py`: the constant guard charges a literal answer written over a table, such as `SELECT 3 FROM professor LIMIT 1` |
 | FG-503 | Parallel reward computation and gold cache | 3 | done |  |  | `forge data cache-gold --split train` (or `val`) builds `cache/gold/<split>-<data hash[:12]>.jsonl` through `forge.eval.gold_cache.split_gold`, the one file `forge eval run` reads too, and anything that needs it builds it on first use; `forge.train.rewards.reward_pool()` starts the one pool a run's four rewards share, a worker a CPU up to 4, each query capped at 2 s; `scripts/bench_rewards.py` times 6 prompts of 6 replies, and `test_batch_latency_budget` holds its 20 fixture batches to 1.5 s each (the worst took 25 ms on the laptop). On Linux each `SandboxPool` worker caps `RLIMIT_AS` at 1 GiB past its start, and a query past it comes back as an `other` error while its worker is replaced; macOS doesn't enforce the limit, so the 2 s kill bounds it there. Fixed from FG-501's review: a comment beside a `;` no longer zeroes a right query, and a write among statements sqlglot can't read costs `non_select` |
 | FG-504 | GRPO trainer with CPU smoke | 5 | done |  |  | `forge train grpo --config` (`forge.train.grpo.run_grpo`): rows of `prompt`, `example_id`, `db_id`, `gold_sql` and `hardness` from the SFT builder over `load_train()`, a prompt over `grpo.max_prompt_length` left out there; LoRA from `grpo.init_adapter` (`PeftModel.from_pretrained(..., is_trainable=True)`, refused unless its LoRA settings are the config's and, for a run's checkpoint, its model and digest are that run's) or a fresh one when null; TRL's `GRPOConfig` gets the reward weights, `temperature`, `num_iterations=1` and never `max_prompt_length` or `steps_per_generation`, and the manifest's `trl` section records beta 0.0 and the `dapo` loss TRL 1.18 chose; `--resume` carries a run on from its latest stored checkpoint, step count included, with a session each in `sessions.json` (ADR-0017 amended, ADR-0011); `forge.eval.callbacks.ValEvalCallback` logs `val/ex_fast` on a fixed hash-drawn val subset every `grpo.eval_every` steps with the training model (`HfBackend.around`); `make smoke` trains 2 steps of `configs/grpo/tiny-smoke.yaml` and evaluates the adapter; `configs/grpo/` also holds the Kaggle pilot and main configs, whose SFT run ids FG-507 fills in, and the local MPS pilot's for FG-591 |
-| FG-505 | GRPO dataset, filtering and curriculum | 3 | todo |  |  |  |
+| FG-505 | GRPO dataset, filtering and curriculum | 3 | done |  |  | `forge data build-grpo --filter-from <eval_run_id> [--seed] [--out]` (`forge.train.curriculum`) reads a finished greedy eval of train questions (one reply, no retry, the same data; an eval of val is refused), keeps every question fast EX got wrong and 30% of the right ones, the lowest by seeded hash, rounded half up, leaves out rowless databases and gold over 1,000 ms in the gold cache, and writes `data/grpo/<run_id>/rows.jsonl` and `summary.json` (tallies by hardness, a hash); `grpo.filter_from` trains on those rows, checked against their hash and the data, recorded in the manifest's `grpo_data.filter`, and GRPO rows always leave out rowless databases now; `grpo.curriculum` (share 0.4, easy and medium) lays the rows out step by step in hashed passes after the prompt-length drop, with TRL's `shuffle_dataset` off, so the first 40% of steps draw from easy and medium alone, checked on `GRPOTrainer`'s own dataloader and across a resume's `skip_first_batches`; all four GRPO configs take it, and the main one names FG-507's filter eval as `<filter-eval-run-id>` |
 | FG-506 | Training telemetry and alerts | 3 | todo |  |  |  |
 | FG-507 | GRPO runs on Kaggle | 5 | todo |  |  |  |
 | FG-508 | Checkpoint selection and dev evaluation | 3 | todo |  |  |  |
@@ -1165,3 +1165,22 @@ Work discovered along the way that is not a plan story.
   sessions; SFT runs still keep none, since they don't resume (FG-504).
 - A GRPO run holds no lock against a second process given the same run id, as an eval run does;
   a second new run fails at the folder, and a second resume isn't stopped (FG-504).
+- The plan sketches `data.curriculum` and `data.filter_by_sft_pass_rate`. A field in `data` would
+  change every SFT manifest's config, so they are `grpo.curriculum` and `grpo.filter_from`, as the
+  starting adapter is `grpo.init_adapter`. The filter is the story's: one greedy reply a question,
+  every wrong one kept and 30% of the right ones, rather than a pass rate band (FG-505).
+- `--split train --limit 3000` takes the first 3,000 train questions in file order. On the full data
+  they are on 68 of the 131 train databases, 720 easy, 1,229 medium, 613 hard and 438 extra, of
+  1,779, 2,638, 1,771 and 1,596 in all 7,784. A run filtered by such an eval trains on about half
+  the databases, so FG-507 may want its filter eval spread over all of them (FG-505).
+- The filter's rows are kept in `data/grpo/<eval_run_id>/` rather than picked again when a run
+  starts: gold timings come from each machine's gold cache, which a Kaggle session builds anew, and
+  rows picked again could differ, which a resume refuses by the config hash. FG-507's kernel job
+  has to bring that folder to every session of a run (FG-505).
+- TRL 1.18's `GRPOTrainer` feeds prompts through `RepeatSampler`, `generation_batch_size //
+  num_generations` of them a step with Forge's settings, and with `shuffle_dataset=False` walks the
+  dataset in order. So the curriculum is a dataset of `max_steps` times `prompts_per_step` rows,
+  repeats allowed, one epoch for the whole run, and a resume's `skip_first_batches` lands on the
+  step it stopped before (FG-505).
+- GRPO rows leave out the rowless databases now, as the Phase 1 note asked, so the smoke's GRPO run
+  trains on 30 of the fixture's 40 train questions (FG-505).

@@ -27,7 +27,9 @@ callbacks they are given and no tracker of transformers' own (``report_to`` is n
 saves only when a callback asks (``save_strategy`` is no): every ``checkpoint_every``
 steps and at the time guard. ``max_prompt_length`` is Forge's own filter, since TRL has
 no such setting any more: rows whose prompt is longer are dropped, and counted, before
-TRL sees them.
+TRL sees them. With ``grpo.curriculum`` the rows left are then laid out in the order the
+steps take them (``forge.train.curriculum.curriculum_rows``), which needs their
+``example_id`` and ``hardness``, and TRL's sampler walks them unshuffled.
 
 ``select_backend("auto")`` picks Unsloth when torch sees a CUDA GPU and Unsloth is
 installed, and otherwise ``TrlBackend`` on the best device there is: the CPU in CI.
@@ -55,6 +57,7 @@ from forge.train.config import (
     SftConfig,
     TrainDevice,
 )
+from forge.train.curriculum import curriculum_rows
 
 if TYPE_CHECKING:
     from datasets import Dataset
@@ -274,6 +277,9 @@ def grpo_settings(cfg: GrpoConfig, reward_weights: Sequence[float] | None = None
         "num_iterations": 1,
         # Qwen3 answers without thinking (plan section 3.7); other templates ignore it.
         "chat_template_kwargs": {THINKING_FLAG: False},
+        # A curriculum's rows come in the order the steps take them, which a shuffle
+        # would undo.
+        "shuffle_dataset": cfg.curriculum is None,
     }
     if cfg.beta != LIBRARY_DEFAULT:
         settings["beta"] = cfg.beta
@@ -343,11 +349,15 @@ class _TrlTrainers:
         args = GRPOConfig(**self._common(output_dir, seed), **grpo_settings(cfg, reward_weights))
         # TRL types a reward's list as list[float | None], which list[float] is not.
         reward_funcs: list[Any] = list(rewards)
+        rows = drop_long_prompts(dataset, tok, cfg.max_prompt_length)
+        if cfg.curriculum is not None:
+            # After the drop, so that no row left out moves the steps after it.
+            rows = curriculum_rows(rows, cfg, seed=seed)
         trainer = GRPOTrainer(
             model=model,
             reward_funcs=reward_funcs,
             args=args,
-            train_dataset=drop_long_prompts(dataset, tok, cfg.max_prompt_length),
+            train_dataset=rows,
             processing_class=tok,
             callbacks=list(callbacks),
         )

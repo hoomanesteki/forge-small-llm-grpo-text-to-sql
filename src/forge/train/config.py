@@ -39,21 +39,22 @@ any model does:
   ``checkpoints/best``, or null for a fresh LoRA on the base model. Only GRPO starts from
   an adapter, so it sits in the grpo section rather than in ``run`` as plan section 3.10
   sketches it, and an SFT run's manifest is the same as before it existed.
-- ``grpo.filter_from`` (``forge.train.curriculum``) sits there too, for the same reason,
-  where the plan sketches ``data.filter_by_sft_pass_rate``: it names the eval run of train
-  questions whose scores picked the rows, which ``forge data build-grpo`` keeps; null
-  trains on every row.
+- ``grpo.filter_from`` and ``grpo.curriculum`` (``forge.train.curriculum``) sit there too,
+  for the same reason, where the plan sketches ``data.filter_by_sft_pass_rate`` and
+  ``data.curriculum``. ``filter_from`` names the eval run of train questions whose
+  scores picked the rows, which ``forge data build-grpo`` keeps; null trains on every row.
+  ``curriculum`` draws the first steps' prompts from some hardness levels alone; null,
+  the default, draws every step's from all rows, as TRL shuffles them.
 
 The run store is the one ``FORGE_RUN_STORE`` names (``forge.ops.hub``), so the plan's
-``ops.hub_run_repo`` is not a setting here: one place names it. The plan's
-``data.curriculum`` comes with the rest of FG-505.
+``ops.hub_run_repo`` is not a setting here: one place names it.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 import yaml
 from pydantic import (
@@ -69,6 +70,7 @@ from pydantic import (
     model_validator,
 )
 
+from forge.core.types import Hardness
 from forge.data.prompts import MAX_PROMPT_TOKENS
 from forge.data.schema import check_version
 
@@ -177,6 +179,28 @@ class SftConfig(_Section):
     subset_rows: Count | None = None
 
 
+class CurriculumConfig(_Section):
+    """GRPO's curriculum (FG-505): the steps that start in the first ``share`` of a run
+    draw their prompts from the rows of the ``hardness`` levels alone, and the rest from
+    every row (``forge.train.curriculum.curriculum_order``)."""
+
+    share: Share = 0.4
+    hardness: tuple[Hardness, ...] = ("easy", "medium")
+
+    @field_validator("hardness")
+    @classmethod
+    def _some_levels(cls, value: tuple[Hardness, ...]) -> tuple[Hardness, ...]:
+        if not value:
+            raise ValueError("the curriculum's first steps need at least one hardness level")
+        repeated = sorted({level for level in value if value.count(level) > 1})
+        if repeated:
+            raise ValueError(f"hardness names {', '.join(repeated)} more than once")
+        if set(value) == set(get_args(Hardness)):
+            # Every row would be drawn from the start, which is no curriculum at all.
+            raise ValueError("hardness names every level; set curriculum: null for none")
+        return value
+
+
 class GrpoConfig(_Section):
     # The adapter GRPO starts from: a training run's checkpoint, as
     # runs/<run_id>/checkpoints/best, or another adapter folder or Hub repo. None trains a
@@ -185,6 +209,7 @@ class GrpoConfig(_Section):
     # The eval run of train questions whose scores pick the rows, as forge data build-grpo
     # keeps them in data/grpo/<run id>/; checked when the run starts. None trains on all.
     filter_from: Annotated[StrictStr, Field(min_length=1)] | None = None
+    curriculum: CurriculumConfig | None = None
     num_generations: Annotated[int, Strict(), Field(ge=2)] = 6
     max_prompt_length: Count = MAX_PROMPT_TOKENS
     max_completion_length: Annotated[int, Strict(), Field(ge=1, le=MAX_COMPLETION_TOKENS)] = 256
@@ -213,6 +238,12 @@ class GrpoConfig(_Section):
     def generation_batch(self) -> int:
         """Completions generated at once: TRL's generation_batch_size on one GPU."""
         return self.per_device_train_batch_size * self.gradient_accumulation_steps
+
+    @property
+    def prompts_per_step(self) -> int:
+        """The prompts of one optimizer step, each with its group: TRL's generation batch
+        is one step's, as ``num_iterations`` is 1 and ``steps_per_generation`` TRL's."""
+        return self.generation_batch // self.num_generations
 
     @model_validator(mode="after")
     def _whole_groups(self) -> GrpoConfig:

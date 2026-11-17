@@ -29,6 +29,8 @@ lora:
 grpo:
   init_adapter: runs/<sft-main-run-id>/checkpoints/best
   filter_from: <filter-eval-run-id>
+  # The first 40% of steps draw from easy and medium questions alone (plan FG-505).
+  curriculum: {share: 0.4, hardness: [easy, medium]}
   num_generations: 6
   max_prompt_length: 1536
   max_completion_length: 256

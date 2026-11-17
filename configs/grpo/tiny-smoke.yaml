@@ -25,6 +25,8 @@ grpo:
   max_steps: 2
   # At the last step, on all 20 of the fixture's val questions.
   eval_every: 2
+  # Plan FG-505's: step 1 of 2 draws from easy and medium questions alone, step 2 from all.
+  curriculum: {share: 0.4, hardness: [easy, medium]}
 ops:
   # A checkpoint every step, so a run the time guard stops after its first can resume.
   checkpoint_every: 1

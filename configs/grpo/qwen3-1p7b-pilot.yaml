@@ -32,6 +32,8 @@ grpo:
   gradient_accumulation_steps: 4
   max_steps: 100
   beta: library_default
+  # The main run's curriculum (plan FG-505), on every train row: no filter eval here.
+  curriculum: {share: 0.4, hardness: [easy, medium]}
   # Half way and at the end, so the pilot shows which way val EX goes.
   eval_every: 50
 ops:
