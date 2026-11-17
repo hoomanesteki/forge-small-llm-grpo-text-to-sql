@@ -27,10 +27,10 @@ its steps, batch and logging, such as `max_steps: 3`.
 | LoRA targets | `q_proj k_proj v_proj o_proj gate_proj up_proj down_proj` | Every linear layer of a Qwen block, attention and MLP |
 | Epochs | 1 | A second is the product owner's call once val EX is seen (FG-404) |
 | Learning rate | 2e-4, cosine, 3% warmup | The usual LoRA rate, ten times TRL's full fine-tuning default |
-| Effective batch | 16 rows | 4 rows by 4 accumulation steps; 2 by 8 on the 4B, for its memory |
+| Effective batch | 16 rows | 4 rows by 4 accumulation steps |
 | Max length | 2,048 tokens | Fits every row whole: prompts are capped at 1,536 tokens and replies are short |
 | Loss | The reply only | TRL's `completion_only_loss` on the prompt-completion rows (FG-401) |
-| Base on a T4 | 4-bit NF4, fp16 compute, fp32 adapters | ADR-0006; the Kaggle pilot loads in 4-bit too, so it runs the main run's path |
+| Base on a T4 | fp16, fp32 adapters | ADR-0006; the chosen 1.5B model fits a T4 in fp16, so neither Kaggle run loads in 4-bit, and the pilot runs the main run's path |
 | Base on the CPU | float32 | bitsandbytes runs on CUDA only |
 | Base on MPS | bfloat16 where `torch.backends.mps` supports it (macOS 14 and later), float32 otherwise | `precision_for` in `forge.train.backends` (ADR-0017); bitsandbytes runs on CUDA only |
 
@@ -47,8 +47,8 @@ its steps, batch and logging, such as `max_steps: 3`.
 
 ## Revisit if
 
-The pilots' val EX shows the adapter underfitting or overfitting, the 4B run doesn't fit
-a T4's memory at these values, or FG-404 adds a second epoch.
+The pilots' val EX shows the adapter underfitting or overfitting, the main run doesn't
+fit a T4's memory at these values, or FG-404 adds a second epoch.
 
 ## Notes
 
@@ -71,3 +71,9 @@ a T4's memory at these values, or FG-404 adds a second epoch.
   - `"dtype": "bfloat16"` in its manifest's `trainer`: bf16 on MPS, as the table now says.
     Its val run scored the adapter on the float32 base, as FG-291's base run was
     (ADR-0016), so the two val runs differ in the adapter alone.
+- 2026-11-17, Phase 4 gate (FG-496). The T4 row first said a 4-bit NF4 base with fp16
+  compute, with the Kaggle pilot in 4-bit too, and the batch row split the 4B main run's
+  rows by its memory. Both Kaggle runs now train the model ADR-0012 chose, which fits a T4
+  in fp16, so neither loads in 4-bit (`load_in_4bit` is false in both configs), and no
+  config trains the 4B. The pilot runs every setting of the main run on fewer rows, so it
+  tries the main run's memory on the T4 before the main run does.

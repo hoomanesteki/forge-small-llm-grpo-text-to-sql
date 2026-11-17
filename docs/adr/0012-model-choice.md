@@ -177,7 +177,8 @@ the I5 lines against the reports, and `tests/unit/test_count_extraction.py` and
 
 - Training configs (plan section 3.10, `model_ref`) name `Qwen/Qwen2.5-Coder-1.5B-Instruct`
   at the commit `configs/models.yaml` pins, with prompt p2 (ADR-0007): Phase 4's configs,
-  from FG-402 on.
+  from FG-402 on. FG-496 made FG-404's SFT configs do so, the pilot's and the main run's,
+  as the second note below says.
 - The model is smaller than the Qwen3 1.7B that FG-301 benched for GRPO, so plan section
   3.8 budgets its training and evaluations at 1.7B's measured rates.
 - Its val official EX, 65.3%, is below the 75% headroom line, and its hard and extra
@@ -188,9 +189,20 @@ the I5 lines against the reports, and `tests/unit/test_count_extraction.py` and
 ## Notes
 
 - 2026-11-17, Phase 4's configs (FG-494). The first consequence above holds for the configs
-  of the runs that train the chosen model, and Phase 4's don't meet it yet: FG-403 wrote its
-  SFT configs before this choice, and `configs/sft/qwen3-4b-main.yaml` trains Qwen3-4B on
-  p1. The main run must train `Qwen/Qwen2.5-Coder-1.5B-Instruct` on p2. The SFT pilot,
-  `configs/sft/qwen3-1p7b-pilot.yaml`, stays on Qwen3-1.7B, the small model plan section
-  3.8 budgets it on, but trains on p2 too. FG-404's runs wait on those changes
-  (`docs/runs/pending.yaml`).
+  of the runs that train the chosen model, and Phase 4's didn't meet it then: FG-403 wrote
+  its SFT configs before this choice, and `configs/sft/qwen3-4b-main.yaml` trained Qwen3-4B
+  on p1. The main run had to train `Qwen/Qwen2.5-Coder-1.5B-Instruct` on p2. The SFT pilot,
+  `configs/sft/qwen3-1p7b-pilot.yaml`, was to stay on Qwen3-1.7B, the small model plan
+  section 3.8 budgeted it on, but train on p2 too; the next note replaces that. FG-404's
+  runs waited on those changes (`docs/runs/pending.yaml`).
+- 2026-11-17, Phase 4 gate (FG-496). The gate changed the pilot: both of FG-404's Kaggle
+  SFT runs train the chosen model, on p2, in fp16 on the T4 with no 4-bit, since the 1.5B
+  base fits. The chosen model is now the smallest candidate, so a Qwen3-1.7B pilot would
+  rehearse a bigger model than the main run, and the pilot is there to rehearse the main
+  run's Kaggle path end to end. So `configs/sft/qwen25coder-1p5b-pilot.yaml` is a short run
+  with the main run's settings: its first session stops after step 50
+  (`ops.stop_after_step`), and a second, `forge kaggle run --resume`, restores the run from
+  the first kernel's output and finishes it. `configs/sft/qwen25coder-1p5b-main.yaml` is
+  the main run, an epoch, and the two Qwen3 configs are gone. Plan section 3.8's SFT pilot
+  row names the chosen model, and its checkpoints are scored with
+  `configs/eval/qwen2-5-coder-1-5b-val-p2.yaml`, as the main run's are.

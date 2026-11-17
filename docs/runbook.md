@@ -427,7 +427,10 @@ before the next one.
   output folder and stops after that step; the callback pushes the folder to the run's
   `checkpoints/step-NNNNNN/` in the run store, marks the stored manifest
   `stopped_time_guard` and prunes the older checkpoints as retention says. A new session
-  resumes from `latest_checkpoint`.
+  resumes from `latest_checkpoint`: for an SFT run, `forge train sft --resume --run-id
+  <run_id>` on the laptop, or `forge kaggle run --job sft --resume --run-id <run_id>` with
+  the run's config in a kernel. `ops.stop_after_step` has the guard stop the session that
+  trains that step whatever the time, as FG-404's pilot does to rehearse a resume.
 - Eval: `run_eval(..., deadline=...)` asks before each batch. A stopped run keeps the
   batches it stored, leaves official EX and its report to the attempt that finishes it,
   says `stopped_time_guard` in its manifest and goes to its run store like a run that
@@ -493,74 +496,148 @@ their replies: pooled, and for each run of the chosen model alone (ADR-0008).
 
 ## SFT runs
 
-FG-404 trains the LoRA SFT adapters on Kaggle T4s and picks the main run's on val, in the
-story's budget of about 4.5 GPU hours (FG-404 in the plan); plan section 3.8's rows give
-4.4 of them, 1 for the pilot, 2.5 for the main run and 0.90 for its two checkpoints on
-val, and have none for the pilot's val run. Push the jobs in this order, from one clean
-commit that passed `make smoke`. A kernel pushed with the CLI gets no `HF_TOKEN`, so
-nothing is attached: each run comes back as its kernel's output, and an adapter travels the
-same way, an eval job's kernel mounting the output of the SFT kernel that holds its
-checkpoint. After each, `forge kaggle wait <run_id>`, then `forge runs pull <run_id>
---store kaggle`, which adds its ledger row, and `forge runs push <run_id>`, which puts the
-run, checkpoints and all, in the Hub run store from the laptop.
+FG-404 trains the LoRA SFT adapters on Kaggle T4s and picks the main run's on val. Both
+runs train the model ADR-0012 chose, `Qwen/Qwen2.5-Coder-1.5B-Instruct`, on p2, which
+ADR-0007 fixed for every later phase, in fp16 with fp32 adapters and no 4-bit, since the
+1.5B base fits a T4 (ADR-0010's note of 2026-11-17). Each checkpoint is scored with that
+model's FG-307 val config at p2, `configs/eval/qwen2-5-coder-1-5b-val-p2.yaml`, the config
+of `2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41`, so a checkpoint's val run differs from that
+base run in the adapter alone, as `forge runs promote` requires.
 
-Every SFT run trains on p2, which ADR-0007 fixed for every later phase, and its checkpoints
-are scored with its base model's val config at p2, as `forge runs promote` requires. The
-pilot trains the small candidate, Qwen3-1.7B (plan section 3.8), and the main run the model
-ADR-0012 chose, `Qwen/Qwen2.5-Coder-1.5B-Instruct`. Both SFT configs predate FG-307's runs
-and still train on p1, and the main one names Qwen3-4B, so each needs the change
-`docs/runs/pending.yaml` lists before its run.
+- The pilot, `configs/sft/qwen25coder-1p5b-pilot.yaml`, is a short run with every setting
+  of the main run but its rows: 100 steps on 1,600 train rows. It rehearses the main run's
+  Kaggle path end to end before the main run spends its hours. Its first session stops
+  after step 50 (`ops.stop_after_step`), saving that checkpoint as the time guard does,
+  and its kernel exits cleanly; a second session, `forge kaggle run --resume`, restores
+  the run from the first kernel's output (the entry script's restore stage) and trains it
+  from that checkpoint to its end.
+- The main run, `configs/sft/qwen25coder-1p5b-main.yaml`, is 1 epoch of the train split
+  at ADR-0010's starting values. It keeps its checkpoint half way
+  (`ops.keep_checkpoints_at: [0.5]`) beside `checkpoints/final`; `forge runs show
+  <run_id>` lists both, the first as `kept_at_0.5`.
 
-1. The pilot, 1 epoch on the small candidate, to show the setup works before the main
-   run: `uv run forge kaggle run --job sft --config configs/sft/qwen3-1p7b-pilot.yaml`.
-2. Its final adapter on val, with that candidate's FG-307 config at p2, so the two runs
-   differ in the adapter alone: `uv run forge kaggle run --job eval --config
-   configs/eval/qwen3-1-7b-val-p2.yaml --adapter runs/<pilot_run_id>/checkpoints/final
-   --run-id <date>-qwen3-1-7b-sft-val-<sha7>`. The push checks the adapter first, a run's
-   checkpoint in `runs/` as here or a Hub repo@revision, and mounts the output of the
-   pilot's kernel, which holds the checkpoint. Then `uv run forge runs promote
-   <pilot_run_id> --config configs/eval/qwen3-1-7b-val-p2.yaml --eval <that run id>` sets
-   the pilot's `checkpoints/best`, where FG-507's GRPO pilot starts.
-3. The main run, 1 epoch on the chosen model: `uv run forge kaggle run --job sft --config
-   <main config>`, the main SFT config once it trains `Qwen/Qwen2.5-Coder-1.5B-Instruct` on
-   p2. Until that change it is `configs/sft/qwen3-4b-main.yaml`, Qwen3-4B on p1. It keeps
-   its checkpoint half way (`ops.keep_checkpoints_at: [0.5]`) beside `checkpoints/final`;
-   `forge runs show <run_id>` lists both, the first as `kept_at_0.5`.
-4. Both checkpoints on val, each with `configs/eval/qwen2-5-coder-1-5b-val-p2.yaml`, the
-   chosen model's FG-307 config at p2, and its own `--adapter
-   runs/<main_run_id>/<checkpoint>` and `--run-id`.
-5. `uv run forge runs promote <main_run_id> --config
-   configs/eval/qwen2-5-coder-1-5b-val-p2.yaml --eval <half run id> --eval <final run id>`:
-   the higher official EX goes to `checkpoints/best`, the final adapter on a tie. Each eval
-   run must be that config, the base model's on the whole val split, with its checkpoint as
-   the adapter and nothing else changed, and must have scored the files the run saved
-   there: an eval run records the `adapter_sha256` of its adapter, and the SFT run the
-   digest of each checkpoint it keeps.
+Plan section 3.8's rows give FG-404 4.4 GPU hours, all estimates, since no SFT has run on
+a T4: 1 for the pilot, both sessions in it, 2.5 for the main run and 0.90 for its two
+checkpoints on val. The configs' estimates in `docs/runs/pending.yaml` add up to 4.4 h
+too, 0.3 h for each val run, the pilot's among them, within the story's own 4.5 h. Each
+push budgets its config's estimate and gets a timeout of it and half again, and the
+kernel's time guard stops the job a tenth of that timeout before its end, so the save and
+the upload have their time.
+
+Run them in this order, each from the same clean commit that passed `make smoke`: a
+resume must be pushed from its run's commit, with its config. A kernel pushed with the CLI
+gets no `HF_TOKEN`, so nothing is attached: each run comes back as its kernel's output, and
+an adapter travels the same way, an eval job's kernel mounting the output of the SFT
+kernel that holds its checkpoint (FG-495). The pilot and the main run of one commit would
+share a default run id on one day, so each command names its run. `forge kaggle wait`
+adds each session's ledger row; `forge runs pull <run_id> --store kaggle` brings a run back
+once it has finished, and `forge runs push <run_id>` puts an SFT run, checkpoints and all,
+in the Hub run store from the laptop, where `forge runs promote` writes its `best/`.
+
+1. The pilot's first session. It stops after step 50, so `forge kaggle wait` exits 1 and
+   names the resume, which is what the rehearsal expects:
+
+   ```bash
+   uv run forge kaggle run --job sft --config configs/sft/qwen25coder-1p5b-pilot.yaml \
+     --run-id <date>-qwen25coder-1p5b-pilot-<sha7>
+   uv run forge kaggle wait <pilot_run_id>
+   ```
+
+2. Its second session, from the first kernel's output, to the run's end:
+
+   ```bash
+   uv run forge kaggle run --job sft --config configs/sft/qwen25coder-1p5b-pilot.yaml \
+     --run-id <pilot_run_id> --resume
+   uv run forge kaggle wait <pilot_run_id>
+   uv run forge runs pull <pilot_run_id> --store kaggle
+   uv run forge runs push <pilot_run_id>
+   ```
+
+   The run's `sessions.json` then lists both sessions, `stopped_time_guard` and
+   `finished`, with a ledger row each.
+
+3. The pilot's final adapter on val, and its `checkpoints/best`, which FG-404 sets for each
+   SFT run:
+
+   ```bash
+   uv run forge kaggle run --job eval --config configs/eval/qwen2-5-coder-1-5b-val-p2.yaml \
+     --adapter runs/<pilot_run_id>/checkpoints/final --run-id <date>-qwen25coder-1p5b-pilot-val-<sha7>
+   uv run forge kaggle wait <pilot_val_run_id>
+   uv run forge runs pull <pilot_val_run_id> --store kaggle
+   uv run forge runs promote <pilot_run_id> --config configs/eval/qwen2-5-coder-1-5b-val-p2.yaml \
+     --eval <pilot_val_run_id>
+   ```
+
+   The push checks the adapter first and mounts the output of the pilot's last kernel,
+   which holds the whole run.
+
+4. The main run, once the pilot's val run shows the setup works:
+
+   ```bash
+   uv run forge kaggle run --job sft --config configs/sft/qwen25coder-1p5b-main.yaml \
+     --run-id <date>-qwen25coder-1p5b-main-<sha7>
+   uv run forge kaggle wait <main_run_id>
+   uv run forge runs pull <main_run_id> --store kaggle
+   uv run forge runs push <main_run_id>
+   uv run forge runs show <main_run_id>
+   ```
+
+   If its time guard stops it, `forge kaggle wait` says so: the job has then run 50% past
+   its estimate, which CONTRIBUTING says to stop and ask about. Once the product owner
+   agrees, it resumes as the pilot's second session did.
+
+5. Both of its checkpoints on val, each with the same config and its own `--adapter` and
+   `--run-id`:
+
+   ```bash
+   uv run forge kaggle run --job eval --config configs/eval/qwen2-5-coder-1-5b-val-p2.yaml \
+     --adapter runs/<main_run_id>/<its kept_at_0.5 checkpoint> --run-id <date>-qwen25coder-1p5b-main-half-val-<sha7>
+   uv run forge kaggle run --job eval --config configs/eval/qwen2-5-coder-1-5b-val-p2.yaml \
+     --adapter runs/<main_run_id>/checkpoints/final --run-id <date>-qwen25coder-1p5b-main-final-val-<sha7>
+   ```
+
+   Kaggle runs two GPU sessions at once, so both can go together. `forge kaggle wait` and
+   `forge runs pull <run_id> --store kaggle` each.
+
+6. The better checkpoint to `checkpoints/best`: the higher official EX, the final adapter
+   on a tie.
+
+   ```bash
+   uv run forge runs promote <main_run_id> --config configs/eval/qwen2-5-coder-1-5b-val-p2.yaml \
+     --eval <half val run id> --eval <final val run id>
+   ```
+
+   Each eval run must be that config, the base model's on the whole val split, with its
+   checkpoint as the adapter and nothing else changed, and must have scored the files the
+   run saved there: an eval run records the `adapter_sha256` of its adapter, and the SFT
+   run the digest of each checkpoint it keeps.
 
 Render each eval run's report on the laptop (`FORGE_DATA_DIR=data/spider uv run forge
 report run <run_id>`) and copy the folder whole to `docs/runs/`. Copy each SFT run
 without its checkpoints, which stay in the run store: `manifest.json`, `config.yaml`,
-`metrics.jsonl` and `best.json`. Then take FG-404's entries out of
+`sessions.json`, `metrics.jsonl` and `best.json`. Then take FG-404's entries out of
 `docs/runs/pending.yaml`, and `tests/integration/test_artifacts.py::test_phase4_sft_runs_present`
-checks every run, report and ledger row, and each `best/` against its eval runs' scores.
-No step reads dev. If val EX was still rising at the end of the epoch and the budget
-allows, a second epoch is the product owner's call (ADR-0010), recorded in
-`docs/progress.md`.
+checks every run, report and ledger row, the pilot's two sessions, and each `best/`
+against its eval runs' scores. No step reads dev. If val EX was still rising at the end of
+the epoch and the budget allows, a second epoch is the product owner's call (ADR-0010),
+recorded in `docs/progress.md`.
 
-Last, FG-405 compares the main model with and without SFT, on the laptop. Run b is the val
-run of the main run's `checkpoints/best`, the one its `best.json` names under `eval_runs`;
-run a is FG-307's run of the same config, `2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41`,
-already in `docs/runs/`, so the two differ in the adapter alone:
+7. Last, FG-405 compares the main model with and without SFT, on the laptop. Run b is the
+   val run of the main run's `checkpoints/best`, the one its `best.json` names under
+   `eval_runs`; run a is FG-307's run of the same config,
+   `2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41`, already in `docs/runs/`, so the two differ
+   in the adapter alone:
 
-```bash
-FORGE_RUNS_DIR=docs/runs FORGE_DATA_DIR=data/spider uv run forge report compare <base val run id> <best val run id>
-```
+   ```bash
+   FORGE_RUNS_DIR=docs/runs FORGE_DATA_DIR=data/spider uv run forge report compare \
+     2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41 <best val run id>
+   ```
 
-It writes `eval/compare-<base val run id>.md` in run b's folder, which
-`tests/integration/test_artifacts.py::test_phase4_compare_report_rebuildable` rebuilds.
-Add 3 to 5 bullets on it to `docs/notes/sft.md`, a list of their own beside the pilot's,
-from that report alone and linking it, and take FG-405's entry out of
-`docs/runs/pending.yaml`.
+   It writes `eval/compare-2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41.md` in run b's folder,
+   which `tests/integration/test_artifacts.py::test_phase4_compare_report_rebuildable`
+   rebuilds. Add 3 to 5 bullets on it to `docs/notes/sft.md`, a list of their own beside
+   the pilot's, from that report alone and linking it, and take FG-405's entry out of
+   `docs/runs/pending.yaml`.
 
 ## Troubleshooting
 

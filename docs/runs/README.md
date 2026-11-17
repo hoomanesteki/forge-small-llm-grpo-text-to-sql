@@ -168,11 +168,12 @@ committed yet, what blocks each one, since when, and what it will fill in. The K
 Hugging Face accounts, their tokens and the run store repo exist since 2026-11-16. FG-307's
 runs left it when they were committed, the reference's dev run last, on 2026-11-17, once
 ADR-0008's note of that day settled I5 for it, and FG-301's spike, FG-302's publish and
-FG-303's eval job on 2026-11-16. FG-404's Kaggle SFT runs wait on their configs, which
-must train on p2 (ADR-0007): the main run the model ADR-0012 chose from FG-307's baselines,
-`Qwen/Qwen2.5-Coder-1.5B-Instruct`, and the pilot Qwen3-1.7B, the small model plan section
-3.8 keeps it on. FG-405's comparison of the main model with and without SFT waits on
-FG-404's runs alone, since FG-307's p2 run of the chosen model, its base, is here. FG-491's
+FG-303's eval job on 2026-11-16. FG-404's Kaggle SFT runs wait for the operator alone:
+both train the model ADR-0012 chose from FG-307's baselines,
+`Qwen/Qwen2.5-Coder-1.5B-Instruct`, on p2 (ADR-0007), the pilot a short run in two
+sessions that rehearses the main run's path and a resume, and the main run an epoch
+(FG-496). FG-405's comparison of the main model with and without SFT waits on FG-404's
+runs alone, since FG-307's p2 run of the chosen model, its base, is here. FG-491's
 push of the SFT pilot, adapter and all, left it on 2026-11-17, with the digest above. A
 kernel pushed with the CLI gets no `HF_TOKEN`, so a kernel job's results come back as its
 kernel output (`forge kaggle output`), and an eval job's checkpoint adapter comes from the
@@ -180,8 +181,9 @@ output of the kernel that trained it, which its kernel mounts. `tests/integratio
 story's runs here by the configs they were made from, and skips its checks on them only
 while the story has an entry in pending.yaml; once it has none, a missing run fails. A
 Kaggle SFT run is committed as FG-491's is, without its checkpoints, which the run store
-keeps, and with the `best.json` that `forge runs promote` writes: which checkpoint is
-`checkpoints/best`, and the val runs whose scores chose it (docs/runbook.md, "SFT runs").
+keeps, and with its `sessions.json`, a ledger row for each session, and the `best.json`
+that `forge runs promote` writes: which checkpoint is `checkpoints/best`, and the val runs
+whose scores chose it (docs/runbook.md, "SFT runs").
 Each of those val runs is its base model's full val config with the checkpoint's files
 alone added, so FG-405's comparison of the best one with FG-307's run of that config
 measures the adapter alone; the test checks it does, and fails once FG-405 is off
