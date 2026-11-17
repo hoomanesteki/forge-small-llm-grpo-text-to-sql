@@ -145,6 +145,8 @@ def test_config_validation(tmp_path: Path) -> None:
         (_sft(sft={"warmup_ratio": 1}), r"sft\.warmup_ratio: Input should be less than 1"),
         (_sft(ops={"time_guard_minutes": float("inf")}), "Input should be a finite number"),
         (_sft(ops={"checkpoint_every": 0}), r"ops\.checkpoint_every: Input should be greater"),
+        (_sft(ops={"stop_after_step": 0}), r"ops\.stop_after_step: Input should be greater"),
+        (_sft(ops={"stop_after_step": 2.0}), r"ops\.stop_after_step: Input should be a valid"),
         (_sft(ops={"keep_checkpoints_at": [1.0]}), r"keep_checkpoints_at\.0: Input should be less"),
         (
             _sft(ops={"keep_checkpoints_at": [0.0]}),

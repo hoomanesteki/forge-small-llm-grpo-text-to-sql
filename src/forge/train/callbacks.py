@@ -14,6 +14,12 @@
   and prunes the run's older checkpoints as retention says. The last step needs no
   guard, since the trainer stops after it anyway.
 
+  With ``stop_after_step`` (``ops.stop_after_step``) the guard stops the same way after
+  that step, whatever the time: the session that trains it ends there, and one resumed
+  from its checkpoint starts past it and trains on. A pilot rehearses a session's end
+  with it, at a step known before the job runs, where a deadline would fall at whatever
+  step the GPU's pace reaches by then.
+
   Once the guard stops training, nothing but that save runs: no evaluation, at the stop
   step or at its epoch's end, since the deadline kept no time for one. That also keeps
   the save whatever the save strategy: under ``save_strategy="best"`` an evaluation would
@@ -87,7 +93,8 @@ class TimeGuardCallback(TrainerCallback):
     and ``run_id`` name where the checkpoint and the manifest go; without them the guard
     only saves and stops, and the job marks its own manifest by ``stopped_at``.
     ``margin_s`` keeps time back for the save and the push. ``keep_at`` names the shares
-    of the run whose checkpoints its pruning keeps.
+    of the run whose checkpoints its pruning keeps. ``stop_after_step`` is a step it stops
+    after whatever the time, as the module docstring says.
     """
 
     def __init__(
@@ -98,14 +105,18 @@ class TimeGuardCallback(TrainerCallback):
         run_id: str | None = None,
         margin_s: float = 0.0,
         keep_at: Sequence[float] = (),
+        stop_after_step: int | None = None,
         clock: Clock = time.monotonic,
     ) -> None:
         if (store is None) != (run_id is None):
             raise ValueError("pass store and run_id together: the checkpoint goes to that run")
+        if stop_after_step is not None and stop_after_step < 1:
+            raise ValueError(f"stop_after_step is a step, 1 or later, not {stop_after_step}")
         self.deadline = Deadline(deadline_minutes, margin_s=margin_s, clock=clock)
         self.store = store
         self.run_id = run_id
         self.keep_at = tuple(keep_at)
+        self.stop_after_step = stop_after_step
         self.kept: dict[float, int] = {}  # share: step, once training begins
         self.stopped_at: int | None = None  # the step training stopped after
         self.saved = False  # whether the trainer has saved that step
@@ -124,11 +135,13 @@ class TimeGuardCallback(TrainerCallback):
         self.deadline.lap()
         if self.stopped_at is not None or state.global_step >= state.max_steps:
             return
-        if self.deadline.near():
+        # A session resumed from the stop step starts past it, so only one ever stops there.
+        planned = state.global_step == self.stop_after_step
+        if planned or self.deadline.near():
             log.warning(
                 "time guard: saving and stopping after step %d; %s",
                 state.global_step,
-                self.deadline.describe(),
+                "ops.stop_after_step names it" if planned else self.deadline.describe(),
             )
             self.stopped_at = state.global_step
             control.should_save = True
@@ -417,7 +430,12 @@ def training_callbacks(
     """
     keep_at = ops.keep_checkpoints_at
     guard = TimeGuardCallback(
-        ops.time_guard_minutes, store=store, run_id=run_id, keep_at=keep_at, clock=clock
+        ops.time_guard_minutes,
+        store=store,
+        run_id=run_id,
+        keep_at=keep_at,
+        stop_after_step=ops.stop_after_step,
+        clock=clock,
     )
     callbacks: list[TrainerCallback] = [
         guard,

@@ -62,11 +62,17 @@ def _manifest() -> RunManifest:
 
 
 def _steps(
-    guard: TimeGuardCallback, clock: Clock, seconds: list[float], *, max_steps: int = 100
+    guard: TimeGuardCallback,
+    clock: Clock,
+    seconds: list[float],
+    *,
+    max_steps: int = 100,
+    from_step: int = 0,
 ) -> tuple[TrainerState, TrainerControl]:
-    """Train begins, then one step per entry of ``seconds``, each that long."""
+    """Train begins, at ``from_step`` as a resumed trainer does, then one step per entry of
+    ``seconds``, each that long."""
     args: Any = SimpleNamespace(output_dir="unused")
-    state, control = TrainerState(max_steps=max_steps), TrainerControl()
+    state, control = TrainerState(max_steps=max_steps, global_step=from_step), TrainerControl()
     guard.on_train_begin(args, state, control)
     for step_s in seconds:
         clock.now += step_s
@@ -135,6 +141,38 @@ def test_guard_leaves_the_last_step_to_the_trainer() -> None:
     state, control = _steps(guard, clock, [40], max_steps=1)
     assert state.global_step == 1 and guard.stopped_at is None
     assert not control.should_save and not control.should_training_stop
+
+
+@pytest.mark.phase(4)
+def test_guard_stops_once_after_the_step_it_is_given(caplog: pytest.LogCaptureFixture) -> None:
+    # An hour's deadline and steps of a second: only the step can stop the session.
+    clock = Clock()
+    guard = TimeGuardCallback(60, stop_after_step=3, clock=clock)
+    with caplog.at_level(logging.WARNING, logger="forge.train.callbacks"):
+        state, control = _steps(guard, clock, [1.0] * 10, max_steps=10)
+    assert guard.stopped_at == state.global_step == 3
+    assert control.should_save and control.should_training_stop
+    assert "saving and stopping after step 3; ops.stop_after_step names it" in caplog.text
+
+    # The session resumed from that step's checkpoint starts past it, and trains to its end.
+    resumed = TimeGuardCallback(60, stop_after_step=3, clock=clock)
+    state, control = _steps(resumed, clock, [1.0] * 7, max_steps=10, from_step=3)
+    assert state.global_step == 10 and resumed.stopped_at is None
+    assert not control.should_training_stop
+    # One resumed before it, after a failure, still stops there.
+    early = TimeGuardCallback(60, stop_after_step=3, clock=clock)
+    state, _ = _steps(early, clock, [1.0] * 9, max_steps=10, from_step=1)
+    assert early.stopped_at == state.global_step == 3
+    # The run's last step is the trainer's own end, as with the deadline.
+    last = TimeGuardCallback(60, stop_after_step=10, clock=clock)
+    state, control = _steps(last, clock, [1.0] * 10, max_steps=10)
+    assert state.global_step == 10 and last.stopped_at is None
+    # The deadline still stops a session that reaches it first.
+    slow = TimeGuardCallback(1, stop_after_step=3, clock=clock)
+    state, _ = _steps(slow, clock, [40.0] * 3, max_steps=10)
+    assert slow.stopped_at == state.global_step == 1
+    with pytest.raises(ValueError, match="stop_after_step is a step, 1 or later, not 0"):
+        TimeGuardCallback(60, stop_after_step=0)
 
 
 @pytest.mark.phase(3)
@@ -499,10 +537,11 @@ def test_wandb_only_with_a_key_and_the_package(
 def test_training_callbacks_from_ops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = LocalRunStore(tmp_path / "store")
     path = tmp_path / "run" / "metrics.jsonl"
-    ops = OpsConfig(checkpoint_every=25, time_guard_minutes=30)
+    ops = OpsConfig(checkpoint_every=25, time_guard_minutes=30, stop_after_step=75)
     guard, checkpoints, metrics = training_callbacks(ops, store, RUN, metrics_path=path, env={})
     assert isinstance(guard, TimeGuardCallback)
     assert (guard.deadline.minutes, guard.store, guard.run_id) == (30, store, RUN)
+    assert guard.stop_after_step == 75
     assert isinstance(checkpoints, CheckpointCallback)
     assert (checkpoints.every, checkpoints.guard, checkpoints.store) == (25, guard, store)
     assert isinstance(metrics, MetricsCallback)

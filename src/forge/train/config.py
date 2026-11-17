@@ -29,6 +29,9 @@ any model does:
   trains on a fixed subset of the rest (``forge.train.sft``); neither goes to TRL.
 - ``keep_checkpoints_at`` takes shares of the run's steps above 0 and below 1, each once:
   the checkpoint at 1, the run's end, is ``checkpoints/final``.
+- ``stop_after_step`` has the session that reaches that step save and stop there, as the
+  time guard does, so a resumed session carries the run on: a pilot rehearses the end of
+  a session without waiting out the guard (``forge.train.callbacks``).
 - ``data.split`` is ``train``: training never reads val or dev (ADR-0004).
 - Unsloth and 4-bit loading need CUDA, so a run on the CPU or MPS asks for neither.
 
@@ -208,6 +211,9 @@ class OpsConfig(_Section):
     keep_checkpoints_at: tuple[Share, ...] = ()
     # A Kaggle session ends at 12 h; 11 h 15 min leaves time for the last save and push.
     time_guard_minutes: Positive = 675.0
+    # The step after which the session that trains it saves and stops, as at the time
+    # guard; a session resumed from that step trains on. None stops only at the guard.
+    stop_after_step: Count | None = None
     est_gpu_hours: Positive | None = None  # what forge kaggle run budgets for the job
 
     @field_validator("keep_checkpoints_at")
