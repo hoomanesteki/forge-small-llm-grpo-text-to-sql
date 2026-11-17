@@ -1,0 +1,20 @@
+adapter: runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final
+backend: hf
+device: mps
+execution:
+  gold_timeout_ms: 10000
+  max_rows: 100000
+  official_item_timeout_s: 10.0
+  timeout_ms: 2000
+generation:
+  max_new_tokens: 256
+  n: 1
+  seed: 0
+  temperature: 0.0
+  top_p: 1.0
+limit: 3000
+max_prompt_tokens: 1536
+model: Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25
+prompt_version: p1
+retry: 0
+split: train

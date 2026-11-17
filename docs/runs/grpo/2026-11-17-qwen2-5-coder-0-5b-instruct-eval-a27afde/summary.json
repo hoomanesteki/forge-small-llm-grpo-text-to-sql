@@ -1,0 +1,59 @@
+{
+  "hash": "6d7a36a64c2c21bbdf243e9d6b44e181dd6c4aa35211f3ba30c7ba6c38a4e640",
+  "eval_run": "2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde",
+  "model_ref": "Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25",
+  "adapter_ref": "runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final",
+  "adapter_sha256": "e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562",
+  "data_manifest_hash": "e10958d3b7a9490c15623285275d2840fbce551c32432fc62c0ad440cb06651e",
+  "keep_solved": 0.3,
+  "max_gold_ms": 1000.0,
+  "seed": 0,
+  "by_hardness": {
+    "easy": {
+      "scored": 720,
+      "rowless": 0,
+      "slow_gold": 0,
+      "wrong": 106,
+      "solved": 614,
+      "solved_kept": 181,
+      "kept": 287
+    },
+    "medium": {
+      "scored": 1229,
+      "rowless": 0,
+      "slow_gold": 0,
+      "wrong": 490,
+      "solved": 739,
+      "solved_kept": 221,
+      "kept": 711
+    },
+    "hard": {
+      "scored": 613,
+      "rowless": 0,
+      "slow_gold": 0,
+      "wrong": 288,
+      "solved": 325,
+      "solved_kept": 96,
+      "kept": 384
+    },
+    "extra": {
+      "scored": 438,
+      "rowless": 0,
+      "slow_gold": 0,
+      "wrong": 256,
+      "solved": 182,
+      "solved_kept": 60,
+      "kept": 316
+    }
+  },
+  "total": {
+    "scored": 3000,
+    "rowless": 0,
+    "slow_gold": 0,
+    "wrong": 1140,
+    "solved": 1860,
+    "solved_kept": 558,
+    "kept": 1698
+  },
+  "slow_gold_ids": []
+}

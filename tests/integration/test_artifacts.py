@@ -28,7 +28,7 @@ from forge.cli import app
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.prompts import chat_token_counter, load_tokenizer
-from forge.data.spider import FAILING_GOLD_IDS, resolve_data_dir
+from forge.data.spider import FAILING_GOLD_IDS, ROWLESS_DBS, resolve_data_dir
 from forge.data.splits import load_train, load_val, read_split_ids
 from forge.eval.config import HOSTS, EvalConfig, read_config_file
 from forge.eval.report import COMPARE_PREFIX, rebuild, write_run_report
@@ -42,6 +42,18 @@ from forge.ops.hub import BEST, FINAL, LocalRunStore
 from forge.ops.ledger import LedgerRow, append_once, read_rows, run_hours
 from forge.ops.manifest import config_hash
 from forge.train.config import load_train_config
+from forge.train.curriculum import (
+    KEEP_SOLVED,
+    MAX_GOLD_MS,
+    ROWS_FILE,
+    SUMMARY_FILE,
+    FilterRow,
+    FilterSummary,
+    GrpoFilter,
+    filter_hash,
+    lowest_hashes,
+    round_share,
+)
 from forge.train.sft import PROMOTION_FILE, checkpoint_scores, fit_rows, promote_best
 from forge.train.sft_data import build_sft_dataset
 from tests.fakes import sft_run_folder
@@ -1031,3 +1043,73 @@ def test_notes_check_ties_each_number_to_its_row() -> None:
     ]
     # A label in a code span names its row as one in the text does.
     assert miscited("`schema_link` fell from 266 to 203", report) == []
+
+
+# FG-591's GRPO pilot on the laptop's GPU (ADR-0016): the SFT pilot's adapter on the first
+# 3,000 train questions, whose scores picked the rows GRPO trains on.
+GRPO_PILOT_CONFIG = ROOT / "configs" / "grpo" / "pilot-qwen25coder05b-mps.yaml"
+GRPO_FILTER_EVAL = "2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde"
+GRPO_FILTER_LIMIT = 3000
+# Where forge data build-grpo kept the filter's rows, and forge train grpo read them.
+GRPO_ROWS = RUNS / "grpo"
+
+
+def grpo_filter_rows(folder: Path = GRPO_ROWS / GRPO_FILTER_EVAL) -> GrpoFilter:
+    """The rows the filter kept, as committed, once they hash to their summary's hash;
+    ``read_filter`` checks the data hash too, which needs the full data."""
+    summary = FilterSummary.model_validate_json((folder / SUMMARY_FILE).read_bytes())
+    lines = (folder / ROWS_FILE).read_bytes().splitlines()
+    rows = [FilterRow.model_validate_json(line) for line in lines]
+    assert filter_hash(summary, rows) == summary.hash, folder
+    return GrpoFilter(rows, summary)
+
+
+@pytest.mark.phase(5)
+def test_grpo_pilot_filter_eval_is_committed_whole() -> None:
+    stored = read_run(RUNS / GRPO_FILTER_EVAL)
+    manifest = stored.manifest
+    _made_from_its_commit(manifest)
+    assert manifest.config["device"] == "mps"
+    # FG-291's settings, greedy with one reply a question and no retry, on train questions
+    # with the SFT pilot's adapter: the eval the filter reads (check_filter_run).
+    pilot = EvalConfig(**read_config_file(PILOT_CONFIG))
+    config = replace(pilot, split="train", limit=GRPO_FILTER_LIMIT, adapter=SFT_PILOT_ADAPTER)
+    assert manifest.config == config.manifest_config()
+    assert (config.params.temperature, config.params.n, config.retry) == (0.0, 1, 0)
+    assert manifest.adapter_ref == SFT_PILOT_ADAPTER
+    # The first 3,000 train questions in file order but the known failing golds, once each:
+    # train only, so none of the val databases its adapter is scored on.
+    train = [example_id for example_id, _ in read_split_ids("train")]
+    first = [example_id for example_id in train if example_id not in FAILING_GOLD_IDS]
+    assert [score.example_id for score in stored.scores] == first[:GRPO_FILTER_LIMIT]
+    report = stored.paths.report.read_text(encoding="utf-8")
+    assert "\n| Platform | `local-mps` |\n" in report
+    assert f"\n| Git commit | `{manifest.git_sha}` |\n" in report
+    assert f"\n| Adapter | `{SFT_PILOT_ADAPTER}` |\n" in report
+    assert stored.paths.chart.is_file()
+
+    # The rows it picked, beside the runs, from its scores and adapter: every question its
+    # reply got wrong and 30% of those it got right, by hash, but those on a rowless
+    # database and those whose gold the train cache timed over 1 s.
+    picked = grpo_filter_rows()
+    summary = picked.summary
+    assert (summary.eval_run, summary.model_ref, summary.adapter_ref) == (
+        GRPO_FILTER_EVAL,
+        manifest.model_ref,
+        SFT_PILOT_ADAPTER,
+    )
+    assert summary.adapter_sha256 == manifest.outputs[ADAPTER_DIGEST]
+    assert summary.data_manifest_hash == manifest.data_manifest_hash
+    assert (summary.keep_solved, summary.max_gold_ms) == (KEEP_SOLVED, MAX_GOLD_MS)
+    dbs = dict(read_split_ids("train"))
+    rowless = {score.example_id for score in stored.scores if dbs[score.example_id] in ROWLESS_DBS}
+    left_out = rowless | set(summary.slow_gold_ids)
+    rest = [score for score in stored.scores if score.example_id not in left_out]
+    solved = [score.example_id for score in rest if score.ex_fast]
+    stay = set(lowest_hashes(solved, round_share(KEEP_SOLVED, len(solved)), summary.seed))
+    kept = [score for score in rest if not score.ex_fast or score.example_id in stay]
+    assert [(row.example_id, row.solved) for row in picked.rows] == [
+        (score.example_id, score.ex_fast) for score in kept
+    ]
+    assert (summary.total.scored, summary.total.kept) == (len(stored.scores), len(kept))
+    assert f"(grpo/{GRPO_FILTER_EVAL}/" in (RUNS / "README.md").read_text(encoding="utf-8")

@@ -1,0 +1,49 @@
+{
+  "run_id": "2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde",
+  "kind": "eval",
+  "git_sha": "a27afde37a2fdfef8456a07f9bc46296a1924e9f",
+  "config": {
+    "adapter": "runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final",
+    "backend": "hf",
+    "device": "mps",
+    "execution": {
+      "gold_timeout_ms": 10000,
+      "max_rows": 100000,
+      "official_item_timeout_s": 10.0,
+      "timeout_ms": 2000
+    },
+    "generation": {
+      "max_new_tokens": 256,
+      "n": 1,
+      "seed": 0,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "limit": 3000,
+    "max_prompt_tokens": 1536,
+    "model": "Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25",
+    "prompt_version": "p1",
+    "retry": 0,
+    "split": "train"
+  },
+  "config_hash": "2e2360097cedf1fa1e549da00bd56aedaea6be5a44cb8435a3c20fe99ea609c1",
+  "data_manifest_hash": "e10958d3b7a9490c15623285275d2840fbce551c32432fc62c0ad440cb06651e",
+  "model_ref": "Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25",
+  "adapter_ref": "runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final",
+  "parent_run": null,
+  "platform": "local-mps",
+  "gpu": "Apple M4",
+  "seed": 0,
+  "started_at": "2026-11-17T07:53:23.422696Z",
+  "ended_at": "2026-11-17T08:24:21.967498Z",
+  "gpu_hours": 0.516262445,
+  "cost_usd": 0.0,
+  "outputs": {
+    "config": "config.yaml",
+    "sessions": "sessions.json",
+    "generations": "eval/train-generations.jsonl",
+    "scores": "eval/train-scores.jsonl",
+    "adapter_sha256": "e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562"
+  },
+  "status": "finished"
+}

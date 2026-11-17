@@ -36,6 +36,7 @@ accounts the GPU plan needs were pending. Its report names the platform in its h
 | [2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7](2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7/) | `Qwen/Qwen2.5-Coder-0.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/pilot-qwen25coder05b-val.yaml`: full val split, greedy, prompt p1, float32 on MPS | [val-report.md](2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7/eval/val-report.md) |
 | [2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8](2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/) | The same model, LoRA-trained on train rows (FG-491) | `configs/sft/pilot-qwen25coder05b-mps.yaml`: the subset its `subset_rows` sets of the train rows that fit in 1,536 tokens, bf16 on MPS | [metrics.jsonl](2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/metrics.jsonl) |
 | [2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/) | The same model with that run's adapter | `configs/eval/pilot-qwen25coder05b-val.yaml` with `--adapter runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final`, the first pilot's settings | [val-report.md](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/val-report.md), and against the first pilot [compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md) |
+| [2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde](2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde/) | The same model with the SFT pilot's adapter, on train questions (FG-591) | `configs/eval/pilot-qwen25coder05b-val.yaml` with `--split train --limit 3000 --adapter runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final`: GRPO's filter eval | [train-report.md](2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde/eval/train-report.md), and the rows it picked for GRPO, [grpo/2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde/](grpo/2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde/) |
 
 [docs/notes/sft.md](../notes/sft.md) reads that comparison, by hardness and by error class,
 citing no number it doesn't hold (FG-405).
@@ -47,6 +48,15 @@ A pilot that trains (FG-491) commits its training run without its weights: the m
 The manifest's `sft_data` says which rows it trained on: the hash of the rows
 `forge data build-sft` builds, how many were over `max_length` and left out, and how many
 of the rest the subset took.
+
+The GRPO pilot (FG-591) starts with a filter eval (FG-505): the SFT pilot's adapter, greedy,
+on the first 3,000 train questions in file order. Its report is of train questions, the
+ones GRPO may train on, so it measures no held-out skill; it is there to pick rows.
+`forge data build-grpo --filter-from <run_id> --out docs/runs/grpo` kept them in
+`grpo/<run_id>/`, beside the runs: `rows.jsonl`, a line a question kept, and
+`summary.json`, what was kept and left out by hardness, with the hash of both, which the
+GRPO run's manifest records under `grpo_data`. `forge train grpo --grpo-dir docs/runs/grpo`
+reads them from there, so the rows a run trained on are in the commit it was made from.
 
 Both FG-491 runs were made at db0d8d8, where `make smoke` fails: one assertion in
 `tests/smoke/test_sft_smoke.py` still expected the manifest's `sft_data` as it was before
