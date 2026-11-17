@@ -1,10 +1,12 @@
 """The GRPO dataset (FG-505): the filter that picks GRPO's rows from a greedy eval of
-train questions and ``forge data build-grpo``, which keeps them."""
+train questions, ``forge data build-grpo`` that keeps them, and the training run that
+reads them back."""
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from forge.eval.gold_cache import split_gold
 from forge.eval.run_files import StoredRun, read_run
 from forge.eval.runner import EvalRun, run_eval
 from forge.infer.base import FakeBackend
+from forge.train.config import parse_train_config
 from forge.train.curriculum import (
     KEEP_SOLVED,
     LEVELS,
@@ -30,8 +33,11 @@ from forge.train.curriculum import (
     check_filter_run,
     filter_hash,
     read_filter,
+    save_filter,
     select_rows,
 )
+from forge.train.grpo import grpo_rows
+from tests.fakes import WordTokenizer
 
 MODEL = "org/tiny-sft@0123456789abcdef0123456789abcdef01234567"
 EVAL = "2026-11-20-tiny-sft-eval-abc1234"
@@ -240,3 +246,57 @@ def test_build_grpo_keeps_the_rows_and_their_summary(
     missing = cli_runner.invoke(cli.app, [*build[:-1], "no-such-run"])
     assert missing.exit_code == 1 and "has no manifest.json" in missing.stderr
     assert sorted(path.name for path in out.iterdir()) == [EVAL]
+
+
+@pytest.mark.phase(5)
+def test_grpo_rows_are_the_filters(
+    spider_mini: Path, runs: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _evaluate(EVAL, _right())
+    stored = read_run(runs / EVAL)
+    gold = split_gold("train").results
+    found = select_rows(stored, load_train(), gold)
+    out = tmp_path / "grpo"
+    save_filter(found, out)
+    config = parse_train_config(
+        {"run": {"kind": "grpo", "model_ref": MODEL}, "grpo": {"filter_from": EVAL}}
+    )
+
+    rows, meta = grpo_rows(config, WordTokenizer(), data_dir=spider_mini, grpo_root=out)
+
+    assert list(rows["example_id"]) == [row.example_id for row in found.rows]
+    assert meta["filter"] == {
+        "eval_run": EVAL,
+        "hash": found.summary.hash,
+        "kept": 16,
+        "left_out": 14,
+    }
+    assert meta["rows"] == 16 and meta["rowless"] == 10
+    unfiltered = parse_train_config({"run": {"kind": "grpo", "model_ref": MODEL}, "grpo": {}})
+    _, all_rows = grpo_rows(unfiltered, WordTokenizer(), data_dir=spider_mini)
+    assert all_rows["hash"] != meta["hash"]
+    # Rows another model's replies picked train this one all the same, with a warning.
+    other = config.model_copy(update={"run": config.run.model_copy(update={"model_ref": "org/b"})})
+    with caplog.at_level(logging.WARNING, logger="forge.train.grpo"):
+        grpo_rows(other, WordTokenizer(), data_dir=spider_mini, grpo_root=out)
+    assert f"the rows of {EVAL} were picked by {MODEL}'s replies, and this run trains org/b" in (
+        caplog.text
+    )
+
+    # Rows never built, rows of other data, and a run id that is no folder name.
+    with pytest.raises(FileNotFoundError, match=f"forge data build-grpo --filter-from {EVAL}"):
+        grpo_rows(config, WordTokenizer(), data_dir=spider_mini, grpo_root=tmp_path / "none")
+    elsewhere = dataclasses.replace(
+        stored,
+        manifest=stored.manifest.model_copy(
+            update={"run_id": "elsewhere", "data_manifest_hash": "0" * 64}
+        ),
+    )
+    save_filter(select_rows(elsewhere, load_train(), gold), out)
+    with pytest.raises(ValueError, match="were picked on data 000000000000"):
+        read_filter("elsewhere", root=out)
+    placeholder = parse_train_config(
+        {"run": {"kind": "grpo", "model_ref": MODEL}, "grpo": {"filter_from": "<eval-run-id>"}}
+    )
+    with pytest.raises(ValueError, match="names a folder"):
+        grpo_rows(placeholder, WordTokenizer(), data_dir=spider_mini, grpo_root=out)

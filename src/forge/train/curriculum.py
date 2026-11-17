@@ -27,9 +27,10 @@ The rows go to ``data/grpo/<run_id>/`` (``save_filter``): ``rows.jsonl``, a line
 question kept, and ``summary.json`` beside it, with what was kept and left out by
 hardness and the hash of it all. They are kept rather than picked again when a run
 starts, because gold timings differ from one machine's cache to the next and a resumed
-run must train on the rows it started with. ``read_filter`` reads them back, checked
-against their hash and the data they were picked on. Only train is read: the eval run
-must be of train questions, each of them in ``load_train()``.
+run must train on the rows it started with. ``grpo.filter_from`` names the eval run, and
+``read_filter`` reads its rows back for ``forge.train.grpo``, checked against their hash
+and the data they were picked on. Only train is read: the eval run must be of train
+questions, each of them in ``load_train()``.
 """
 
 from __future__ import annotations
@@ -112,6 +113,10 @@ class GrpoFilter:
 
     rows: list[FilterRow]
     summary: FilterSummary
+
+    @property
+    def ids(self) -> frozenset[str]:
+        return frozenset(row.example_id for row in self.rows)
 
 
 def default_root() -> Path:

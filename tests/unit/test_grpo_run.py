@@ -16,6 +16,7 @@ from forge import cli
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.prompts import build_prompt
+from forge.data.spider import ROWLESS_DBS
 from forge.data.splits import load_train, load_val
 from forge.eval.run_files import RunConflict
 from forge.ops.hub import LocalRunStore, RunNotFound
@@ -70,7 +71,12 @@ def test_grpo_rows_are_train_prompts_with_their_columns(spider_mini: Path) -> No
 
     train = {example.id: example for example in load_train()}
     assert rows.column_names == ["prompt", "example_id", "db_id", "gold_sql", "hardness"]
-    assert len(rows) == meta["rows"] == len(train) == 40
+    # The fixture's 40 train questions but the 10 on rowless geo, whose empty gold results
+    # an empty query would match.
+    rowless = [e for e in train.values() if e.db_id in ROWLESS_DBS]
+    assert len(train) == 40 and len(rowless) == meta["rowless"] == 10
+    assert len(rows) == meta["rows"] == 30 and not set(rows["db_id"]) & ROWLESS_DBS
+    assert meta["filter"] is None
     for row in rows:
         example = train[row["example_id"]]
         assert row["prompt"] == list(build_prompt(example, "p1").messages)
@@ -95,7 +101,10 @@ def test_grpo_rows_are_train_prompts_with_their_columns(spider_mini: Path) -> No
         _config(max_prompt_length=shortest), WordTokenizer(), data_dir=spider_mini
     )
     assert 0 < len(short) < len(rows) and counted["over_limit"] > 0
-    assert len(rows) - len(short) == counted["over_limit"] + counted["hidden_gold_tables"]
+    # Each question left out is counted once, under the first reason that left it out.
+    reasons = ("duplicates", "failing_gold", "over_limit", "hidden_gold_tables", "rowless")
+    assert len(short) == counted["train"] - sum(counted[reason] for reason in reasons)
+    assert counted["rowless"] < meta["rowless"]  # some rowless prompts went over the limit
     assert counted["hash"] != meta["hash"]
 
 

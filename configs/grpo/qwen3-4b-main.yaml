@@ -7,6 +7,10 @@
 # init_adapter names the main SFT run, which FG-404 has yet to make
 # (docs/runs/pending.yaml): FG-507 puts its run id in place of <sft-main-run-id>, and
 # until then the run refuses to start.
+#
+# filter_from names FG-507's greedy eval of that adapter on 3,000 train questions, whose
+# rows forge data build-grpo keeps (FG-505): FG-507 puts its run id in place of
+# <filter-eval-run-id>, and until then the run refuses to start too.
 run:
   kind: grpo
   model_ref: Qwen/Qwen3-4B@1cfa9a7208912126459214e8b04321603b3df60c
@@ -24,6 +28,7 @@ lora:
   target: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 grpo:
   init_adapter: runs/<sft-main-run-id>/checkpoints/best
+  filter_from: <filter-eval-run-id>
   num_generations: 6
   max_prompt_length: 1536
   max_completion_length: 256

@@ -1700,6 +1700,10 @@ def train_grpo(
             "--resume", help="Carry on the run --run-id names from its latest checkpoint."
         ),
     ] = False,
+    grpo_dir: Annotated[
+        Path | None,
+        typer.Option(help="Where forge data build-grpo kept the rows (default data/grpo)."),
+    ] = None,
     allow_dirty: Annotated[
         bool,
         typer.Option(
@@ -1711,7 +1715,8 @@ def train_grpo(
 
     It starts from grpo.init_adapter, such as an SFT run's checkpoints/best, or from a
     fresh LoRA when that is null, and rewards each reply by running its SQL on the train
-    databases. Files go to runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml,
+    databases. With grpo.filter_from it trains on the rows forge data build-grpo kept in
+    <grpo-dir>/<run_id>/. Files go to runs/<run_id>/ (FORGE_RUNS_DIR): manifest.json, config.yaml,
     sessions.json, metrics.jsonl with each reward's mean a step and fast EX on a fixed val
     subset every grpo.eval_every steps, checkpoints/step-NNNNNN/ every
     ops.checkpoint_every steps, and the adapter in checkpoints/final/. Exits 1 if the run
@@ -1730,7 +1735,9 @@ def train_grpo(
         from forge.train.grpo import run_grpo
 
         config = load_train_config(config_file)
-        run = run_grpo(config, run_id=run_id, resume=resume, allow_dirty=allow_dirty)
+        run = run_grpo(
+            config, run_id=run_id, resume=resume, allow_dirty=allow_dirty, grpo_root=grpo_dir
+        )
     # OSError covers missing data, a model or adapter that can't be found and a run id
     # already used; ValueError a config no GRPO run takes and SplitLeak; RunConflict a run
     # this config can't resume; SandboxError a pool that can't start.
@@ -1752,7 +1759,9 @@ def train_grpo(
     typer.echo(f"run {manifest.run_id}: {run.root}")
     start = manifest.adapter_ref or "a fresh LoRA"
     resumed = "" if run.resumed_from is None else f", resumed from {run.resumed_from}"
-    typer.echo(f"trained on {run.rows} train rows from {start}{resumed}")
+    picked = manifest.config["grpo_data"]["filter"]
+    rows = "train rows" if picked is None else f"train rows of {picked['eval_run']}'s filter"
+    typer.echo(f"trained on {run.rows} {rows} from {start}{resumed}")
     typer.echo(
         f"platform {manifest.platform}, backend {trainer['backend']} on {trainer['device']} "
         f"in {trainer['dtype']}; TRL {trl['version']} with beta {trl['beta']} and the "

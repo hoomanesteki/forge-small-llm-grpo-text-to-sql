@@ -39,10 +39,14 @@ any model does:
   ``checkpoints/best``, or null for a fresh LoRA on the base model. Only GRPO starts from
   an adapter, so it sits in the grpo section rather than in ``run`` as plan section 3.10
   sketches it, and an SFT run's manifest is the same as before it existed.
+- ``grpo.filter_from`` (``forge.train.curriculum``) sits there too, for the same reason,
+  where the plan sketches ``data.filter_by_sft_pass_rate``: it names the eval run of train
+  questions whose scores picked the rows, which ``forge data build-grpo`` keeps; null
+  trains on every row.
 
 The run store is the one ``FORGE_RUN_STORE`` names (``forge.ops.hub``), so the plan's
 ``ops.hub_run_repo`` is not a setting here: one place names it. The plan's
-``data.curriculum`` and ``data.filter_by_sft_pass_rate`` come with FG-505.
+``data.curriculum`` comes with the rest of FG-505.
 """
 
 from __future__ import annotations
@@ -178,6 +182,9 @@ class GrpoConfig(_Section):
     # runs/<run_id>/checkpoints/best, or another adapter folder or Hub repo. None trains a
     # fresh LoRA on the base model.
     init_adapter: Annotated[StrictStr, Field(min_length=1)] | None = None
+    # The eval run of train questions whose scores pick the rows, as forge data build-grpo
+    # keeps them in data/grpo/<run id>/; checked when the run starts. None trains on all.
+    filter_from: Annotated[StrictStr, Field(min_length=1)] | None = None
     num_generations: Annotated[int, Strict(), Field(ge=2)] = 6
     max_prompt_length: Count = MAX_PROMPT_TOKENS
     max_completion_length: Annotated[int, Strict(), Field(ge=1, le=MAX_COMPLETION_TOKENS)] = 256

@@ -92,8 +92,10 @@ def test_grpo_two_steps_cpu(
         "top_p": 1.0,
         "top_k": 0,
     }
-    # The fixture's 40 train questions, all of them prompts within 1,536 tokens.
-    assert config["grpo_data"]["rows"] == len(load_train()) == 40
+    # The fixture's 40 train questions, all of them prompts within 1,536 tokens, but the
+    # 10 on rowless geo; every one of them, as no filter eval picked them.
+    data = config["grpo_data"]
+    assert (len(load_train()), data["rowless"], data["rows"], data["filter"]) == (40, 10, 30, None)
     assert manifest.config_hash == config_hash(config)
     assert manifest.data_manifest_hash == data_manifest_hash(spider_mini)
 

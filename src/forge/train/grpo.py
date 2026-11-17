@@ -14,7 +14,11 @@ One run, in order (the starting values are ADR-0011's):
    alone, each a ``prompt`` with its ``example_id``, ``db_id``, ``gold_sql`` and
    ``hardness``, the columns the rewards read (``grpo_rows``). TRL 1.18 has no prompt
    limit, so a prompt still over ``grpo.max_prompt_length`` tokens after the overflow
-   policy is left out here, as SFT leaves it out.
+   policy is left out here, as SFT leaves it out. So is a question on a rowless database,
+   whose empty gold result any empty query would match. With ``grpo.filter_from`` the
+   rows are those ``forge data build-grpo`` kept from that eval run's scores, read from
+   ``<grpo_root>/<run_id>/`` (``forge.train.curriculum.read_filter``); with
+   ``grpo.curriculum`` the backend lays them out in the order the steps take them.
 4. The manifest. Its config is what can change the adapter: the run, data, LoRA, GRPO and
    rewards sections, the rows' hash and counts (``grpo_data``), the starting adapter's
    digest, the backend, device and dtype (``trainer``), and what TRL takes that the config
@@ -59,7 +63,7 @@ from forge.core.hashing import canonical_json, sha256_hex
 from forge.core.ids import make_run_id
 from forge.core.types import Hardness, RunManifest
 from forge.data.prompts import ChatTokenizer, chat_token_counter
-from forge.data.spider import resolve_data_dir
+from forge.data.spider import ROWLESS_DBS, resolve_data_dir
 from forge.data.splits import load_train
 from forge.eval.config import Host, check_run_id
 from forge.eval.gold_cache import split_gold
@@ -72,6 +76,7 @@ from forge.ops.sessions import SESSIONS_FILE, begin, end
 from forge.ops.timeguard import Clock
 from forge.train.backends import TrainBackend, grpo_library_values, select_backend
 from forge.train.config import TrainConfig
+from forge.train.curriculum import read_filter
 from forge.train.rewards import Rewards, reward_pool
 from forge.train.sft import CONFIG_FILE, ERROR_FILE, RunExists, platform_for, run_outputs
 from forge.train.sft_data import build_sft_dataset
@@ -151,23 +156,36 @@ def start_adapter(ref: str, model_ref: str) -> StartAdapter:
 
 
 def grpo_rows(
-    config: TrainConfig, tokenizer: ChatTokenizer, *, data_dir: Path
+    config: TrainConfig,
+    tokenizer: ChatTokenizer,
+    *,
+    data_dir: Path,
+    grpo_root: Path | None = None,
 ) -> tuple[Dataset, dict[str, Any]]:
     """The rows a run trains on, and what its manifest records of them, as the module
-    docstring's step 3 says."""
-    if config.grpo is None:
+    docstring's step 3 says; ``grpo_root`` is where the filter's rows are (``data/grpo``).
+
+    Raises as ``read_filter`` does for the rows of ``grpo.filter_from``, and
+    ``ValueError`` when no row is left.
+    """
+    grpo = config.grpo
+    if grpo is None:
         raise ValueError(f"run.kind is {config.run.kind}, and GRPO rows are for grpo runs")
     built = build_sft_dataset(
         config.data.prompt_version,
         config.run.model_ref,
         chat_token_counter(tokenizer),
-        max_tokens=config.grpo.max_prompt_length,
+        max_tokens=grpo.max_prompt_length,
         data_dir=data_dir,
     )
     examples = {example.id: example for example in load_train(data_dir)}
     rows: list[GrpoRow] = []
+    rowless = 0
     for row in built.rows:
         example = examples[row["example_id"]]
+        if example.db_id in ROWLESS_DBS:
+            rowless += 1
+            continue
         rows.append(
             GrpoRow(
                 prompt=row["prompt"],
@@ -177,8 +195,29 @@ def grpo_rows(
                 hardness=example.hardness,
             )
         )
+    picked: dict[str, Any] | None = None
+    if grpo.filter_from is not None:
+        found = read_filter(grpo.filter_from, root=grpo_root, data_dir=data_dir)
+        if found.summary.model_ref != config.run.model_ref:
+            log.warning(
+                "grpo: the rows of %s were picked by %s's replies, and this run trains %s",
+                grpo.filter_from,
+                found.summary.model_ref,
+                config.run.model_ref,
+            )
+        before = len(rows)
+        rows = [row for row in rows if row["example_id"] in found.ids]
+        picked = {
+            "eval_run": grpo.filter_from,
+            "hash": found.summary.hash,
+            "kept": len(found.rows),
+            "left_out": before - len(rows),
+        }
+    if not rows:
+        raise ValueError(f"no GRPO rows: all {len(built.rows)} train rows were left out")
     digest = sha256_hex(canonical_json([config.data.prompt_version, config.run.model_ref, rows]))
-    meta = {"hash": digest, **built.meta.counts.model_dump()}
+    counts = built.meta.counts.model_dump(exclude={"rows"})
+    meta = {"hash": digest, **counts, "rowless": rowless, "filter": picked, "rows": len(rows)}
     return Dataset.from_list(rows), meta
 
 
@@ -216,6 +255,7 @@ def run_grpo(
     data_dir: Path | None = None,
     runs_root: Path | None = None,
     cache_root: Path | None = None,
+    grpo_root: Path | None = None,
     backend: TrainBackend | None = None,
     host: Host | None = None,
     env: Mapping[str, str] | None = None,
@@ -227,7 +267,8 @@ def run_grpo(
 
     ``backend`` replaces the one the config names, ``host`` is the kernel's machine a job
     runs on, ``env`` where the callbacks look for a W&B key, ``clock`` the time guard's,
-    ``cache_root`` where the gold results are kept (``forge.ops.paths.cache_dir()``) and
+    ``cache_root`` where the gold results are kept (``forge.ops.paths.cache_dir()``),
+    ``grpo_root`` where the filter's rows are (``data/grpo``) and
     ``workers`` the size of the SQL pool (``reward_workers()``). Raises ``DirtyTreeError``
     on uncommitted changes unless ``allow_dirty``, ``RunExists`` for a new run's id already
     used, ``RunNotFound`` for a resume of no run, ``RunConflict`` for one this config can't
@@ -289,7 +330,7 @@ def run_grpo(
         seed=config.run.seed,
         adapter=None if start is None else start.folder,
     )
-    rows, data = grpo_rows(config, tokenizer, data_dir=root)
+    rows, data = grpo_rows(config, tokenizer, data_dir=root, grpo_root=grpo_root)
     gold = split_gold("train", data_dir=root, cache_root=cache_root).results
     fresh = build_manifest(
         "grpo",
