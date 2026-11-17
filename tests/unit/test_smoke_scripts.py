@@ -206,9 +206,11 @@ def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> Non
     tiny = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))["tiny"]
     model = f"{tiny['repo']}@{tiny['revision']}"
     run_id, sft_id = f"smoke-{sha[:7]}", f"smoke-sft-{sha[:7]}"
+    grpo_id = f"smoke-grpo-{sha[:7]}"
     data_dir, runs_dir = Path(f"{log}.env").read_text(encoding="utf-8").splitlines()
     scratch = Path(runs_dir).parent
-    # The base model's eval and report, then 3 steps of SFT and an eval of their adapter.
+    # The base model's eval and report, then 3 steps of SFT and 2 of GRPO, each followed
+    # by an eval of its adapter.
     assert log.read_text(encoding="utf-8").splitlines() == [
         "pytest --phase 8 tests/smoke",
         f"forge eval run --backend hf --model {model} --split val --limit 20 "
@@ -219,6 +221,10 @@ def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> Non
         f"forge eval run --backend hf --model {model} --adapter "
         f"{Path(runs_dir) / sft_id / 'checkpoints' / 'final'} --split val --limit 10 "
         f"--run-id {sft_id}-eval --workers 2 --allow-dirty",
+        f"forge train grpo --config configs/grpo/tiny-smoke.yaml --run-id {grpo_id} --allow-dirty",
+        f"forge eval run --backend hf --model {model} --adapter "
+        f"{Path(runs_dir) / grpo_id / 'checkpoints' / 'final'} --split val --limit 10 "
+        f"--run-id {grpo_id}-eval --workers 2 --allow-dirty",
     ]
     assert Path(data_dir).resolve() == (repo / "tests" / "fixtures" / "spider_mini").resolve()
     # The report's path and the report itself are printed, then the scratch folder goes.

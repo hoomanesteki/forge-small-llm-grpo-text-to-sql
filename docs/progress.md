@@ -69,7 +69,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-501 | Reward functions | 5 | done |  |  | `forge.train.rewards.Rewards(gold, pool, config)`: `execution_reward`, `validity_reward`, `format_reward` (each 0 or 1) and `guard_penalty`, with `weights` [1.0, 0.1, 0.05, 1.0] from the new `rewards` config section, so the gold query in a code block scores 1.15; `non_select` -1.0, `multiple_statements` -0.5, `constant_query` -0.5 and `comment_payload` -0.2, and any guard, or a query that ran but that sqlglot can't read, takes away execution, validity and format. Model SQL runs only in the `SandboxPool`, once a batch for all four functions; gold from `forge.eval.gold_cache`. I3 in `test_invariants.py` |
 | FG-502 | Adversarial reward tests | 3 | done |  |  | `tests/fixtures/adversarial_completions.yaml`: 48 completions on the fixture databases, each with its gold query, its four rewards and their weighted total, 9 of them audit candidates that name the FG-601 detector for their kind (`test_adversarial_cases`); `test_rewards_bounded_property` holds every reward and the total to [-2, 1.2] over 500 generated replies. Fixed in `train/rewards.py`: the constant guard charges a literal answer written over a table, such as `SELECT 3 FROM professor LIMIT 1` |
 | FG-503 | Parallel reward computation and gold cache | 3 | done |  |  | `forge data cache-gold --split train` (or `val`) builds `cache/gold/<split>-<data hash[:12]>.jsonl` through `forge.eval.gold_cache.split_gold`, the one file `forge eval run` reads too, and anything that needs it builds it on first use; `forge.train.rewards.reward_pool()` starts the one pool a run's four rewards share, a worker a CPU up to 4, each query capped at 2 s; `scripts/bench_rewards.py` times 6 prompts of 6 replies, and `test_batch_latency_budget` holds its 20 fixture batches to 1.5 s each (the worst took 25 ms on the laptop). On Linux each `SandboxPool` worker caps `RLIMIT_AS` at 1 GiB past its start, and a query past it comes back as an `other` error while its worker is replaced; macOS doesn't enforce the limit, so the 2 s kill bounds it there. Fixed from FG-501's review: a comment beside a `;` no longer zeroes a right query, and a write among statements sqlglot can't read costs `non_select` |
-| FG-504 | GRPO trainer with CPU smoke | 5 | todo |  |  |  |
+| FG-504 | GRPO trainer with CPU smoke | 5 | done |  |  | `forge train grpo --config` (`forge.train.grpo.run_grpo`): rows of `prompt`, `example_id`, `db_id`, `gold_sql` and `hardness` from the SFT builder over `load_train()`, a prompt over `grpo.max_prompt_length` left out there; LoRA from `grpo.init_adapter` (`PeftModel.from_pretrained(..., is_trainable=True)`, refused unless its LoRA settings are the config's and, for a run's checkpoint, its model and digest are that run's) or a fresh one when null; TRL's `GRPOConfig` gets the reward weights, `temperature`, `num_iterations=1` and never `max_prompt_length` or `steps_per_generation`, and the manifest's `trl` section records beta 0.0 and the `dapo` loss TRL 1.18 chose; `--resume` carries a run on from its latest stored checkpoint, step count included, with a session each in `sessions.json` (ADR-0017 amended, ADR-0011); `forge.eval.callbacks.ValEvalCallback` logs `val/ex_fast` on a fixed hash-drawn val subset every `grpo.eval_every` steps with the training model (`HfBackend.around`); `make smoke` trains 2 steps of `configs/grpo/tiny-smoke.yaml` and evaluates the adapter; `configs/grpo/` also holds the Kaggle pilot and main configs, whose SFT run ids FG-507 fills in, and the local MPS pilot's for FG-591 |
 | FG-505 | GRPO dataset, filtering and curriculum | 3 | todo |  |  |  |
 | FG-506 | Training telemetry and alerts | 3 | todo |  |  |  |
 | FG-507 | GRPO runs on Kaggle | 5 | todo |  |  |  |
@@ -1141,3 +1141,27 @@ Work discovered along the way that is not a plan story.
   FG-202's JSON lines, which run no code when read, and a Kaggle kernel's `FORGE_CACHE_DIR` is its
   temp folder, so a GRPO session builds train's file on first use (3.6 s on the laptop) rather than
   downloading it (FG-503).
+- TRL 1.18's GRPO defaults are beta 0.0, so no KL term or reference pass, and the `dapo` loss, not
+  the plan's original GRPO loss. A run's manifest records both under `trl`, with `scale_rewards`,
+  `epsilon`, `top_p`, `top_k` and TRL's version, inside the config hash (FG-504, ADR-0011).
+- The tiny random model writes no SQL: every rollout runs to `max_completion_length`, every reward is
+  0 and `frac_reward_zero_std` is 1, so a smoke step moves no weight. One smoke test steers the
+  rollouts to a gold query with `sequence_bias` through TRL's `generation_kwargs`, so a GRPO step
+  runs it in the sandbox pool and pays 1.15 (FG-504).
+- A checkpoint's generation defaults change greedy replies: the tiny model's 1.05 repetition
+  penalty gave other replies than plain greedy decoding. `HfBackend.around` decodes the training
+  model with its special token ids alone and in eval mode, then puts back its config and mode
+  (FG-504).
+- A field added to the run section would change every SFT manifest's dumped config, and the
+  committed pilot's check against it, so the starting adapter is `grpo.init_adapter`, not the plan's
+  `run.init_adapter` (FG-504).
+- The FG-491 SFT pilot's manifest records no adapter digests (it predates FG-492), so a GRPO run from
+  its `checkpoints/final` logs a warning and records the digest it finds (FG-504).
+- `forge kaggle run --job grpo` still refuses, now naming FG-507: the kernel must fetch the starting
+  adapter and, on a resume, the run's latest checkpoint from the run store first. The Unsloth backend
+  refuses a starting adapter, since its own loading is untried with TRL 1.18 (FG-504).
+- GRPO runs begin and end a session in `sessions.json` (`forge.ops.sessions`), as FG-391's note
+  asked of resumable training jobs, so a resumed run's GPU hours leave out the time between
+  sessions; SFT runs still keep none, since they don't resume (FG-504).
+- A GRPO run holds no lock against a second process given the same run id, as an eval run does;
+  a second new run fails at the folder, and a second resume isn't stopped (FG-504).
