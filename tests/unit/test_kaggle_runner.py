@@ -252,7 +252,7 @@ def _record(repo: Path, run_id: str) -> dict[str, Any]:
     return data
 
 
-MAIN = ROOT / "configs" / "sft" / "qwen3-4b-main.yaml"
+MAIN = ROOT / "configs" / "sft" / "qwen25coder-1p5b-main.yaml"
 
 
 def _train(run_id: str, config: Path = MAIN) -> None:
@@ -616,13 +616,15 @@ def test_jobs_a_later_story_builds_and_bad_options_are_refused_before_any_upload
 def test_sft_job_pushes_the_config_it_checked(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     fake = _use(FakeKaggle(head), monkeypatch)
-    config = ROOT / "configs" / "sft" / "qwen3-4b-main.yaml"
+    config = ROOT / "configs" / "sft" / "qwen25coder-1p5b-main.yaml"
 
     result = _run("--job", "sft", "--config", str(config), "--yes")
 
     assert result.exit_code == 0, result.output
-    run_id = f"{_today():%Y-%m-%d}-qwen3-4b-sft-{head[:7]}"
-    assert f"run {run_id}: kernel {OWNER}/forge-{run_id}, version 1" in result.stdout
+    run_id = f"{_today():%Y-%m-%d}-qwen2-5-coder-1-5b-instruct-sft-{head[:7]}"
+    # Past Kaggle's 50 characters as forge-<run_id>, so the kernel's name is cut short.
+    slug, _ = kernel_name(run_id)
+    assert f"run {run_id}: kernel {OWNER}/{slug}, version 1" in result.stdout
     assert "estimate 2.50 GPU h" in result.stdout
     # The code and data datasets mounted, a T4, and the plan's 2.5 h and half again.
     meta = json.loads(fake.pushed[0]["kernel-metadata.json"])
@@ -646,9 +648,9 @@ def test_eval_job_scores_a_checkpoint_with_its_base_models_config(
 ) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     fake = _use(FakeKaggle(head), monkeypatch)
-    base = ROOT / "configs" / "eval" / "qwen3-4b-val.yaml"
-    checkpoint = "runs/2026-11-20-qwen3-4b-sft-abc1234/checkpoints/step-000242"
-    _train("2026-11-20-qwen3-4b-sft-abc1234")
+    base = ROOT / "configs" / "eval" / "qwen2-5-coder-1-5b-val-p2.yaml"
+    checkpoint = "runs/2026-11-20-qwen2-5-coder-1-5b-sft-abc1234/checkpoints/step-000242"
+    _train("2026-11-20-qwen2-5-coder-1-5b-sft-abc1234")
 
     result = _run("--job", "eval", "--config", str(base), "--adapter", checkpoint, "--yes")
 
@@ -662,7 +664,11 @@ def test_eval_job_scores_a_checkpoint_with_its_base_models_config(
     named.write_text(CONFIG + f"adapter: {checkpoint}\n", encoding="utf-8")
     for job, config, message in (
         ("eval", named, "names an adapter already; leave out --adapter"),
-        ("sft", ROOT / "configs" / "sft" / "qwen3-4b-main.yaml", "--adapter is an eval job's"),
+        (
+            "sft",
+            ROOT / "configs" / "sft" / "qwen25coder-1p5b-main.yaml",
+            "--adapter is an eval job's",
+        ),
     ):
         refused = _run("--job", job, "--config", str(config), "--adapter", checkpoint, "--yes")
         assert refused.exit_code == 1 and message in refused.stderr, refused.stderr
@@ -674,9 +680,9 @@ def test_eval_job_adapter_is_checked_before_the_push(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
-    base = ROOT / "configs" / "eval" / "qwen3-4b-val.yaml"
+    base = ROOT / "configs" / "eval" / "qwen2-5-coder-1-5b-val-p2.yaml"
     small = ROOT / "configs" / "eval" / "qwen3-1-7b-val.yaml"
-    run = "2026-11-20-qwen3-4b-sft-abc1234"
+    run = "2026-11-20-qwen2-5-coder-1-5b-sft-abc1234"
     checkpoint = f"runs/{run}/checkpoints/final"
     _train(run)
 
@@ -707,7 +713,7 @@ def test_eval_job_adapter_is_checked_before_the_push(
     (repo / "runs" / other / "kernels.json").write_text(
         json.dumps({**record, "kernels": [{"kernel": f"{OWNER}/forge-{other}"}]})
     )
-    evaluated = "2026-11-20-qwen3-4b-eval-abc1234"
+    evaluated = "2026-11-20-qwen2-5-coder-1-5b-eval-abc1234"
     (repo / "runs" / evaluated).mkdir()
     (repo / "runs" / evaluated / "kernels.json").write_text(
         json.dumps({"job": "eval", "options": {}, "kernels": [{"kernel": "x"}]})
@@ -721,7 +727,7 @@ def test_eval_job_adapter_is_checked_before_the_push(
         (base, f"{run}/checkpoints/final", f"kernel looks for it as {checkpoint}, so name it so"),
         (base, str(local), "is a folder on this machine, which the kernel can't read"),
         (base, "no such repo", "is neither a directory nor a Hub repo id"),
-        (small, checkpoint, f"run {run} trained Qwen/Qwen3-4B@"),
+        (small, checkpoint, f"run {run} trained Qwen/Qwen2.5-Coder-1.5B-Instruct@"),
         (base, f"runs/{other}/checkpoints/final", f"run {other} trained org/m, and the job"),
         (base, f"runs/{evaluated}/checkpoints/final", "is of kind eval, which trains no adapter"),
     ):
@@ -747,8 +753,11 @@ def test_an_eval_job_mounts_the_output_of_the_kernel_that_trained_its_adapter(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
-    base = ROOT / "configs" / "eval" / "qwen3-4b-val.yaml"
-    run, unversioned = "2026-11-20-qwen3-4b-sft-abc1234", "2026-11-21-qwen3-4b-sft-abc1234"
+    base = ROOT / "configs" / "eval" / "qwen2-5-coder-1-5b-val-p2.yaml"
+    run, unversioned = (
+        "2026-11-20-qwen2-5-coder-1-5b-sft-abc1234",
+        "2026-11-21-qwen2-5-coder-1-5b-sft-abc1234",
+    )
     _train(run)
     # kaggle 2.2.5's line when the server sends no version: Kaggle then mounts the kernel's
     # latest output, its only one, since each attempt at a run is a kernel of its own.
@@ -827,9 +836,11 @@ def test_an_eval_job_refuses_a_checkpoint_no_kernel_output_holds(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
-    base = ROOT / "configs" / "eval" / "qwen3-4b-val.yaml"
+    base = ROOT / "configs" / "eval" / "qwen2-5-coder-1-5b-val-p2.yaml"
     model, runs = read_config_file(base)["model"], repo / "runs"
-    pilot, unknown, pulled, kept = (f"2026-11-{day}-qwen3-4b-sft-abc1234" for day in range(16, 20))
+    pilot, unknown, pulled, kept = (
+        f"2026-11-{day}-qwen2-5-coder-1-5b-sft-abc1234" for day in range(16, 20)
+    )
     # Trained on the laptop, as the local pilot was; pulled with no record of its push; and
     # pushed from here and pulled, keeping its final adapter alone.
     sft_run_folder(runs, pilot, model, [FINAL], platform="local-mps", gpu=None)
@@ -873,8 +884,8 @@ def test_an_eval_job_of_best_pushes_the_checkpoint_best_json_names(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
-    base = ROOT / "configs" / "eval" / "qwen3-4b-val.yaml"
-    run, runs = "2026-11-20-qwen3-4b-sft-abc1234", repo / "runs"
+    base = ROOT / "configs" / "eval" / "qwen2-5-coder-1-5b-val-p2.yaml"
+    run, runs = "2026-11-20-qwen2-5-coder-1-5b-sft-abc1234", repo / "runs"
     half = "checkpoints/step-000242"
     _train(run)
     trained = sft_run_folder(runs, run, read_config_file(base)["model"], [half, FINAL])
@@ -964,7 +975,7 @@ def test_sft_job_refuses_what_a_kernel_cant_train(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
-    main = str(ROOT / "configs" / "sft" / "qwen3-4b-main.yaml")
+    main = str(ROOT / "configs" / "sft" / "qwen25coder-1p5b-main.yaml")
     configs = {
         "grpo": "run: {kind: grpo, model_ref: org/m}\ngrpo: {}\nops: {est_gpu_hours: 1}\n",
         "unbudgeted": "run: {kind: sft, model_ref: org/m}\nsft: {}\n",

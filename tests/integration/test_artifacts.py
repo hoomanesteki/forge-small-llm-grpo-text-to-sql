@@ -41,6 +41,7 @@ from forge.ops.dev_usage import read_uses
 from forge.ops.hub import BEST, FINAL, LocalRunStore
 from forge.ops.ledger import LedgerRow, append_once, read_rows, run_hours
 from forge.ops.manifest import config_hash
+from forge.ops.sessions import sessions_of
 from forge.train.config import load_train_config
 from forge.train.sft import PROMOTION_FILE, checkpoint_scores, fit_rows, promote_best
 from forge.train.sft_data import build_sft_dataset
@@ -659,11 +660,12 @@ def test_phase3_baseline_reports_rebuild() -> None:
         assert_rebuilds(gpu_story_runs("FG-307", {name: BASELINES[name]}))
 
 
-# FG-404's Kaggle SFT runs (plan section 3.8): the pilot on the small candidate, and the
-# main run on the chosen model, each from its config.
+# FG-404's Kaggle SFT runs (plan section 3.8), each from its config: both train the model
+# ADR-0012 chose, the pilot a short run in two sessions that rehearses the main run's path
+# and a resume, the main run an epoch (FG-496).
 SFT_RUNS = {
-    "pilot": ROOT / "configs" / "sft" / "qwen3-1p7b-pilot.yaml",
-    "main": ROOT / "configs" / "sft" / "qwen3-4b-main.yaml",
+    "pilot": ROOT / "configs" / "sft" / "qwen25coder-1p5b-pilot.yaml",
+    "main": ROOT / "configs" / "sft" / "qwen25coder-1p5b-main.yaml",
 }
 # What a training run's manifest config holds of its file, under the config hash.
 TRAIN_SECTIONS = {"run", "data", "lora", "sft"}
@@ -789,9 +791,16 @@ def assert_sft_runs_scored(
         root = runs / manifest.run_id
         assert (manifest.kind, manifest.status) == ("sft", "finished"), name
         assert manifest.config_hash == config_hash(manifest.config), name
+        # A ledger row for each session; the pilot's first stopped part way and a resume
+        # finished it, the rehearsal it was run for (FG-496).
+        sessions = sessions_of(manifest, root)
         assert [row.platform for row in _ledger_rows(manifest.run_id, ledger)] == [
             manifest.platform
-        ]
+        ] * len(sessions), name
+        if name == "pilot":
+            statuses = [session.status for session in sessions]
+            assert len(statuses) >= 2, f"{name}: one session, so no resume was rehearsed"
+            assert (statuses[0], statuses[-1]) == ("stopped_time_guard", "finished"), name
         # Committed without its weights, which the run store holds.
         assert (root / "config.yaml").is_file() and (root / "metrics.jsonl").is_file(), name
         assert not (root / "checkpoints").exists(), name
@@ -907,6 +916,16 @@ def test_sft_runs_are_scored_on_their_base_models_full_val(
         )
 
     check(committed, commit(committed, ids))
+    # The pilot is there to rehearse a resume, so a pilot trained in one session isn't it.
+    with pytest.raises(AssertionError, match="pilot: one session, so no resume was rehearsed"):
+        assert_sft_runs_scored(
+            {"pilot": LocalRunStore(committed).get_manifest(sft_id)},
+            runs=committed,
+            configs=[base],
+            ledger=ledger,
+            dev_usage=dev_usage,
+            val=[example.id for example in examples],
+        )
 
     # A part of val or other sampling for the final adapter, or other weights than the run
     # saved as it: a best/ chosen from such a run is refused, as promote refuses it.

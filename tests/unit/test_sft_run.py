@@ -33,7 +33,13 @@ from forge.ops.manifest import config_hash
 from forge.ops.sessions import read_sessions
 from forge.train import sft
 from forge.train.backends import ADAPTER_DIR, Precision
-from forge.train.config import LoraConfig, SftConfig, TrainConfig, parse_train_config
+from forge.train.config import (
+    LoraConfig,
+    SftConfig,
+    TrainConfig,
+    load_train_config,
+    parse_train_config,
+)
 from forge.train.sft import RunExists, open_rows, platform_for, run_sft
 from forge.train.sft_data import build_sft_dataset, read_meta, save_sft
 from tests.fakes import WordTokenizer
@@ -497,6 +503,38 @@ def test_a_stopped_run_resumes_from_its_checkpoint_to_its_end(
     assert sessions[1].ended_at == resumed.manifest.ended_at
     spans = [(s.ended_at - s.started_at).total_seconds() / 3600 for s in sessions if s.ended_at]
     assert resumed.manifest.gpu_hours == pytest.approx(sum(spans))
+
+
+@pytest.mark.phase(4)
+def test_the_kaggle_sft_pilot_stops_half_way_then_resumes_to_its_end(
+    spider_mini: Path, tmp_path: Path
+) -> None:
+    # configs/sft/qwen25coder-1p5b-pilot.yaml's own ops, on the fixture's rows: the steps
+    # its subset makes, in a kernel's two sessions.
+    pilot = load_train_config(ROOT / "configs" / "sft" / "qwen25coder-1p5b-pilot.yaml")
+    assert pilot.sft is not None and pilot.sft.subset_rows is not None
+    rows_a_step = pilot.sft.per_device_train_batch_size * pilot.sft.gradient_accumulation_steps
+    steps = pilot.sft.subset_rows // rows_a_step
+    config = pilot.model_copy(
+        update={
+            "run": pilot.run.model_copy(update={"model_ref": MODEL}),
+            "sft": pilot.sft.model_copy(
+                update={"subset_rows": None, "max_steps": steps, "logging_steps": 1}
+            ),
+        }
+    )
+    stop = pilot.ops.stop_after_step
+
+    stopped = _train(tmp_path, FakeBackend(steps=steps), config, host="kaggle")
+    assert (stopped.manifest.status, stopped.stopped_at) == ("stopped_time_guard", stop)
+    assert LocalRunStore(tmp_path / "runs").latest_checkpoint(RUN) == f"checkpoints/step-{stop:06d}"
+    resumed = _train(tmp_path, FakeBackend(steps=steps), config, host="kaggle", resume=True)
+
+    assert resumed.resumed_from == f"checkpoints/step-{stop:06d}"
+    assert (resumed.manifest.status, resumed.adapter) == ("finished", resumed.root / FINAL)
+    assert (resumed.root / FINAL / "adapter_model.safetensors").read_text() == f"{steps} steps"
+    sessions = read_sessions(resumed.root) or []
+    assert [s.status for s in sessions] == ["stopped_time_guard", "finished"]
 
 
 @pytest.mark.phase(4)

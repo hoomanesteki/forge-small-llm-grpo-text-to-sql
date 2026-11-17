@@ -30,10 +30,11 @@ from forge.eval.config import EvalConfig
 from forge.ops.adapters import ADAPTER_FILES, adapter_sha256
 from forge.ops.dev_usage import read_uses
 from forge.ops.hub import HubRunStore
-from forge.ops.kaggle_job import fetch_output
+from forge.ops.kaggle_job import fetch_output, plan_job
 from forge.ops.sessions import read_sessions
+from forge.ops.timeguard import EVAL_MARGIN_SHARE
 from forge.train import sft
-from forge.train.config import OpsConfig, TrainConfig, load_train_config
+from forge.train.config import OpsConfig, TrainConfig, load_train_config, parse_train_config
 from tests.fakes import REPO_URL, FakeHub, FakeVllm, gold_reply
 from tests.kernel import OWNER, SHA, argv, build_inputs, kernel_folder, mount_output
 from tests.spike import entry
@@ -442,6 +443,55 @@ def test_an_sft_job_stopped_after_its_step_is_resumed_by_a_second_kernel(
     assert sessions[1].started_at == datetime.fromisoformat(status["started_at"])
     assert sessions[1].ended_at == datetime.fromisoformat(status["ended_at"])
     assert sessions[0] == (read_sessions(first) or [])[0]
+
+
+@pytest.mark.phase(4)
+def test_the_sft_pilots_kernels_stop_in_time_to_save_and_upload(
+    tmp_path: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The Kaggle SFT pilot as forge kaggle run pushes it, in its two kernels (FG-496). Each
+    # job's guard counts to the push's timeout less the tenth kept back, from the kernel's
+    # start, so its stop, after step 50 or sooner, leaves the save and the upload their
+    # time in the session. The preflight trains to its end, and the second job resumes.
+    config = ROOT / "configs" / "sft" / "qwen25coder-1p5b-pilot.yaml"
+    plan = plan_job("sft", config, owner=OWNER, sha=SHA, runs_root=tmp_path, run_id="run-1")
+    assert (plan.est_gpu_hours, plan.timeout_s) == (1.0, 5400)
+    now = [0.0]
+    trained: list[tuple[TrainConfig, dict[str, object]]] = []
+
+    def run_sft(config: TrainConfig, **kwargs: object) -> object:
+        trained.append((config, kwargs))
+        now[0] += 300.0  # each run takes five minutes of the kernel's time
+        # The preflight trains to its end, and the job stops as the first session does.
+        ended = "finished" if str(kwargs["run_id"]).endswith("-preflight") else "stopped_time_guard"
+        return types.SimpleNamespace(manifest=types.SimpleNamespace(status=ended))
+
+    monkeypatch.setattr(sft, "run_sft", run_sft)
+    for name, extra in (("first", ()), ("second", ("--resume",))):
+        root = kernel_folder(tmp_path / name, monkeypatch)
+        build_inputs(root, spider_mini)
+        if extra:
+            # The first kernel's output, holding the run its job stopped.
+            last = root / "input" / "notebooks" / OWNER / "forge-run-1" / "runs" / "run-1"
+            last.mkdir(parents=True)
+            (last / "manifest.json").write_text(json.dumps({"status": "stopped_time_guard"}))
+        now[0] = 0.0
+        job = argv(root, "--timeout-s", str(plan.timeout_s), *extra, options=plan.options)
+        job[job.index("eval")] = "sft"
+        trained.clear()
+        assert script.main(job, run=lambda command: None, clock=lambda: now[0]) == 0
+
+        (checked, checks), (run, runs) = trained
+        assert checked.sft is not None and checked.sft.max_steps == 2
+        assert (checked.ops.stop_after_step, checks["resume"]) == (None, False)
+        assert (run.ops.stop_after_step, runs["resume"]) == (50, bool(extra))
+        # The job starts once the preflight's five minutes are spent, and its guard stops
+        # it with the tenth of the push's timeout the save and the upload keep.
+        kept = plan.timeout_s * EVAL_MARGIN_SHARE
+        assert 300.0 + run.ops.time_guard_minutes * 60 == pytest.approx(plan.timeout_s - kept)
+        # The job trains the config forge kaggle run checked, but for the guard.
+        pushed = parse_train_config(plan.options["config"])
+        assert run.model_dump(exclude={"ops"}) == pushed.model_dump(exclude={"ops"})
 
 
 @pytest.mark.phase(4)

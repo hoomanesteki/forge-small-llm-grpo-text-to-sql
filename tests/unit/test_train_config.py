@@ -22,18 +22,21 @@ from forge.train.config import (
     load_train_config,
     parse_train_config,
 )
+from tests.budget import budget_rows
 
 ROOT = Path(__file__).resolve().parents[2]
 # Each SFT config, and the configs/models.yaml entry whose model it trains.
 SFT_MODELS = {
     "tiny-smoke.yaml": ("tiny",),
     "pilot-qwen25coder05b-mps.yaml": ("pilot",),
-    "qwen3-1p7b-pilot.yaml": ("candidates", "qwen3-1-7b"),
-    "qwen3-4b-main.yaml": ("candidates", "qwen3-4b"),
+    "qwen25coder-1p5b-pilot.yaml": ("candidates", "qwen2-5-coder-1-5b"),
+    "qwen25coder-1p5b-main.yaml": ("candidates", "qwen2-5-coder-1-5b"),
 }
 LOCAL_PILOT = "pilot-qwen25coder05b-mps.yaml"
-# The Kaggle runs' GPU hours, plan section 3.8: the SFT pilot and the main run.
-KAGGLE_HOURS = {"qwen3-1p7b-pilot.yaml": 1.0, "qwen3-4b-main.yaml": 2.5}
+# FG-404's Kaggle runs, each with its row of plan section 3.8's budget.
+KAGGLE_RUNS = {"qwen25coder-1p5b-pilot.yaml": "SFT pilot", "qwen25coder-1p5b-main.yaml": "SFT main"}
+KAGGLE_PILOT = ROOT / "configs" / "sft" / "qwen25coder-1p5b-pilot.yaml"
+KAGGLE_MAIN = ROOT / "configs" / "sft" / "qwen25coder-1p5b-main.yaml"
 
 # Plan section 3.10's GRPO file, without the sections later stories add.
 GRPO_FILE = """\
@@ -245,6 +248,10 @@ def test_a_section_with_nothing_under_it_is_called_empty(tmp_path: Path) -> None
 @pytest.mark.phase(4)
 def test_sft_configs_start_from_adr_0010() -> None:
     models = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    budget = {row.job: row for row in budget_rows()}
+    adr = (ROOT / "docs" / "adr" / "0012-model-choice.md").read_text(encoding="utf-8")
+    chosen = re.search(r"\n- Chosen model: `([^`]+)`\n", adr)
+    assert chosen, "ADR-0012 names no chosen model"
     paths = {path.name: path for path in (ROOT / "configs" / "sft").glob("*.yaml")}
     assert sorted(paths) == sorted(SFT_MODELS)
     for name, keys in SFT_MODELS.items():
@@ -276,12 +283,17 @@ def test_sft_configs_start_from_adr_0010() -> None:
         # One epoch at an effective batch of 16 rows.
         rows_a_step = sft.per_device_train_batch_size * sft.gradient_accumulation_steps
         assert (sft.num_train_epochs, sft.max_steps, rows_a_step) == (1.0, None, 16), name
-        if name in KAGGLE_HOURS:
-            # A kernel job's: CUDA, a 4-bit base, the whole train split, and the plan's
-            # estimate for the budget.
+        if name in KAGGLE_RUNS:
+            # A kernel job's: the model ADR-0012 chose on p2 (ADR-0007), on CUDA in fp16
+            # with no 4-bit, since the 1.5B base fits a T4 (FG-496), and the estimate of its
+            # row in plan section 3.8.
+            assert entry["repo"] == chosen.group(1), name
             assert (config.run.backend, config.run.device) == ("auto", "auto"), name
-            assert config.run.load_in_4bit and sft.subset_rows is None, name
-            assert config.ops.est_gpu_hours == KAGGLE_HOURS[name], name
+            assert not config.run.load_in_4bit, name
+            assert config.data.prompt_version == "p2", name
+            row = budget[KAGGLE_RUNS[name]]
+            assert (row.model, row.story) == ("chosen (1.5B)", "FG-404"), name
+            assert config.ops.est_gpu_hours == row.hours, name
         else:
             # The local pilot on Apple silicon's GPU (ADR-0016), a row at a time for the
             # laptop's memory, on a subset of whole steps: its timing probe put an epoch
@@ -297,12 +309,30 @@ def test_main_sft_run_keeps_its_half_way_checkpoint() -> None:
     # FG-404: the main run's checkpoints at 50% and at its end, checkpoints/final, are
     # evaluated on val and the better one promoted; the pilot shows the setup works, and
     # its end alone is evaluated.
-    main = load_train_config(ROOT / "configs" / "sft" / "qwen3-4b-main.yaml")
-    pilot = load_train_config(ROOT / "configs" / "sft" / "qwen3-1p7b-pilot.yaml")
+    main, pilot = load_train_config(KAGGLE_MAIN), load_train_config(KAGGLE_PILOT)
     assert (main.ops.keep_checkpoints_at, pilot.ops.keep_checkpoints_at) == ((0.5,), ())
     # Shares in any order, kept in order.
     shares = parse_train_config(_sft(ops={"keep_checkpoints_at": [0.75, 0.25]}))
     assert shares.ops.keep_checkpoints_at == (0.25, 0.75)
+
+
+@pytest.mark.phase(4)
+def test_sft_pilot_rehearses_the_main_run_and_a_resume() -> None:
+    # FG-496: the pilot trains what the main run trains, but on fewer rows, and its first
+    # session stops part way, so a resumed session finishes it.
+    main, pilot = load_train_config(KAGGLE_MAIN), load_train_config(KAGGLE_PILOT)
+    assert pilot.sft is not None and main.sft is not None
+    assert pilot.model_dump(exclude={"sft", "ops"}) == main.model_dump(exclude={"sft", "ops"})
+    unsubset = pilot.sft.model_copy(update={"subset_rows": None})
+    assert unsubset == main.sft and main.ops.stop_after_step is None
+    # One epoch of the subset, its steps whole, and the stop well inside them: each session
+    # trains some, and the stop is a checkpoint the second resumes from.
+    rows_a_step = pilot.sft.per_device_train_batch_size * pilot.sft.gradient_accumulation_steps
+    assert pilot.sft.subset_rows is not None and pilot.sft.subset_rows % rows_a_step == 0
+    steps = pilot.sft.subset_rows // rows_a_step
+    stop = pilot.ops.stop_after_step
+    assert stop is not None and 0 < stop < steps and stop % pilot.ops.checkpoint_every == 0
+    assert (pilot.ops.time_guard_minutes, main.ops.time_guard_minutes) == (675.0, 675.0)
 
 
 @pytest.mark.phase(4)
@@ -326,11 +356,12 @@ def test_sft_runs_wait_in_pending_within_the_story_budget() -> None:
         assert entries[evaluated]["est_gpu_hours"] == pytest.approx(
             ops.est_gpu_hours * checkpoints
         ), evaluated
-    # The story's own budget, 4.5 h in its block in the plan, which the configs' estimates
-    # fill: 1 h for the pilot and 0.3 h for its val run, 2.5 h for the main run and 0.7 h
-    # for its checkpoints. Plan section 3.8's rows give FG-404 4.4 h: the pilot, the main
-    # run and 0.90 h for the main run's 2 checkpoint evals, with no row for the pilot's.
-    assert sum(entry["est_gpu_hours"] for entry in entries.values()) == pytest.approx(4.5)
+    # Plan section 3.8's FG-404 rows, 4.4 h, hold the configs' estimates: 1 h for the pilot
+    # and 2.5 h for the main run, their rows', and 0.3 h for each val run, the pilot's among
+    # them, within the 0.90 h the section gives the main run's two.
+    story = [row.hours for row in budget_rows() if row.story == "FG-404"]
+    assert sum(story) == pytest.approx(4.4)
+    assert sum(entry["est_gpu_hours"] for entry in entries.values()) <= sum(story) + 1e-9
 
 
 ADR_0010 = ROOT / "docs" / "adr" / "0010-lora-sft-starting-point.md"

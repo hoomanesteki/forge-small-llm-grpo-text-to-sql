@@ -1,0 +1,41 @@
+# FG-404's main Kaggle SFT run: 1 epoch of the train split on the model ADR-0012 chose,
+# Qwen/Qwen2.5-Coder-1.5B-Instruct at the commit of configs/models.yaml's
+# candidates.qwen2-5-coder-1-5b, on p2 (ADR-0007), at ADR-0010's starting values. The
+# pilot (configs/sft/qwen25coder-1p5b-pilot.yaml) runs these settings first, on fewer rows.
+#
+# fp16 on the T4 with fp32 adapters, and no 4-bit: the 1.5B base fits a T4 in fp16
+# (ADR-0010's note of 2026-11-17).
+run:
+  kind: sft
+  model_ref: Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a
+  seed: 42
+  backend: auto
+  device: auto
+  load_in_4bit: false
+data:
+  prompt_version: p2
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+sft:
+  learning_rate: 2.0e-4
+  num_train_epochs: 1.0
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  # 16 rows an optimizer step.
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  max_length: 2048
+  logging_steps: 10
+ops:
+  checkpoint_every: 50
+  # The checkpoint half way through the epoch stays beside checkpoints/final: val scores
+  # both, and the better one becomes checkpoints/best (FG-404).
+  keep_checkpoints_at: [0.5]
+  # The kernel stops sooner, at its push's timeout less the share kept back for the save
+  # and the upload (kaggle/entry.py); a run stopped there resumes as the pilot did.
+  time_guard_minutes: 675
+  # Plan section 3.8's SFT main row: an estimate, since no SFT has run on a T4 yet.
+  est_gpu_hours: 2.5

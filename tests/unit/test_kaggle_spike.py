@@ -28,6 +28,7 @@ from forge.data import prompts as forge_prompts
 from forge.data.splits import read_split_ids
 from forge.ops.kaggle import METADATA_FILE, bake_argv, check_kernel_metadata
 from forge.ops.ledger import read_rows
+from tests.budget import budget_rows
 from tests.spike import THROUGHPUT, load_script, throughput
 from tests.tiny_hf import CHATML, QWEN3, byte_tokenizer
 
@@ -1089,17 +1090,7 @@ def test_pending_runs_say_what_blocks_them() -> None:
 def _budget_rows() -> dict[str, float]:
     """Plan section 3.8's GPU hour budget, as {the job's name before any colon or
     parenthesis: its hours}, the total row as ``Total``."""
-    plan = (ROOT / "docs" / "PLAN.md").read_text(encoding="utf-8")
-    section = plan.split("\n### 3.8 ", 1)[1].split("\n### ", 1)[0]
-    table = section.split("**GPU hour budget**", 1)[1].split("\n\n")[1]
-    rows = {}
-    for line in table.splitlines()[2:]:
-        job, _, hours, _ = (cell.strip() for cell in line.strip("|").split("|"))
-        name = re.split(r"[:(]", job.strip("*"), maxsplit=1)[0].strip()
-        number = re.search(r"[\d.]+", hours)
-        assert number, line
-        rows[name] = float(number.group())
-    return rows
+    return {row.job: row.hours for row in budget_rows()}
 
 
 @pytest.mark.phase(3)

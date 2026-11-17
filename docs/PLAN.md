@@ -421,7 +421,7 @@ user:   Database schema:
 |---|---|---|---|
 | Throughput spike (measured: its ledger row) | 1.7B and 4B | 0.59 | FG-301 |
 | Baselines: 3 candidates on val, the chosen one with p2, the I6 repeat, the chosen model on dev, and a larger reference model on val and dev | up to 8B in 4-bit | 3.60 | FG-307 |
-| SFT pilot (estimate) | 1.7B | 1 | FG-404 |
+| SFT pilot (estimate) | chosen (1.5B) | 1 | FG-404 |
 | SFT main (estimate) | chosen (1.5B) | 2.5 | FG-404 |
 | SFT checkpoint evals: 2 on val | chosen | 0.90 | FG-404 |
 | GRPO pilot (100 steps, stopped at 40 minutes and resumed) | 1.7B | 1.30 | FG-507 |
@@ -444,7 +444,7 @@ Each job is rounded up to the next 0.05 h, and a row is the sum of its jobs:
 - Baselines: 0.45 + 0.55 + 0.45 for the candidates on val, 0.45 for p2, 0.30 for the I6 repeat and 0.45 for the chosen model on dev, plus the reference's configs, 0.45 on val and 0.50 on dev, as the formula has no rates for an 8B model (vLLM 0.33.0 has no bitsandbytes, so since FG-398 the reference is the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`). The row keeps these estimates. Measured, FG-307's runs took 1.64 h by their 8 ledger rows in `docs/compute-ledger.md`, the reference's two on the AWQ checkpoint among them.
 - SFT checkpoint evals: 2 × 0.45. Checkpoint selection: 3 × 0.45 on val and 2 × 0.45 on dev, without the retry turns. vLLM with a LoRA adapter wasn't benched, so these may run slower.
 - Ablations: FG-603's configs B to E, 300 steps and a full val eval each, and FG-604's second seed of B, so 5 × (2.60 + 0.45). That is the 15.25 h the formulas give for the planned runs, more than FG-603's own 6 h and FG-604's own 2 h budgets; Phase 6 sizes FG-603 and FG-604 to fit it before they run, when it fixes their configs. E's 4 generations would shorten its steps, which nothing has measured, so the formula counts it at 6, and A's re-evaluation, if it is needed, comes out of the reserve. The total stays within the 45 h that Phase gate 3 allows.
-- Still estimates: SFT, since no SFT has run on the T4 (SFT main keeps the 2.5 h it was given for a 4B model); and the reserve. FG-507's 0.5 h filter eval has no row, as before, and checkpoint pushes and in-training evals aren't in the formula; the reserve covers them.
+- Still estimates: SFT, since no SFT has run on the T4 (SFT main keeps the 2.5 h it was given for a 4B model); and the reserve. Since FG-496 the SFT pilot trains the chosen model too, and keeps its 1 h: the chosen model is the smallest candidate, so a 1.7B pilot would rehearse a bigger model than the main run, and the pilot's job is to rehearse the main run's Kaggle path, a first session stopped early and a resume that finishes the run. FG-507's 0.5 h filter eval has no row, as before, and checkpoint pushes and in-training evals aren't in the formula; the reserve covers them.
 
 **Session rules**
 
