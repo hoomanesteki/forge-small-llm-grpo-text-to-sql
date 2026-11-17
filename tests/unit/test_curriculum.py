@@ -1,15 +1,18 @@
 """The GRPO dataset (FG-505): the filter that picks GRPO's rows from a greedy eval of
-train questions."""
+train questions and ``forge data build-grpo``, which keeps them."""
 
 from __future__ import annotations
 
 import dataclasses
+import json
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from forge import cli
 from forge.core.types import ExecResult, Hardness, Split
 from forge.data.spider import ROWLESS_DBS
 from forge.data.splits import load_train
@@ -22,8 +25,11 @@ from forge.train.curriculum import (
     KEEP_SOLVED,
     LEVELS,
     MAX_GOLD_MS,
+    ROWS_FILE,
+    SUMMARY_FILE,
     check_filter_run,
     filter_hash,
+    read_filter,
     select_rows,
 )
 
@@ -174,3 +180,63 @@ def test_filter_reads_greedy_train_evals_only(spider_mini: Path, runs: Path) -> 
         select_rows(stored, [], gold)
     with pytest.raises(ValueError, match="has no result in the train gold cache"):
         select_rows(stored, load_train(), {})
+
+
+@pytest.mark.phase(5)
+def test_build_grpo_keeps_the_rows_and_their_summary(
+    spider_mini: Path, runs: Path, tmp_path: Path
+) -> None:
+    _evaluate(EVAL, _right())
+    out = tmp_path / "grpo"
+    cli_runner = CliRunner()
+    build = ["data", "build-grpo", "--out", str(out), "--filter-from", EVAL]
+
+    built = cli_runner.invoke(cli.app, build)
+    assert built.exit_code == 0, built.output
+    folder = out / EVAL
+    summary = json.loads((folder / SUMMARY_FILE).read_text(encoding="utf-8"))
+    lines = (folder / ROWS_FILE).read_text(encoding="utf-8").splitlines()
+    # The fixture's gold queries all run in milliseconds, so only the rowless 10 go, and
+    # 30% of the 20 right ones on databases with rows stay beside the 10 wrong ones.
+    assert summary["total"] == {
+        "scored": 40,
+        "rowless": 10,
+        "slow_gold": 0,
+        "wrong": 10,
+        "solved": 20,
+        "solved_kept": 6,
+        "kept": 16,
+    }
+    assert sorted(summary["by_hardness"]) == sorted(LEVELS) and len(lines) == 16
+    assert f"eval run {EVAL}: {MODEL}" in built.output
+    assert "kept the wrong replies and 30% of the right ones (seed 0)" in built.output
+    assert "gold over 1000 ms" in built.output
+    assert f"grpo rows: {folder}\nhash: {summary['hash']}" in built.output
+    table = built.output.split("hash: ", 1)[0]
+    assert "hardness  scored  rowless  slow gold  wrong  solved  solved kept  kept" in table
+    assert "all           40       10          0     10      20            6    16" in table
+    # The help says what the constants are.
+    help_text = cli_runner.invoke(cli.app, ["data", "build-grpo", "--help"]).output
+    assert f"{KEEP_SOLVED:.0%} of those it got right" in help_text
+    assert f"over {MAX_GOLD_MS / 1000:g} s" in help_text
+
+    # Read back as training reads it; building it again keeps the folder as it is.
+    found = read_filter(EVAL, root=out)
+    assert len(found.rows) == 16 and found.summary.hash == summary["hash"]
+    again = cli_runner.invoke(cli.app, build)
+    assert again.exit_code == 0 and json.loads((folder / SUMMARY_FILE).read_text()) == summary
+    # Other rows under the same name are refused, and so are rows edited by hand.
+    reseeded = cli_runner.invoke(cli.app, [*build, "--seed", "1"])
+    assert reseeded.exit_code == 1
+    assert f"{folder} holds other rows of run {EVAL}" in reseeded.stderr
+    (folder / ROWS_FILE).write_text("\n".join(lines[1:]) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="don't hash to the summary's hash"):
+        read_filter(EVAL, root=out)
+
+    # Only a finished eval of train questions: val's is refused, and so is no run at all.
+    _evaluate("val-eval", set(), split="val", limit=4)
+    refused = cli_runner.invoke(cli.app, [*build[:-1], "val-eval"])
+    assert refused.exit_code == 1 and "evaluated val" in refused.stderr
+    missing = cli_runner.invoke(cli.app, [*build[:-1], "no-such-run"])
+    assert missing.exit_code == 1 and "has no manifest.json" in missing.stderr
+    assert sorted(path.name for path in out.iterdir()) == [EVAL]

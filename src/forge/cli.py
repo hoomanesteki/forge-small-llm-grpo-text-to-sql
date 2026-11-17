@@ -328,6 +328,53 @@ def data_build_sft(
     typer.echo(f"sft dataset: {folder}\nhash: {meta.hash}")
 
 
+@data_app.command("build-grpo")
+def data_build_grpo(
+    filter_from: Annotated[
+        str,
+        typer.Option(
+            "--filter-from",
+            help="The finished eval run of train questions whose scores pick the rows: "
+            "greedy, one reply a question, no retry, such as --split train --limit 3000.",
+        ),
+    ],
+    seed: Annotated[
+        int, typer.Option(min=0, help="Which of the questions it solved stay, by hash.")
+    ] = 0,
+    out: Annotated[
+        Path | None, typer.Option(help="Where the <run_id> folders go (default data/grpo).")
+    ] = None,
+) -> None:
+    """Pick GRPO's rows from an eval of train questions and save them as <out>/<run_id>/.
+
+    Every question the run's reply got wrong stays, and 30% of those it got right; those
+    on a rowless database or whose gold query took over 1 s in the gold cache are left
+    out. rows.jsonl holds the rows kept and summary.json what was kept by hardness.
+    forge train grpo trains on them when grpo.filter_from names the run.
+    """
+    from forge.eval.run_files import RunUnfinished
+    from forge.ops.paths import RepoRootNotFound
+    from forge.train.curriculum import build_filter, render_summary, save_filter
+
+    try:
+        found = build_filter(filter_from, seed=seed)
+        folder = save_filter(found, out)
+    # OSError covers missing data, a run that isn't there and a failed write; ValueError
+    # a run the filter can't read (RunCorrupt among them), a failing gold and SplitLeak.
+    except (OSError, RepoRootNotFound, RunUnfinished, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    summary = found.summary
+    adapter = "" if summary.adapter_ref is None else f" with adapter {summary.adapter_ref}"
+    typer.echo(f"eval run {summary.eval_run}: {summary.model_ref}{adapter}")
+    typer.echo(
+        f"kept the wrong replies and {summary.keep_solved:.0%} of the right ones (seed "
+        f"{summary.seed}); left out rowless databases and gold over {summary.max_gold_ms:g} ms\n"
+    )
+    typer.echo(render_summary(summary) + "\n")
+    typer.echo(f"grpo rows: {folder}\nhash: {summary.hash}")
+
+
 @data_app.command("cache-gold")
 def data_cache_gold(
     split: Annotated[

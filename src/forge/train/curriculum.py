@@ -4,10 +4,11 @@ GRPO learns from the spread of rewards within a group. A prompt the starting mod
 solves, or never does, gives every reply of its group the same reward and so no
 advantage, and the GPU time spent on it teaches nothing. The filter deals with that.
 
-``build_filter`` reads a finished eval run of the starting model on train questions, a
-subset of them such as the first 3,000 (``forge eval run --split train --limit 3000``),
-made greedy, one reply a question and no retry, so each score is the model's one best
-answer (``check_filter_run``). Of the questions it scored (``select_rows``):
+``forge data build-grpo --filter-from <run_id>`` reads a finished eval run of the
+starting model on train questions, a subset of them such as the first 3,000 (``forge eval
+run --split train --limit 3000``), made greedy, one reply a question and no retry, so each
+score is the model's one best answer (``check_filter_run``). Of the questions it scored
+(``select_rows``):
 
 - those on a rowless database (``ROWLESS_DBS``) are left out, as everywhere in GRPO,
   since any query with an empty result matches their gold one;
@@ -22,14 +23,21 @@ answer (``check_filter_run``). Of the questions it scored (``select_rows``):
 Right and wrong are fast EX (``Score.ex_fast``), the comparator the execution reward uses
 (ADR-0008), since the reward is what a group's spread is made of.
 
-Only train is read: the eval run must be of train questions, each of them in
-``load_train()``.
+The rows go to ``data/grpo/<run_id>/`` (``save_filter``): ``rows.jsonl``, a line for each
+question kept, and ``summary.json`` beside it, with what was kept and left out by
+hardness and the hash of it all. They are kept rather than picked again when a run
+starts, because gold timings differ from one machine's cache to the next and a resumed
+run must train on the rows it started with. ``read_filter`` reads them back, checked
+against their hash and the data they were picked on. Only train is read: the eval run
+must be of train questions, each of them in ``load_train()``.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
+import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -37,7 +45,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import get_args
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from forge.core.hashing import canonical_json, sha256_hex
 from forge.core.types import Example, ExecResult, Hardness
@@ -47,10 +55,14 @@ from forge.data.splits import assert_train_only, load_train
 from forge.eval.config import check_run_id
 from forge.eval.gold_cache import split_gold
 from forge.eval.run_files import ADAPTER_DIGEST, StoredRun, read_run
-from forge.ops.paths import runs_dir
+from forge.ops.paths import repo_root, runs_dir
+
+log = logging.getLogger(__name__)
 
 KEEP_SOLVED = 0.3  # the share of the questions the eval solved that stay
 MAX_GOLD_MS = 1000.0  # gold slower than this, in the gold cache, is left out
+ROWS_FILE = "rows.jsonl"
+SUMMARY_FILE = "summary.json"
 LEVELS: tuple[Hardness, ...] = get_args(Hardness)
 
 
@@ -100,6 +112,10 @@ class GrpoFilter:
 
     rows: list[FilterRow]
     summary: FilterSummary
+
+
+def default_root() -> Path:
+    return repo_root() / "data" / "grpo"
 
 
 def build_filter(
@@ -257,6 +273,98 @@ def filter_hash(summary: FilterSummary, rows: Sequence[FilterRow]) -> str:
     """sha256 of the canonical JSON of the summary but its hash, and of the rows."""
     payload = {"summary": summary.model_dump(exclude={"hash"}), "rows": list(rows)}
     return sha256_hex(canonical_json(payload))
+
+
+def save_filter(found: GrpoFilter, root: Path | None = None) -> Path:
+    """Write the rows and their summary to ``<root>/<eval run id>/`` (default
+    ``data/grpo``) and return that folder.
+
+    A folder already there with the same hash holds these same rows, so it is kept as it
+    is; one with another hash, the rows of other settings or other data, is refused. The
+    files are written to a temporary folder beside it first, so a failed write never
+    leaves half of them under the run's name.
+    """
+    root = default_root() if root is None else root
+    target = root / found.summary.eval_run
+    if target.exists():
+        there = _read_folder(target).summary.hash
+        if there != found.summary.hash:
+            raise ValueError(
+                f"{target} holds other rows of run {found.summary.eval_run} (hash {there}, "
+                f"not {found.summary.hash}); remove it to build them again"
+            )
+        log.info("%s is already built", target)
+        return target
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".grpo-", dir=root) as scratch:
+        staged = Path(scratch) / target.name
+        staged.mkdir()
+        lines = "".join(row.model_dump_json() + "\n" for row in found.rows)
+        (staged / ROWS_FILE).write_text(lines, encoding="utf-8")
+        (staged / SUMMARY_FILE).write_text(
+            found.summary.model_dump_json(indent=2) + "\n", encoding="utf-8"
+        )
+        staged.rename(target)
+    return target
+
+
+def read_filter(
+    run_id: str, *, root: Path | None = None, data_dir: Path | None = None
+) -> GrpoFilter:
+    """The rows ``save_filter`` kept for eval run ``run_id`` under ``root`` (default
+    ``data/grpo``), checked against their hash and the data in ``data_dir``.
+
+    Raises ``FileNotFoundError`` when they were never built here, and ``ValueError`` for
+    files that can't be read, don't hash to their summary's hash, or were picked on
+    other data.
+    """
+    check_run_id(run_id)
+    folder = (default_root() if root is None else root) / run_id
+    if not (folder / SUMMARY_FILE).is_file():
+        raise FileNotFoundError(
+            f"no GRPO rows of eval run {run_id} in {folder}: build them with "
+            f"forge data build-grpo --filter-from {run_id}"
+        )
+    found = _read_folder(folder)
+    if found.summary.eval_run != run_id:
+        raise ValueError(f"{folder} holds the rows of run {found.summary.eval_run}, not {run_id}")
+    data_hash = data_manifest_hash(resolve_data_dir(data_dir))
+    if found.summary.data_manifest_hash != data_hash:
+        raise ValueError(
+            f"the GRPO rows in {folder} were picked on data "
+            f"{found.summary.data_manifest_hash[:12]}, and this data is {data_hash[:12]}; "
+            "build them again on this data"
+        )
+    return found
+
+
+def _read_folder(folder: Path) -> GrpoFilter:
+    try:
+        summary = FilterSummary.model_validate_json((folder / SUMMARY_FILE).read_bytes())
+        lines = (folder / ROWS_FILE).read_bytes().splitlines()
+        rows = [FilterRow.model_validate_json(line) for line in lines]
+    except ValidationError as exc:
+        raise ValueError(f"{folder} holds GRPO rows that can't be read: {exc}") from exc
+    if filter_hash(summary, rows) != summary.hash:
+        raise ValueError(
+            f"{folder / ROWS_FILE} and its summary don't hash to the summary's hash; build "
+            "them again"
+        )
+    return GrpoFilter(rows, summary)
+
+
+def render_summary(summary: FilterSummary) -> str:
+    """The summary's tallies as a table, a row a hardness level and one for all."""
+    names = list(Tally.model_fields)
+    table = [["hardness", *(name.replace("_", " ") for name in names)]]
+    for level, tally in [*summary.by_hardness.items(), ("all", summary.total)]:
+        table.append([level, *(str(getattr(tally, name)) for name in names)])
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    return "\n".join(
+        row[0].ljust(widths[0])
+        + "".join(f"  {cell:>{width}}" for cell, width in zip(row[1:], widths[1:], strict=True))
+        for row in table
+    )
 
 
 def _rank(text: str) -> str:
