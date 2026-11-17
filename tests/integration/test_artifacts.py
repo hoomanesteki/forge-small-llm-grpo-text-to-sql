@@ -244,11 +244,16 @@ I6_MODEL = "qwen2-5-coder-1-5b"
 HEADROOM = 0.75
 # FG-307's runs, each from one config, or for the chosen candidate from one of the
 # candidates' (docs/runbook.md, "Baselines").
-BASELINES = {
+# The candidates' runs on val, which choose the model and the prompt, ran first and are
+# checked on their own while the dev and reference runs wait (docs/runs/pending.yaml).
+VAL_BASELINES = {
     **{f"{name} val": [EVAL_CONFIGS / f"{name}-val.yaml"] for name in CANDIDATES},
     "chosen val p2": [EVAL_CONFIGS / f"{name}-val-p2.yaml" for name in CANDIDATES],
-    "reference val": [EVAL_CONFIGS / f"{REFERENCE}-val.yaml"],
     "I6 repeat": [EVAL_CONFIGS / f"{I6_MODEL}-val-100.yaml"],
+}
+BASELINES = {
+    **VAL_BASELINES,
+    "reference val": [EVAL_CONFIGS / f"{REFERENCE}-val.yaml"],
     "chosen dev": [EVAL_CONFIGS / f"{name}-dev.yaml" for name in CANDIDATES],
     "reference dev": [EVAL_CONFIGS / f"{REFERENCE}-dev.yaml"],
 }
@@ -299,11 +304,16 @@ def test_p2_is_checked_against_the_chosen_model() -> None:
 
 @pytest.mark.phase(3)
 def test_phase3_baseline_reports_present() -> None:
+    val = gpu_story_runs("FG-307", VAL_BASELINES)
+    # I6 on the T4: the first 100 val questions again agree with the whole run's.
+    i6 = compare_runs(val["I6 repeat"], val[f"{I6_MODEL} val"])
+    assert i6.ok, i6.describe()
+    for run in val.values():
+        assert _kaggle_rows(run.manifest.run_id) == ["kaggle"], run.manifest.run_id
+
+    # The rest skip, naming what is missing, while FG-307 waits in pending.yaml.
     runs = gpu_story_runs("FG-307", BASELINES)
     assert_p2_ran_for_the_chosen_model(runs)
-    # I6 on the T4: the first 100 val questions again agree with the whole run's.
-    i6 = compare_runs(runs["I6 repeat"], runs[f"{I6_MODEL} val"])
-    assert i6.ok, i6.describe()
     # Each dev run spent one look, logged with its reason (dev looks 1 and 2 of 6).
     uses = read_uses(ROOT / "docs" / "dev-usage.md")
     for name in ("chosen dev", "reference dev"):
@@ -318,10 +328,30 @@ def test_phase3_baseline_reports_present() -> None:
     assert f"\n- Chosen model: `{chosen}`\n" in adr
 
 
+def assert_rebuilds(runs: Mapping[str, StoredRun]) -> None:
+    """Each run's report, chart and compare reports match their rebuild from its files."""
+    data = resolve_data_dir()
+    for name, run in runs.items():
+        report, chart, *compares = rebuild(run.manifest.run_id, runs_root=RUNS, data_dir=data)
+        assert (report.diff, report.skipped) == ((), None), name
+        # Rendered on the laptop, so a Mac compares the chart; elsewhere it says it didn't.
+        assert chart.diff == (), name
+        assert [check.diff for check in compares] == [()] * len(compares), name
+
+
 @pytest.mark.phase(3)
 @pytest.mark.requires_full_data
 def test_phase3_baseline_reports_rebuild() -> None:
-    data = resolve_data_dir()
-    for name, run in gpu_story_runs("FG-307", BASELINES).items():
-        checks = rebuild(run.manifest.run_id, runs_root=RUNS, data_dir=data)
-        assert [check.diff for check in checks] == [()], name
+    val = gpu_story_runs("FG-307", VAL_BASELINES)
+    assert_rebuilds(val)
+    # The p2 run holds its comparison with the chosen model's p1 run (ADR-0007).
+    p1 = next(
+        run
+        for name, run in val.items()
+        if name.endswith(" val")
+        and run.manifest.model_ref == val["chosen val p2"].manifest.model_ref
+    )
+    compare = val["chosen val p2"].paths.report.parent / f"compare-{p1.manifest.run_id}.md"
+    assert compare.is_file()
+    later = gpu_story_runs("FG-307", BASELINES)
+    assert_rebuilds({name: run for name, run in later.items() if name not in VAL_BASELINES})

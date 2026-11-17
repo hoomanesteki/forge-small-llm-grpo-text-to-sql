@@ -1,0 +1,5 @@
+{"example_id":"spider-train-00016","sample_idx":0,"hardness":"easy","valid":true,"ex_fast":true,"ex_official":true,"error_class":null,"attempts":1,"first_try_ex":null}
+{"example_id":"spider-train-00017","sample_idx":0,"hardness":"easy","valid":true,"ex_fast":true,"ex_official":true,"error_class":null,"attempts":1,"first_try_ex":null}
+{"example_id":"spider-train-00018","sample_idx":0,"hardness":"easy","valid":true,"ex_fast":false,"ex_official":false,"error_class":"projection","attempts":1,"first_try_ex":null}
+{"example_id":"spider-train-00019","sample_idx":0,"hardness":"easy","valid":true,"ex_fast":false,"ex_official":false,"error_class":"projection","attempts":1,"first_try_ex":null}
+{"example_id":"spider-train-00020","sample_idx":0,"hardness":"easy","valid":true,"ex_fast":true,"ex_official":true,"error_class":null,"attempts":1,"first_try_ex":null}

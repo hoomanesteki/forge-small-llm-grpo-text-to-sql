@@ -58,11 +58,20 @@ its start to its end.
 | Run | Model | Made with | Report |
 |---|---|---|---|
 | [2026-11-16-smoke-kaggle-50-val-c8f4b41](2026-11-16-smoke-kaggle-50-val-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/smoke-kaggle-50-val.yaml`: the first 50 val questions, greedy, prompt p1, vLLM in fp16 on a T4. Integration checkpoint 3's job (`scripts/smoke/phase_3.sh`) and FG-303's real eval job: a check of the GPU path, not a baseline | [val-report.md](2026-11-16-smoke-kaggle-50-val-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen3-1-7b-val-c8f4b41](2026-11-16-qwen3-1-7b-val-c8f4b41/) | `Qwen/Qwen3-1.7B` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen3-1-7b-val.yaml`: FG-307's candidate on the whole val split, greedy, prompt p1, non-thinking, vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen3-1-7b-val-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen3-4b-val-c8f4b41](2026-11-16-qwen3-4b-val-c8f4b41/) | `Qwen/Qwen3-4B` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen3-4b-val.yaml`: FG-307's candidate on the whole val split, greedy, prompt p1, non-thinking, vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen3-4b-val-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41](2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen2-5-coder-1-5b-val.yaml`: FG-307's candidate on the whole val split, greedy, prompt p1, vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41](2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen2-5-coder-1-5b-val-100.yaml`: the first 100 val questions again, for I6, vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41](2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen2-5-coder-1-5b-val-p2.yaml`: the whole val split, greedy, prompt p2 (ADR-0007), vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41/eval/val-report.md), and p2 against p1: [compare-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41.md](2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41/eval/compare-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41.md) |
 
-Its report was written in the kernel and matches its rebuild on the laptop with the full
-data; its chart was drawn on Linux, which a Mac's rebuild says it can't compare. It was made
-from `c8f4b41`, a commit on `dev`, so it needs no `run/` tag. To make it again from there:
-`scripts/smoke/phase_3.sh <run_id>`.
+The 50-question job's report was written in the kernel and matches its rebuild on the laptop
+with the full data; its chart was drawn on Linux, which a Mac's rebuild says it can't compare.
+FG-307's baselines were rendered again on the laptop from their stored files
+(`FORGE_RUNS_DIR=docs/runs FORGE_DATA_DIR=data/spider uv run forge report run <run_id>`), so a
+Mac's rebuild compares their charts too, and the p2 run's folder holds `forge report compare`'s
+report of it against the p1 run. All were made from `c8f4b41`, a commit on `dev`, so they need
+no `run/` tag. To make one again from there: the 50-question job with
+`scripts/smoke/phase_3.sh <run_id>`, a baseline as docs/runbook.md's "Baselines" says.
 
 ## Pending runs
 
