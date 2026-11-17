@@ -3,47 +3,12 @@
 # removes its entry in the same change and adds its ledger row. Nothing here is a result.
 # An entry with configs runs each of them, or, with pick, the one it names;
 # tests/integration/test_artifacts.py skips a story's run checks only while the story has
-# an entry here.
+# an entry here. An entry whose run was made, with its ledger row, but can't be committed
+# yet names it in run_id.
 pending:
   - story: FG-307
-    run: reference-val
-    platform: kaggle
-    accelerator: NvidiaTeslaT4
-    configs:
-      - configs/eval/qwen3-8b-val.yaml
-    est_gpu_hours: 0.45
-    status: blocked
-    since: 2026-11-17
-    blocked_on:
-      - the operator pushing it from FG-307's pushed commit, whose reference configs use p2
-        (ADR-0007); it is the first run to load the AWQ checkpoint Qwen/Qwen3-8B-AWQ on a
-        T4 (FG-398), since vLLM 0.33.0 has no bitsandbytes (FG-301), so it may still fail
-        at the load
-    how: docs/runbook.md, "Baselines", step 3
-    fills:
-      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
-      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
-      - docs/adr/0012-model-choice.md, the reference's val EX in its Measured section
-  - story: FG-307
-    run: chosen-dev
-    platform: kaggle
-    accelerator: NvidiaTeslaT4
-    configs:
-      - configs/eval/qwen2-5-coder-1-5b-dev.yaml
-    est_gpu_hours: 0.35
-    status: blocked
-    since: 2026-11-17
-    blocked_on:
-      - the operator pushing it from FG-307's pushed commit, whose config runs the model
-        ADR-0012 chose, Qwen/Qwen2.5-Coder-1.5B-Instruct, with p2 (ADR-0007)
-    how: docs/runbook.md, "Baselines", step 5
-    fills:
-      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
-      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
-      - docs/dev-usage.md, dev look 1
-      - docs/adr/0012-model-choice.md, the chosen model's dev EX in its Measured section
-  - story: FG-307
     run: reference-dev
+    run_id: 2026-11-17-qwen3-8b-awq-dev-d2d6a3a
     platform: kaggle
     accelerator: NvidiaTeslaT4
     configs:
@@ -52,12 +17,14 @@ pending:
     status: blocked
     since: 2026-11-17
     blocked_on:
-      - the operator pushing it from FG-307's pushed commit, with p2 (ADR-0007), once the
-        reference's val run above has loaded the AWQ checkpoint on a T4 (FG-398), since
-        this push spends a dev look
-    how: docs/runbook.md, "Baselines", step 5
+      - the product owner's decision on I5 for this run. It ran from d2d6a3a on 2026-11-17
+        as dev look 2 (docs/dev-usage.md), and its ledger row is in, but its report says
+        "The checkers disagree on 25 samples" of its 1,034, more than the 2% that
+        tests/integration/test_invariants.py::test_i5_agreement_on_committed_runs allows
+        each committed run (I5, plan section 4), so committing it fails that test, which
+        CONTRIBUTING rule 3 keeps as it is. Until then the run stays in runs/<run_id>/,
+        as forge runs pull --store kaggle left it
+    how: docs/runbook.md, "Baselines", step 5, whose run is made, so render its report and copy it
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
-      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
-      - docs/dev-usage.md, dev look 2
       - docs/adr/0012-model-choice.md, the reference's dev EX in its Measured section

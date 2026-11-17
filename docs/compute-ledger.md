@@ -13,3 +13,6 @@ output` and `forge runs pull`, one a GPU session. Dates are UTC.
 | 2026-11-16 | kaggle | Tesla T4 | 0.21 | 2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41 | eval Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a on val, prompt p1, finished | 0.00 |
 | 2026-11-16 | kaggle | Tesla T4 | 0.17 | 2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41 | eval Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a on val, prompt p1, limit 100, finished | 0.00 |
 | 2026-11-16 | kaggle | Tesla T4 | 0.15 | 2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41 | eval Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a on val, prompt p2, finished | 0.00 |
+| 2026-11-17 | kaggle | Tesla T4 | 0.21 | 2026-11-17-qwen3-8b-awq-val-2f77281 | eval Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79 on val, prompt p2, finished | 0.00 |
+| 2026-11-17 | kaggle | Tesla T4 | 0.20 | 2026-11-17-qwen2-5-coder-1-5b-dev-2f77281 | eval Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a on dev, prompt p2, finished | 0.00 |
+| 2026-11-17 | kaggle | Tesla T4 | 0.25 | 2026-11-17-qwen3-8b-awq-dev-d2d6a3a | eval Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79 on dev, prompt p2, finished | 0.00 |

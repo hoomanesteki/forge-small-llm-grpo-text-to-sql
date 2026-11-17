@@ -404,7 +404,10 @@ Steps 1, 2 and 4 ran from `c8f4b41` on 2026-11-16 and are committed under `docs/
 rule chose `Qwen/Qwen2.5-Coder-1.5B-Instruct` (ADR-0012), and p2 won (ADR-0007). So steps 3
 and 5 run `qwen3-8b-val`, `qwen2-5-coder-1-5b-dev` and `qwen3-8b-dev`, whose configs use p2
 since FG-307 recorded those runs: push them from that commit or a later one, never from
-`c8f4b41`, where they still say p1.
+`c8f4b41`, where they still say p1. They ran on 2026-11-17: the reference's val run and the
+chosen model's dev run from `2f77281`, and the reference's dev run from `d2d6a3a`, once its
+val run had loaded the AWQ checkpoint. All but the reference's dev run are committed
+(`docs/runs/pending.yaml` says why).
 
 The same model's runs from one commit on one day would share a default run id, so name each:
 `--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Kaggle

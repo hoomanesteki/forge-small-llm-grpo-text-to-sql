@@ -34,8 +34,8 @@ on 2026-11-16, reading metadata only, and checks them again whenever it is run:
   in 4-bit with bitsandbytes, but FG-301 found vLLM 0.33.0 has no such quantization (the
   spike's `vllm:Qwen/Qwen3-8B:bnb` stage, whose error lists `awq` among the methods it
   has), so FG-398 moved it to AWQ. vLLM's AWQ kernels need compute capability 7.5, which
-  the T4 has; their Marlin form needs 8.0, so a T4 gets the plain ones. No run has loaded
-  the checkpoint on a T4: the reference's own val run is the first.
+  the T4 has; their Marlin form needs 8.0, so a T4 gets the plain ones. The reference's
+  val run was the first to load the checkpoint on a T4, and it did (Measured).
 - Every candidate's run is greedy on the whole val split with prompt p1, through vLLM in
   fp16 on a Kaggle T4 (FG-306), one kernel job per config in `configs/eval/`. Qwen3 runs in
   non-thinking mode (ADR-0007). The runs after the choice, the chosen model's dev run and
@@ -119,19 +119,52 @@ Both readings choose the same model. As stored, Qwen2.5-Coder-1.5B-Instruct lead
 candidate by a significant margin; read whole, Qwen3-4B's official EX passes it, but not
 significantly, and the tie-break of rule 3 takes the model with fewer parameters.
 
-I5 holds on the real replies: the reports' checkers disagree on 17, 4 and 9 of the 872
-samples (`test_i5_agreement_on_committed_runs`). I6 holds on the T4: the first 100 val
-questions again (run `2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41`), by
-`forge.eval.reproducibility.compare_runs` against the whole run, "official EX 67.0% and
-67.0% on the 100 samples both scored, 0.0 points apart (I6 allows 0.5); 0 verdicts and 1
-replies differ" (`test_phase3_baseline_reports_present`).
+I6 holds on the T4: the first 100 val questions again (run
+`2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41`), by `forge.eval.reproducibility.compare_runs`
+against the whole run, "official EX 67.0% and 67.0% on the 100 samples both scored, 0.0
+points apart (I6 allows 0.5); 0 verdicts and 1 replies differ"
+(`test_phase3_baseline_reports_present`).
 
-The rest comes with FG-307's last three runs (its part B), still in
-`docs/runs/pending.yaml`: the reference on val, and the chosen model and the reference on
-dev (rule 4), all three with p2. Their numbers go here from their reports; none of them can
-change the choice, which is made on val.
-Nothing here is typed by hand: `tests/integration/test_artifacts.py` checks the table
-against the reports, and `tests/unit/test_count_extraction.py` and
+FG-307, 2026-11-17: the reference, Qwen3-8B in 4-bit as Qwen's AWQ checkpoint
+`Qwen/Qwen3-8B-AWQ`, through vLLM 0.33.0 (`kaggle/requirements-gpu.txt`) on a Kaggle T4, on
+the whole val split with p2, from `2f77281`. It is the first run of the checkpoint on a T4,
+and it loaded and scored:
+
+| Reference | Run | Official EX [95% interval] | Fast EX | Valid SQL | Easy | Medium | Hard | Extra |
+|---|---|---|---|---|---:|---:|---:|---:|
+| `Qwen/Qwen3-8B-AWQ` | [2026-11-17-qwen3-8b-awq-val-2f77281](../runs/2026-11-17-qwen3-8b-awq-val-2f77281/eval/val-report.md) | 71.1% [67.2%, 74.9%] | 71.1% [67.2%, 74.7%] | 97.1% [95.7%, 98.4%] | 82.4% | 78.1% | 56.7% | 54.1% |
+
+It ran with p2, where the candidates above ran with p1, so the run to set beside it is the
+chosen model's p2 run (ADR-0007). How `extract_sql` read its replies, from
+`uv run python scripts/count_extraction.py` on its run:
+
+| Run | Replies | sql block | Rule 3 | No SQL | Rule 3 cut a query | Cut, by class |
+|---|---|---|---|---|---|---|
+| 2026-11-17-qwen3-8b-awq-val-2f77281 | 872 | 872 | 0 | 0 | 0 | - |
+
+Then rule 4, with p2: the chosen model on dev once, with `--reason baseline`, from
+`2f77281` (dev look 1, `docs/dev-usage.md`):
+
+| Model | Run | Official EX [95% interval] |
+|---|---|---|
+| `Qwen/Qwen2.5-Coder-1.5B-Instruct` | [2026-11-17-qwen2-5-coder-1-5b-dev-2f77281](../runs/2026-11-17-qwen2-5-coder-1-5b-dev-2f77281/eval/dev-report.md) | 67.2% [63.6%, 70.7%] |
+
+The reference's dev run, dev look 2, ran from `d2d6a3a`, but isn't committed: it waits in
+`docs/runs/pending.yaml` for the product owner's decision on I5, which its replies don't
+meet as `test_i5_agreement_on_committed_runs` reads it, run by run. Its dev numbers go here
+once it is committed. Nothing is chosen on dev: the choice stands from val.
+
+I5 holds on the replies of each run committed here (`test_i5_agreement_on_committed_runs`),
+as each report puts it:
+
+- [2026-11-16-qwen3-1-7b-val-c8f4b41](../runs/2026-11-16-qwen3-1-7b-val-c8f4b41/eval/val-report.md): The checkers disagree on 17 samples: only fast EX matches 5, and only official EX 12.
+- [2026-11-16-qwen3-4b-val-c8f4b41](../runs/2026-11-16-qwen3-4b-val-c8f4b41/eval/val-report.md): The checkers disagree on 4 samples: only fast EX matches 1, and only official EX 3.
+- [2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41](../runs/2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41/eval/val-report.md): The checkers disagree on 9 samples: only fast EX matches 4, and only official EX 5.
+- [2026-11-17-qwen3-8b-awq-val-2f77281](../runs/2026-11-17-qwen3-8b-awq-val-2f77281/eval/val-report.md): The checkers disagree on 14 samples: only fast EX matches 7, and only official EX 7.
+- [2026-11-17-qwen2-5-coder-1-5b-dev-2f77281](../runs/2026-11-17-qwen2-5-coder-1-5b-dev-2f77281/eval/dev-report.md): The checkers disagree on 17 samples: only fast EX matches 6, and only official EX 11.
+
+Nothing here is typed by hand: `tests/integration/test_artifacts.py` checks the tables and
+the I5 lines against the reports, and `tests/unit/test_count_extraction.py` and
 `test_check_choice_extraction.py` check the scripts' output above.
 
 ## Consequences
@@ -143,3 +176,5 @@ against the reports, and `tests/unit/test_count_extraction.py` and
   3.8 budgets its training and evaluations at 1.7B's measured rates.
 - Its val official EX, 65.3%, is below the 75% headroom line, and its hard and extra
   questions, at 59.3% and 37.6%, leave training the most room.
+- Its dev run with p2 (Measured) is the baseline the trained model's dev evaluation is
+  set against, with the same prompt (plan section 3.6).
