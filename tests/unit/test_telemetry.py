@@ -1,20 +1,26 @@
 """GRPO telemetry (FG-506): the alert rules on synthetic metric streams, the rollouts
-the reward functions record, and the telemetry a step's line holds."""
+the reward functions record, and the telemetry callback driven by hand, event by event."""
 
 from __future__ import annotations
 
 import asyncio
 import functools
+import json
+import logging
 import math
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from transformers import TrainerControl, TrainerState
 
 from forge.eval.run_files import RunCorrupt
-from forge.train.config import RewardsConfig
+from forge.ops.hub import LocalRunStore, StoreUnavailable
+from forge.train.callbacks import TelemetryCallback, training_callbacks
+from forge.train.config import OpsConfig, RewardsConfig
 from forge.train.rewards import Rewards
 from forge.train.telemetry import (
     LENGTH_FACTOR,
@@ -32,6 +38,7 @@ from forge.train.telemetry import (
 )
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "telemetry" / "grpo-metrics.jsonl"
+RUN = "2026-11-20-qwen3-1p7b-grpo-abc1234"
 
 
 def _stream(monitor: AlertMonitor, key: str, values: Sequence[float], start: int = 1) -> list[Any]:
@@ -241,6 +248,127 @@ def test_telemetry_names_match_their_sources() -> None:
     names = {reward.__name__ for reward in Rewards({}, None, RewardsConfig()).functions}  # type: ignore[arg-type]
     for source in RATE_SOURCES.values():
         assert source.split("/")[1] in names
+
+
+def _log(callback: TelemetryCallback, state: TrainerState, step: int, **logs: Any) -> None:
+    """The trainer's log of ``step``, which reads none of its arguments but the logs."""
+    state.global_step = step
+    callback.on_log(SimpleNamespace(), state, TrainerControl(), logs=logs)
+
+
+@pytest.mark.phase(5)
+def test_telemetry_callback_writes_lines_alerts_and_samples(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalRunStore(tmp_path / "store")
+    run_dir = tmp_path / "run"
+    seconds = iter(range(1000))
+    recorder = RolloutRecorder(group_size=2)
+    fake = FakeRewards()
+    functions = recorder.wrap([fake.match, fake.penalty])
+    callback = TelemetryCallback(
+        run_dir / "metrics.jsonl",
+        recorder,
+        store=store,
+        run_id=RUN,
+        now=lambda: datetime(2026, 11, 20, 9, 0, next(seconds) % 60, tzinfo=UTC),
+        samples_every=2,
+        sample_prompts=3,
+    )
+    args: Any = SimpleNamespace(output_dir=str(tmp_path / "out"))
+    state, control = TrainerState(max_steps=40), TrainerControl()
+    callback.on_train_begin(args, state, control)
+    assert (run_dir / "alerts.jsonl").read_bytes() == b""  # no alerts is an empty file
+
+    for step in range(1, 25):
+        # Two prompts a step, each with two completions that score the same.
+        _batch(functions, ["right"] * 4, [f"q{step}", f"q{step}", f"r{step}", f"r{step}"])
+        state.global_step = step
+        callback.on_step_end(args, state, control)
+        with caplog.at_level(logging.INFO, logger="forge.train.callbacks"):
+            _log(
+                callback,
+                state,
+                step,
+                reward=1.0,
+                frac_reward_zero_std=None,  # left to the rollouts: every group is flat
+                **{"rewards/validity_reward/mean": 1.0, "completions/mean_length": 1.0},
+            )
+        if step == 4:
+            callback.on_save(args, state, control)
+    callback.write(24, {"val/ex_fast": 0.4})  # the in-training eval's line, as it is
+    _log(callback, state, 24, train_runtime=3.0)  # the run's summary, as it is
+
+    lines = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    first = lines[0]
+    assert (first["step"], first["frac_reward_zero_std"], first["sql/valid_rate"]) == (1, 1.0, 1.0)
+    assert first["completions/p95_length"] == 1.0
+    assert lines[-2] == {"step": 24, "time": lines[-2]["time"], "val/ex_fast": 0.4}
+    assert lines[-1]["train_runtime"] == 3.0 and "sql/valid_rate" not in lines[-1]
+
+    # Every group flat from step 1, so the alert at step 20: in the log and in alerts.jsonl.
+    alerts = [json.loads(line) for line in (run_dir / "alerts.jsonl").read_text().splitlines()]
+    assert [(a["step"], a["rule"], a["state"]) for a in alerts] == [(20, "zero_variance", "fired")]
+    assert f"telemetry: run {RUN}, step 20: alert zero_variance: 100% of groups" in caplog.text
+
+    # A dump every 2 steps, of the latest 3 prompts with both their completions each.
+    samples = run_dir / "samples"
+    assert sorted(p.name for p in samples.iterdir())[:2] == [
+        "step-000002.jsonl",
+        "step-000004.jsonl",
+    ]
+    dump = [json.loads(line) for line in (samples / "step-000004.jsonl").read_text().splitlines()]
+    assert [(d["step"], d["example_id"]) for d in dump] == [(3, "r3"), (4, "q4"), (4, "r4")]
+    assert dump[0]["db_id"] == "dorm_1" and dump[0]["gold_sql"] == "SELECT 1"
+    assert dump[0]["prompt"] == [{"role": "user", "content": "question r3"}]
+    assert [c["rewards"] for c in dump[0]["completions"]] == [{"match": 1.0, "penalty": 0.0}] * 2
+    assert [c["reward"] for c in dump[0]["completions"]] == [1.0, 1.0]
+
+    # The save at step 4 pushed what there was, and the end pushes the rest.
+    stored = store.root / RUN
+    assert sorted(p.name for p in (stored / "samples").iterdir()) == [
+        "step-000002.jsonl",
+        "step-000004.jsonl",
+    ]
+
+    def unavailable(*args: object, **kwargs: object) -> str:
+        raise StoreUnavailable("uploading failed 4 times")
+
+    monkeypatch.setattr(store, "put_file", unavailable)
+    callback.on_train_end(args, state, control)
+    assert len(callback.unpushed) == 10  # steps 6 to 24 wait for the next push
+    monkeypatch.undo()
+    callback.on_train_end(args, state, control)
+    assert callback.unpushed == {}
+    assert (stored / "alerts.jsonl").read_bytes() == (run_dir / "alerts.jsonl").read_bytes()
+    assert len(list((stored / "samples").iterdir())) == 12
+
+    # A resumed session replays the run's metrics up to its checkpoint's step: from step
+    # 10 the alert hasn't fired, and alerts.jsonl says so until the steps after say more.
+    again = TelemetryCallback(run_dir / "metrics.jsonl", RolloutRecorder(2))
+    state.global_step = 10
+    again.on_train_begin(args, state, control)
+    assert (run_dir / "alerts.jsonl").read_bytes() == b""
+    state.global_step = 21
+    again.on_train_begin(args, state, control)
+    assert again.monitor.active.keys() == {"zero_variance"}
+    assert len((run_dir / "alerts.jsonl").read_text().splitlines()) == 1
+
+    with pytest.raises(ValueError, match="every 0 of 12"):
+        TelemetryCallback(run_dir / "metrics.jsonl", RolloutRecorder(2), samples_every=0)
+
+
+@pytest.mark.phase(5)
+def test_training_callbacks_record_telemetry_for_grpo(tmp_path: Path) -> None:
+    store, ops = LocalRunStore(tmp_path / "store"), OpsConfig()
+    path = tmp_path / "run" / "metrics.jsonl"
+    plain = training_callbacks(ops, store, RUN, metrics_path=path, env={})
+    assert not any(isinstance(c, TelemetryCallback) for c in plain)
+    recorder = RolloutRecorder(6)
+    grpo = training_callbacks(ops, store, RUN, metrics_path=path, env={}, rollouts=recorder)
+    (telemetry,) = [c for c in grpo if isinstance(c, TelemetryCallback)]
+    assert (telemetry.rollouts, telemetry.path, telemetry.store) == (recorder, path, store)
+    assert (telemetry.samples_every, telemetry.sample_prompts) == (50, 12)
 
 
 @pytest.mark.phase(5)

@@ -1,8 +1,8 @@
 """What a GRPO run's metrics say about whether it is learning, while it trains and after
 (FG-506): the telemetry each step's line holds, and the alerts it sets off.
 
-Each step's line in a GRPO run's ``metrics.jsonl`` holds the trainer's logs. TRL 1.18
-logs these at every step, with ``logging_steps=1``:
+``forge.train.callbacks.TelemetryCallback`` writes each step's line in ``metrics.jsonl``.
+TRL 1.18 logs these at every step, with ``logging_steps=1``:
 
 - ``rewards/<name>/mean`` and ``rewards/<name>/std`` of each reward function, and
   ``reward`` and ``reward_std`` of their weighted sum;
@@ -36,8 +36,10 @@ learning, each as an event when it starts holding and another when it stops:
   run's first logged step's, which stands for step 0, the length before any update;
 - ``valid_drop``: ``sql/valid_rate`` more than ``VALID_DROP`` (20 points) below its peak.
 
-The events follow from the metrics alone, so anyone reading a run's metrics finds the
-same ones.
+An event is a line of the run's ``alerts.jsonl`` (``forge.ops.hub.ALERTS_FILE``), which
+the manifest's outputs name ``alerts``: ``RunManifest`` has no field for them, and the
+contract stays as it is. The events follow from the metrics alone, so the training
+callback and anyone reading a run's metrics find the same ones.
 
 Nothing here imports transformers or torch, so reading a run's metrics needs no cpu
 extra.
@@ -59,6 +61,7 @@ from forge.eval.run_files import RunCorrupt
 if TYPE_CHECKING:
     from forge.train.backends import RewardFunc
 
+REWARD_KEY = "reward"  # in every training step's log, and in no other
 ZERO_STD_KEY = "frac_reward_zero_std"
 MEAN_LENGTH_KEY = "completions/mean_length"
 P95_LENGTH_KEY = "completions/p95_length"

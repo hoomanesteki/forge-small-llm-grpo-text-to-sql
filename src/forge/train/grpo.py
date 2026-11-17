@@ -30,6 +30,11 @@ One run, in order (the starting values are ADR-0011's):
    train split's gold results) and the in-training eval share. With ``grpo.eval_every``
    the eval (``forge.eval.callbacks``) comes last among the callbacks, after those every
    job has (``forge.train.callbacks``), and its lines go to the same ``metrics.jsonl``.
+   The trainer scores with the rewards a ``RolloutRecorder`` wraps, so the metrics
+   callback is a ``TelemetryCallback``: each step's line holds the run's telemetry, its
+   alerts go to ``alerts.jsonl`` and samples of its rollouts to ``samples/``
+   (``forge.train.telemetry``), which the manifest's outputs name ``alerts`` and
+   ``samples``.
 6. Training, then the adapter in ``checkpoints/final`` and the manifest ``finished``; or
    the time guard's checkpoint and ``stopped_time_guard``; or ``failed``, with the
    traceback in ``error.txt``. Its outputs hold the digest of each checkpoint kept.
@@ -69,7 +74,14 @@ from forge.eval.config import Host, check_run_id
 from forge.eval.gold_cache import split_gold
 from forge.eval.run_files import RunConflict, write_atomic
 from forge.ops.adapters import adapter_folder, adapter_sha256, checkpoint_ref, digest_output
-from forge.ops.hub import FINAL, METRICS_FILE, LocalRunStore, RunNotFound
+from forge.ops.hub import (
+    ALERTS_FILE,
+    FINAL,
+    METRICS_FILE,
+    SAMPLES_DIR,
+    LocalRunStore,
+    RunNotFound,
+)
 from forge.ops.manifest import EndStatus, accelerator, build_manifest, close, code_sha
 from forge.ops.paths import runs_dir
 from forge.ops.sessions import SESSIONS_FILE, begin, end
@@ -80,6 +92,7 @@ from forge.train.curriculum import read_filter
 from forge.train.rewards import Rewards, reward_pool
 from forge.train.sft import CONFIG_FILE, ERROR_FILE, RunExists, platform_for, run_outputs
 from forge.train.sft_data import build_sft_dataset
+from forge.train.telemetry import RolloutRecorder
 
 log = logging.getLogger(__name__)
 
@@ -317,8 +330,15 @@ def run_grpo(
     )
 
     # Made now, so the time guard counts the model's loading too.
+    rollouts = RolloutRecorder(grpo.num_generations)
     callbacks = training_callbacks(
-        config.ops, store, run_id, metrics_path=run_dir / METRICS_FILE, env=env, clock=clock
+        config.ops,
+        store,
+        run_id,
+        metrics_path=run_dir / METRICS_FILE,
+        env=env,
+        clock=clock,
+        rollouts=rollouts,
     )
     guard = next(c for c in callbacks if isinstance(c, TimeGuardCallback))
     checkpoints = next(c for c in callbacks if isinstance(c, CheckpointCallback))
@@ -359,6 +379,7 @@ def run_grpo(
             )
     with reward_pool(root, workers=workers) as pool:
         rewards = Rewards(gold, pool, config.rewards)
+        functions = rollouts.wrap(rewards.functions, rewards.weights)
         if grpo.eval_every is not None:
             callbacks.append(
                 val_eval_callback(
@@ -389,7 +410,7 @@ def run_grpo(
                     model,
                     tokenizer,
                     rows,
-                    rewards.functions,
+                    functions,
                     grpo,
                     callbacks,
                     output_dir=work,
@@ -428,8 +449,11 @@ def _check_resumable(previous: RunManifest, **session: str) -> None:
 
 
 def _outputs(run_dir: Path, kept: Mapping[float, int] | None = None) -> dict[str, str]:
-    """A training run's outputs (``forge.train.sft.run_outputs``) and its sessions file."""
-    return {**run_outputs(run_dir, kept), "sessions": SESSIONS_FILE}
+    """A training run's outputs (``forge.train.sft.run_outputs``), its sessions file, and
+    its telemetry's alerts and samples once it has them."""
+    telemetry = {"alerts": ALERTS_FILE, "samples": SAMPLES_DIR}
+    found = {name: rel for name, rel in telemetry.items() if (run_dir / rel).exists()}
+    return {**run_outputs(run_dir, kept), "sessions": SESSIONS_FILE, **found}
 
 
 def _start(

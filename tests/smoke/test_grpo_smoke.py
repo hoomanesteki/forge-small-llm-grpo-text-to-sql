@@ -34,11 +34,12 @@ from forge.ops.manifest import config_hash
 from forge.ops.sessions import read_sessions
 from forge.train import backends
 from forge.train.backends import TrlBackend
-from forge.train.callbacks import MetricsCallback
+from forge.train.callbacks import MetricsCallback, TelemetryCallback
 from forge.train.config import TrainConfig, load_train_config
 from forge.train.grpo import grpo_rows, run_grpo
 from forge.train.rewards import Rewards, reward_pool
 from forge.train.sft import RunExists
+from forge.train.telemetry import RolloutRecorder
 from tests.fakes import sft_run_folder
 from tests.report_trace import read_stored
 
@@ -107,6 +108,14 @@ def test_grpo_two_steps_cpu(
     for line in steps:
         for name in REWARDS:
             assert {f"rewards/{name}/mean", f"rewards/{name}/std"} <= line.keys(), name
+        # The telemetry beside them (FG-506): the random model writes no SQL, so no
+        # query runs or matches, and every rollout runs to the 16-token limit.
+        assert (line["sql/valid_rate"], line["sql/execution_match_rate"]) == (0.0, 0.0)
+        assert line["completions/p95_length"] == 16.0
+        assert line["frac_reward_zero_std"] == 1.0
+    # Two steps set off no alert, and the manifest names the empty record that says so.
+    assert manifest.outputs["alerts"] == "alerts.jsonl"
+    assert (run_dir / "alerts.jsonl").read_bytes() == b""
     # The in-training eval at step 2, on every one of the fixture's val questions.
     (evaluated,) = [line for line in lines if "val/ex_fast" in line]
     assert evaluated["step"] == 2 and evaluated["val/questions"] == len(load_val())
@@ -296,3 +305,52 @@ def test_grpo_rewards_score_replies_on_the_fixture_databases(
         assert means == [1.0, 1.0, 1.0, 0.0]
         assert line["reward"] == pytest.approx(1.15)
         assert line["completions/mean_length"] == len(ids)  # it ended its turn there
+
+
+@pytest.mark.phase(5)
+def test_telemetry_records_real_rollouts(
+    spider_mini: Path, tiny_model_ref: str, tmp_path: Path
+) -> None:
+    # The rewards as TRL 1.18 calls them, through the recorder's wrappers: the samples
+    # hold what each function scored, and the lines what TRL doesn't log.
+    config = _with_grpo(load_train_config(SMOKE_CONFIG), eval_every=None)
+    assert config.grpo is not None
+    backend = TrlBackend("cpu")
+    model, tokenizer = backend.load(tiny_model_ref, config.lora, load_in_4bit=False, seed=0)
+    rows, _ = grpo_rows(config, tokenizer, data_dir=spider_mini)
+    gold = split_gold("train", data_dir=spider_mini, cache_root=tmp_path / "cache").results
+    recorder = RolloutRecorder(config.grpo.num_generations)
+    run_dir = tmp_path / "run"
+    telemetry = TelemetryCallback(run_dir / "metrics.jsonl", recorder, samples_every=1)
+    with reward_pool(spider_mini, workers=1) as pool:
+        rewards = Rewards(gold, pool, config.rewards)
+        backend.grpo(
+            model,
+            tokenizer,
+            rows,
+            recorder.wrap(rewards.functions, rewards.weights),
+            config.grpo,
+            [telemetry],
+            output_dir=tmp_path / "out",
+            seed=0,
+            reward_weights=rewards.weights,
+        )
+
+    steps = [line for line in _lines(run_dir / "metrics.jsonl") if "reward" in line]
+    # TRL still logs each reward by its own name.
+    assert all(f"rewards/{name}/mean" in line for line in steps for name in REWARDS)
+    assert [line["completions/p95_length"] for line in steps] == [16.0, 16.0]
+    # One prompt a step, so step 2's dump holds the latest two: step 1's and its own.
+    first = _lines(run_dir / "samples" / "step-000001.jsonl")
+    dumped = _lines(run_dir / "samples" / "step-000002.jsonl")
+    assert [sample["step"] for sample in dumped] == [1, 2] and dumped[0] == first[0]
+    for sample in dumped:
+        # Each with the row it came from and its group of 2 completions.
+        assert sample["example_id"] in set(rows["example_id"])
+        assert sample["prompt"][0]["role"] == "system"
+        assert len(sample["completions"]) == 2
+        for completion in sample["completions"]:
+            assert completion["completion"][0]["role"] == "assistant"
+            assert completion["tokens"] == 16
+            assert completion["rewards"] == dict.fromkeys(REWARDS, 0.0)
+            assert completion["reward"] == 0.0

@@ -36,6 +36,12 @@
 - ``MetricsCallback`` appends each log the trainer writes to ``metrics.jsonl`` as one
   JSON line, and what another callback hands its ``write``, and pushes the file to the
   run at every save and at the end, failing as ``CheckpointCallback`` does.
+- ``TelemetryCallback`` is GRPO's ``MetricsCallback``, with its run's telemetry
+  (``forge.train.telemetry``, FG-506): each step's line also holds what TRL doesn't log,
+  from the rollouts a ``RolloutRecorder`` saw the rewards score; each alert event goes to
+  the log and to ``alerts.jsonl`` beside the metrics; and every ``SAMPLES_EVERY`` steps
+  the latest ``SAMPLE_PROMPTS`` prompts, with all their completions and rewards, go to
+  ``samples/step-NNNNNN.jsonl``. It pushes those files with the metrics.
 - ``wandb_callback`` adds transformers' W&B callback when ``WANDB_API_KEY`` is set and
   wandb is installed. Neither is needed (ADR-0013): the JSONL metrics are always there.
 """
@@ -48,6 +54,7 @@ import math
 import os
 import shutil
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,11 +63,29 @@ from typing import Any
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
+from forge.eval.run_files import write_atomic
 from forge.ops.dotenv import forge_env
-from forge.ops.hub import METRICS_FILE, RunStore, StoreUnavailable, checkpoint_dir
+from forge.ops.hub import (
+    ALERTS_FILE,
+    METRICS_FILE,
+    RunStore,
+    StoreUnavailable,
+    checkpoint_dir,
+    samples_file,
+)
 from forge.ops.manifest import close
 from forge.ops.timeguard import Clock, Deadline
 from forge.train.config import OpsConfig
+from forge.train.telemetry import (
+    REWARD_KEY,
+    AlertEvent,
+    AlertMonitor,
+    RolloutGroup,
+    RolloutRecorder,
+    read_file_lines,
+    sample_line,
+    step_metrics,
+)
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +93,8 @@ WANDB_KEY = "WANDB_API_KEY"
 # What a kept checkpoint the store hasn't taken is called in the output folder: a name the
 # trainer's rotation, which matches checkpoint-*, leaves alone.
 UNPUSHED_PREFIX = "unpushed-"
+SAMPLES_EVERY = 50  # steps between a GRPO run's sample dumps
+SAMPLE_PROMPTS = 12  # the prompts a dump holds, each with all its completions
 
 
 def kept_steps(shares: Sequence[float], max_steps: int) -> dict[float, int]:
@@ -370,21 +397,127 @@ class MetricsCallback(TrainerCallback):
         self._push()
 
     def _push(self) -> None:
-        if self.store is None or self.run_id is None or not self.path.is_file():
-            return
+        self._put(self.path, METRICS_FILE)
+
+    def _put(self, path: Path, dest: str) -> bool:
+        """Push the file ``path`` to ``dest`` in the run; returns whether the store took
+        it. A network failure is logged, and the next push sends the file again."""
+        if self.store is None or self.run_id is None or not path.is_file():
+            return False
         try:
-            self.store.put_file(self.run_id, self.path, METRICS_FILE)
+            self.store.put_file(self.run_id, path, dest)
         except StoreUnavailable as exc:
             log.warning(
-                "metrics: run %s has them in %s only for now, since pushing failed: %s",
+                "metrics: run %s has %s in %s only for now, since pushing failed: %s",
                 self.run_id,
-                self.path,
+                dest,
+                path,
                 exc,
             )
+            return False
         except OSError as exc:
             raise OSError(
-                f"metrics {self.path} could not go to run {self.run_id} in {self.store}: {exc}"
+                f"metrics {path} could not go to {dest} of run {self.run_id} in {self.store}: {exc}"
             ) from exc
+        return True
+
+
+class TelemetryCallback(MetricsCallback):
+    """``MetricsCallback`` for a GRPO run, with the telemetry of the module docstring.
+
+    ``rollouts`` records the run's rewards: the trainer must score with the functions its
+    ``wrap`` returned. The batches it records by a step's end are that step's, as TRL
+    generates and scores each step's rollouts within the step. ``alerts.jsonl`` and
+    ``samples/`` go beside ``path``, in the run's folder.
+
+    When training begins, ``alerts.jsonl`` is written anew with the events of the run's
+    metrics so far, up to the step training starts from, and the monitor goes on from
+    there: a resumed run's alerts count its earlier sessions' steps, and the steps a
+    failed session logged past its last checkpoint, which this session trains again, set
+    none off.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        rollouts: RolloutRecorder,
+        *,
+        store: RunStore | None = None,
+        run_id: str | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        samples_every: int = SAMPLES_EVERY,
+        sample_prompts: int = SAMPLE_PROMPTS,
+    ) -> None:
+        super().__init__(path, store=store, run_id=run_id, now=now)
+        if samples_every < 1 or sample_prompts < 1:
+            raise ValueError(
+                f"samples come every 1 step or more, of 1 prompt or more, not every "
+                f"{samples_every} of {sample_prompts}"
+            )
+        self.rollouts = rollouts
+        self.samples_every = samples_every
+        self.sample_prompts = sample_prompts
+        self.alerts_path = self.path.parent / ALERTS_FILE
+        self.monitor = AlertMonitor()
+        self.step_groups: list[RolloutGroup] = []  # the groups of the step last ended
+        self.recent: deque[tuple[int, RolloutGroup]] = deque(maxlen=sample_prompts)
+        self.unpushed: dict[Path, str] = {}  # sample dumps the store hasn't taken
+
+    def on_train_begin(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
+    ) -> None:
+        self.monitor = AlertMonitor()
+        events = self.monitor.replay(read_file_lines(self.path), up_to=state.global_step)
+        write_atomic(self.alerts_path, b"".join(_jsonl(event.line()) for event in events))
+
+    def on_step_end(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any
+    ) -> None:
+        step = state.global_step
+        self.step_groups = self.rollouts.take()
+        self.recent.extend((step, group) for group in self.step_groups)
+        if step % self.samples_every == 0 and self.recent:
+            dest = samples_file(step)
+            path = self.path.parent / dest
+            write_atomic(path, b"".join(_jsonl(sample_line(*entry)) for entry in self.recent))
+            self.unpushed[path] = dest
+
+    def on_log(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        logs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if not logs:
+            return
+        if REWARD_KEY not in logs:  # not a training step's, such as the run's summary
+            self.write(state.global_step, logs)
+            return
+        line = {**logs, **step_metrics(logs, self.step_groups)}
+        self.write(state.global_step, line)
+        for event in self.monitor.observe(state.global_step, line):
+            self._alert(event)
+
+    def _alert(self, event: AlertEvent) -> None:
+        if event.state == "fired":
+            log.warning("telemetry: run %s, %s", self.run_id or self.path.parent, event.describe())
+        else:
+            log.info("telemetry: run %s, %s", self.run_id or self.path.parent, event.describe())
+        with self.alerts_path.open("ab") as file:
+            file.write(_jsonl(event.line()))
+
+    def _push(self) -> None:
+        super()._push()
+        self._put(self.alerts_path, ALERTS_FILE)
+        for path, dest in list(self.unpushed.items()):
+            if self._put(path, dest):
+                del self.unpushed[path]
+
+
+def _jsonl(value: Mapping[str, Any]) -> bytes:
+    return (json.dumps(value) + "\n").encode()
 
 
 def wandb_callback(env: Mapping[str, str] | None = None) -> TrainerCallback | None:
@@ -413,9 +546,11 @@ def training_callbacks(
     metrics_path: str | Path,
     env: Mapping[str, str] | None = None,
     clock: Clock = time.monotonic,
+    rollouts: RolloutRecorder | None = None,
 ) -> list[TrainerCallback]:
     """The callbacks of every training job, as the module docstring lists them, for the
-    run ``run_id`` in ``store``.
+    run ``run_id`` in ``store``; with ``rollouts``, a GRPO run's recorder, the metrics
+    callback is a ``TelemetryCallback``.
 
     Make them when the job starts: the time guard's deadline counts from then.
     """
@@ -426,7 +561,9 @@ def training_callbacks(
     callbacks: list[TrainerCallback] = [
         guard,
         CheckpointCallback(store, run_id, ops.checkpoint_every, guard=guard, keep_at=keep_at),
-        MetricsCallback(metrics_path, store=store, run_id=run_id),
+        MetricsCallback(metrics_path, store=store, run_id=run_id)
+        if rollouts is None
+        else TelemetryCallback(metrics_path, rollouts, store=store, run_id=run_id),
     ]
     tracker = wandb_callback(env)
     if tracker is not None:

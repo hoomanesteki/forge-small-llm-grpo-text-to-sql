@@ -6,6 +6,8 @@ names (``hoomanesteki/forge-runs`` by default), and ``LocalRunStore`` a folder s
 ``runs/``. Both hold plan section 3.9's layout, one folder a run:
 
     runs/<run_id>/manifest.json, config.yaml, metrics.jsonl, eval/..., samples/...
+    runs/<run_id>/alerts.jsonl               a GRPO run's telemetry alerts
+    runs/<run_id>/samples/step-NNNNNN.jsonl  a GRPO run's rollouts every 50 steps
     runs/<run_id>/checkpoints/step-NNNNNN/   the latest KEEP_CHECKPOINTS are kept
     runs/<run_id>/checkpoints/final/         the adapter a training run ended with
     runs/<run_id>/checkpoints/best/
@@ -82,6 +84,11 @@ CHECKPOINTS = "checkpoints"
 FINAL = f"{CHECKPOINTS}/final"
 BEST = f"{CHECKPOINTS}/best"
 METRICS_FILE = "metrics.jsonl"
+# A GRPO run's telemetry (forge.train.telemetry): the alerts its metrics set off, which
+# the manifest's outputs name as "alerts", since RunManifest has no field of its own for
+# them, and the rollouts it samples, under "samples".
+ALERTS_FILE = "alerts.jsonl"
+SAMPLES_DIR = "samples"
 KEEP_CHECKPOINTS = 2
 RETRIES = 3
 BACKOFF_S = 2.0
@@ -135,6 +142,13 @@ def checkpoint_dir(step: int) -> str:
     if step < 0:
         raise ValueError(f"a checkpoint's step can't be negative, got {step}")
     return f"{CHECKPOINTS}/step-{step:06d}"
+
+
+def samples_file(step: int) -> str:
+    """Where in a run the rollouts sampled at ``step`` go: ``samples/step-000050.jsonl``."""
+    if step < 0:
+        raise ValueError(f"a sample's step can't be negative, got {step}")
+    return f"{SAMPLES_DIR}/step-{step:06d}.jsonl"
 
 
 def checkpoint_step(rel: str) -> int | None:
