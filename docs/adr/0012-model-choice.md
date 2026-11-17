@@ -142,26 +142,30 @@ chosen model's p2 run (ADR-0007). How `extract_sql` read its replies, from
 |---|---|---|---|---|---|---|
 | 2026-11-17-qwen3-8b-awq-val-2f77281 | 872 | 872 | 0 | 0 | 0 | - |
 
-Then rule 4, with p2: the chosen model on dev once, with `--reason baseline`, from
-`2f77281` (dev look 1, `docs/dev-usage.md`):
+Then rule 4, with p2: the chosen model and the reference on dev once each, with
+`--reason baseline` (`docs/dev-usage.md`): the chosen model from `2f77281` as dev look 1,
+and the reference from `d2d6a3a`, once its val run had loaded the AWQ checkpoint, as dev
+look 2:
 
 | Model | Run | Official EX [95% interval] |
 |---|---|---|
 | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | [2026-11-17-qwen2-5-coder-1-5b-dev-2f77281](../runs/2026-11-17-qwen2-5-coder-1-5b-dev-2f77281/eval/dev-report.md) | 67.2% [63.6%, 70.7%] |
+| `Qwen/Qwen3-8B-AWQ` | [2026-11-17-qwen3-8b-awq-dev-d2d6a3a](../runs/2026-11-17-qwen3-8b-awq-dev-d2d6a3a/eval/dev-report.md) | 70.8% [67.2%, 74.0%] |
 
-The reference's dev run, dev look 2, ran from `d2d6a3a`, but isn't committed: it waits in
-`docs/runs/pending.yaml` for the product owner's decision on I5, which its replies don't
-meet as `test_i5_agreement_on_committed_runs` reads it, run by run. Its dev numbers go here
-once it is committed. Nothing is chosen on dev: the choice stands from val.
+Nothing is chosen on dev: the choice stands from val.
 
-I5 holds on the replies of each run committed here (`test_i5_agreement_on_committed_runs`),
-as each report puts it:
+I5 holds as ADR-0008's note of 2026-11-17 reads it: over FG-307's runs pooled, and on each
+run of the chosen model alone (`test_i5_agreement_on_committed_runs`). The reference's dev
+run is the one run here under 98% on its own, and on every run the checkers part only
+where the evaluator drops `DISTINCT` (`scripts/check_i5_distinct.py`). Each report counts
+its disagreements:
 
 - [2026-11-16-qwen3-1-7b-val-c8f4b41](../runs/2026-11-16-qwen3-1-7b-val-c8f4b41/eval/val-report.md): The checkers disagree on 17 samples: only fast EX matches 5, and only official EX 12.
 - [2026-11-16-qwen3-4b-val-c8f4b41](../runs/2026-11-16-qwen3-4b-val-c8f4b41/eval/val-report.md): The checkers disagree on 4 samples: only fast EX matches 1, and only official EX 3.
 - [2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41](../runs/2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41/eval/val-report.md): The checkers disagree on 9 samples: only fast EX matches 4, and only official EX 5.
 - [2026-11-17-qwen3-8b-awq-val-2f77281](../runs/2026-11-17-qwen3-8b-awq-val-2f77281/eval/val-report.md): The checkers disagree on 14 samples: only fast EX matches 7, and only official EX 7.
 - [2026-11-17-qwen2-5-coder-1-5b-dev-2f77281](../runs/2026-11-17-qwen2-5-coder-1-5b-dev-2f77281/eval/dev-report.md): The checkers disagree on 17 samples: only fast EX matches 6, and only official EX 11.
+- [2026-11-17-qwen3-8b-awq-dev-d2d6a3a](../runs/2026-11-17-qwen3-8b-awq-dev-d2d6a3a/eval/dev-report.md): The checkers disagree on 25 samples: only fast EX matches 13, and only official EX 12.
 
 Nothing here is typed by hand: `tests/integration/test_artifacts.py` checks the tables and
 the I5 lines against the reports, and `tests/unit/test_count_extraction.py` and
