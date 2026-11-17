@@ -1,0 +1,30 @@
+# make smoke's GRPO run: 2 steps on the tiny random-weight model (configs/models.yaml's
+# tiny, at the same commit), on the CPU, over the fixture's train questions, its rewards
+# computed for real on the fixture databases. It checks the wiring from rows to rewards to
+# a saved adapter, and the in-training eval on val, not what the model learns.
+#
+#   FORGE_DATA_DIR=tests/fixtures/spider_mini uv run forge train grpo --config configs/grpo/tiny-smoke.yaml
+#
+# What it leaves out takes ADR-0011's starting value, as every GRPO config does.
+run:
+  kind: grpo
+  model_ref: trl-internal-testing/tiny-Qwen2ForCausalLM-2.5@edca82771e1fad8f0b7ce110ffe770c682043fec
+  seed: 42
+  backend: trl
+  device: cpu
+data:
+  prompt_version: p1
+grpo:
+  # A fresh LoRA: the smoke's SFT run has no checkpoints/best, which only val promotes.
+  init_adapter: null
+  # One prompt a step, with its group of 2 replies of 16 tokens at most.
+  num_generations: 2
+  max_completion_length: 16
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 1
+  max_steps: 2
+  # At the last step, on all 20 of the fixture's val questions.
+  eval_every: 2
+ops:
+  # A checkpoint every step, so a run the time guard stops after its first can resume.
+  checkpoint_every: 1

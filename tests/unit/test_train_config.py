@@ -14,9 +14,11 @@ import yaml
 from forge.data.prompts import MAX_PROMPT_TOKENS
 from forge.eval.config import EvalConfig, read_config_file, read_config_sections
 from forge.train.backends import precision_for
+from forge.train.callbacks import kept_steps
 from forge.train.config import (
     LORA_TARGETS,
     GrpoConfig,
+    RewardsConfig,
     TrainConfig,
     load_train_config,
     parse_train_config,
@@ -31,6 +33,13 @@ SFT_MODELS = {
     "qwen3-4b-main.yaml": ("candidates", "qwen3-4b"),
 }
 LOCAL_PILOT = "pilot-qwen25coder05b-mps.yaml"
+# Each GRPO config, and the configs/models.yaml entry whose model it trains.
+GRPO_MODELS = {
+    "tiny-smoke.yaml": ("tiny",),
+    LOCAL_PILOT: ("pilot",),
+    "qwen3-1p7b-pilot.yaml": ("candidates", "qwen3-1-7b"),
+    "qwen3-4b-main.yaml": ("candidates", "qwen3-4b"),
+}
 # The Kaggle runs' GPU hours, plan section 3.8: the SFT pilot and the main run.
 KAGGLE_HOURS = {"qwen3-1p7b-pilot.yaml": 1.0, "qwen3-4b-main.yaml": 2.5}
 
@@ -456,3 +465,69 @@ def test_grpo_config_names_its_start_and_its_eval() -> None:
     for data, message in refused:
         with pytest.raises(ValueError, match=message):
             parse_train_config(data)
+
+
+@pytest.mark.phase(5)
+def test_grpo_configs_start_from_adr_0011() -> None:
+    models = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    paths = {path.name: path for path in (ROOT / "configs" / "grpo").glob("*.yaml")}
+    assert sorted(paths) == sorted(GRPO_MODELS)
+    for name, keys in GRPO_MODELS.items():
+        config = load_train_config(paths[name])
+        grpo = config.grpo
+        assert grpo is not None and config.run.kind == "grpo", name
+        entry = models
+        for key in keys:
+            entry = entry[key]
+        assert config.run.model_ref == f"{entry['repo']}@{entry['revision']}", name
+        # The SFT runs' LoRA, which an adapter they made must have to start from.
+        assert (config.lora.r, config.lora.alpha, config.lora.dropout) == (16, 32, 0.0), name
+        assert config.lora.target == LORA_TARGETS, name
+        assert grpo.beta == "library_default" and grpo.temperature == 1.0, name
+        assert grpo.max_prompt_length == MAX_PROMPT_TOKENS, name
+        # Each in-training eval falls on a checkpoint, so its EX is a checkpoint's.
+        assert grpo.eval_every is not None and grpo.eval_every % config.ops.checkpoint_every == 0
+        if name == "tiny-smoke.yaml":
+            # What make smoke trains: 2 steps of 2 replies of 16 tokens, a fresh LoRA, on
+            # the CPU, with a checkpoint each step and the eval at the last.
+            assert (config.run.backend, config.run.device, grpo.init_adapter) == (
+                "trl",
+                "cpu",
+                None,
+            )
+            assert (grpo.max_steps, grpo.num_generations, grpo.max_completion_length) == (2, 2, 16)
+            assert (config.ops.checkpoint_every, grpo.eval_every) == (1, 2)
+            continue
+        # From an SFT run's adapter, at ADR-0011's learning rate.
+        assert grpo.init_adapter is not None and grpo.learning_rate == 5e-6, name
+        if name == LOCAL_PILOT:
+            # The FG-491 SFT pilot's one adapter, on the laptop's GPU (ADR-0016).
+            assert grpo.init_adapter == (
+                "runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final"
+            )
+            assert (config.run.backend, config.run.device) == ("trl", "mps")
+            assert not config.run.load_in_4bit
+            continue
+        # A Kaggle run's: TRL on the T4 in 4-bit (ADR-0006), plan section 3.10's batch,
+        # from checkpoints/best of the SFT run FG-404 makes, whose id FG-507 writes in.
+        assert (config.run.backend, config.run.device, config.run.load_in_4bit) == (
+            "trl",
+            "auto",
+            True,
+        )
+        assert re.fullmatch(r"runs/<sft-[a-z]+-run-id>/checkpoints/best", grpo.init_adapter)
+        assert (grpo.num_generations, grpo.max_completion_length) == (6, 256), name
+        assert (grpo.per_device_train_batch_size, grpo.gradient_accumulation_steps) == (6, 4)
+        assert config.rewards == RewardsConfig(), name
+    pilot = load_train_config(paths["qwen3-1p7b-pilot.yaml"])
+    assert pilot.grpo is not None and pilot.grpo.max_steps == 100
+    # FG-507 stops the pilot at 40 minutes on purpose and resumes it.
+    assert (pilot.ops.time_guard_minutes, pilot.ops.est_gpu_hours) == (40.0, 1.5)
+    main = load_train_config(paths["qwen3-4b-main.yaml"])
+    assert main.grpo is not None and main.grpo.max_steps == 600
+    assert (main.ops.time_guard_minutes, main.ops.est_gpu_hours) == (675.0, 7.0)
+    # The checkpoint of every in-training eval but the last, which is checkpoints/final,
+    # stays for FG-508 to choose among by its val EX.
+    evals = range(main.grpo.eval_every or 0, main.grpo.max_steps, main.grpo.eval_every or 1)
+    kept = kept_steps(main.ops.keep_checkpoints_at, main.grpo.max_steps)
+    assert sorted(kept.values()) == list(evals) == [100, 200, 300, 400, 500]

@@ -1,0 +1,49 @@
+# The main GRPO run (FG-507): about 600 steps on the chosen model from its SFT run's
+# checkpoints/best, over 2 Kaggle sessions with a resume between them (plan section 3.8).
+# Qwen/Qwen3-4B is the plan's choice and configs/models.yaml's qwen3-4b candidate, pinned
+# at its commit; FG-307 fixes the model (ADR-0012) and may change it. In 4-bit on the T4,
+# with fp16 compute and fp32 adapters (ADR-0006, ADR-0010). The values are ADR-0011's.
+#
+# init_adapter names the main SFT run, which FG-404 has yet to make
+# (docs/runs/pending.yaml): FG-507 puts its run id in place of <sft-main-run-id>, and
+# until then the run refuses to start.
+run:
+  kind: grpo
+  model_ref: Qwen/Qwen3-4B@1cfa9a7208912126459214e8b04321603b3df60c
+  seed: 42
+  # TRL with PEFT, the GPU default (ADR-0006); the unsloth backend starts from fresh LoRA only.
+  backend: trl
+  device: auto
+  load_in_4bit: true
+data:
+  prompt_version: p1
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+grpo:
+  init_adapter: runs/<sft-main-run-id>/checkpoints/best
+  num_generations: 6
+  max_prompt_length: 1536
+  max_completion_length: 256
+  learning_rate: 5.0e-6
+  # 24 completions a step: 4 prompts with 6 replies each.
+  per_device_train_batch_size: 6
+  gradient_accumulation_steps: 4
+  max_steps: 600
+  beta: library_default
+  eval_every: 100
+  eval_examples: 200
+rewards:
+  execution: 1.0
+  validity: 0.1
+  format: 0.05
+  guards: {non_select: -1.0, multiple_statements: -0.5, constant_query: -0.5, comment_payload: -0.2}
+ops:
+  checkpoint_every: 50
+  # The checkpoints of the in-training evals at steps 100 to 500 stay beside
+  # checkpoints/final, step 600, so FG-508 can take the best three by their val EX.
+  keep_checkpoints_at: [0.16667, 0.33334, 0.5, 0.66667, 0.83334]
+  time_guard_minutes: 675
+  est_gpu_hours: 7.0  # a session: about 14 h over 2 (plan section 3.8)

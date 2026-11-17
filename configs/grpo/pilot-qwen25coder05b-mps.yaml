@@ -1,0 +1,42 @@
+# The local GRPO pilot on Apple silicon's GPU (ADR-0016, FG-591): configs/models.yaml's
+# pilot from the adapter of the FG-491 SFT pilot, trained on train rows only, with its
+# in-training eval on val. The run says local-mps, and its numbers are a pilot's, on val
+# only.
+#
+#   FORGE_DATA_DIR=data/spider PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.45 \
+#     PYTORCH_MPS_LOW_WATERMARK_RATIO=0.35 \
+#     uv run forge train grpo --config configs/grpo/pilot-qwen25coder05b-mps.yaml
+#
+# The watermarks are the SFT pilot's (configs/sft/pilot-qwen25coder05b-mps.yaml). These are
+# starting values: FG-591 fits the batch and the completion length to the memory the
+# laptop has free before its run, and records here what it changed.
+run:
+  kind: grpo
+  model_ref: Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25
+  seed: 42
+  backend: trl
+  device: mps
+data:
+  prompt_version: p1
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+grpo:
+  # The FG-491 run's only adapter, the one its val run scored: it trained a single
+  # checkpoint, so it has no checkpoints/best. Its folder goes in runs/ whole, with its
+  # manifest.
+  init_adapter: runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final
+  # 8 completions a step: 2 prompts with 4 replies each, for the laptop's memory.
+  num_generations: 4
+  max_prompt_length: 1536
+  max_completion_length: 128
+  learning_rate: 5.0e-6
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 2
+  max_steps: 100
+  beta: library_default
+  eval_every: 25
+ops:
+  checkpoint_every: 25

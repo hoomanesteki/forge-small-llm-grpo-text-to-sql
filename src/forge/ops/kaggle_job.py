@@ -110,8 +110,11 @@ from forge.ops.sessions import SESSIONS_FILE
 from forge.train.config import load_train_config
 
 JOBS = ("eval", "sft", "grpo", "spike")
-# Jobs the kernel's entry script can't run yet, with the story that brings each.
-LATER_JOBS: Mapping[str, str] = {"grpo": "FG-504"}
+# Jobs the kernel's entry script can't run yet, with the story that brings each. GRPO
+# trains on the laptop with forge train grpo (FG-504); its kernel job must fetch the
+# starting adapter and the run's latest checkpoint from the run store, and comes with the
+# GPU runs.
+LATER_JOBS: Mapping[str, str] = {"grpo": "FG-507"}
 ENTRY = Path("kaggle") / "entry.py"  # relative to the repo root, like the spike
 SPIKE = Path("kaggle") / "spike" / "throughput.py"
 # The FG-301 GPU kernel's name, the one scripts/kaggle_spike.py bundles.

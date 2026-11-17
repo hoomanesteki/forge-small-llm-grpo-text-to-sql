@@ -1,0 +1,41 @@
+# The Kaggle GRPO pilot (FG-507): 100 steps on the small candidate from its SFT pilot's
+# checkpoints/best, to show GRPO works on the T4 before the main run. Qwen/Qwen3-1.7B is
+# pinned at the commit of configs/models.yaml's qwen3-1-7b candidate and loads in 4-bit,
+# as its SFT pilot does (configs/sft/qwen3-1p7b-pilot.yaml). The rest is ADR-0011's, as
+# the main run's.
+#
+# init_adapter names the SFT pilot run, which FG-404 has yet to make
+# (docs/runs/pending.yaml): FG-507 puts its run id in place of <sft-pilot-run-id>, and
+# until then the run refuses to start.
+run:
+  kind: grpo
+  model_ref: Qwen/Qwen3-1.7B@70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  seed: 42
+  # TRL with PEFT, the GPU default (ADR-0006); the unsloth backend starts from fresh LoRA only.
+  backend: trl
+  device: auto
+  load_in_4bit: true
+data:
+  prompt_version: p1
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+grpo:
+  init_adapter: runs/<sft-pilot-run-id>/checkpoints/best
+  num_generations: 6
+  max_prompt_length: 1536
+  max_completion_length: 256
+  learning_rate: 5.0e-6
+  per_device_train_batch_size: 6
+  gradient_accumulation_steps: 4
+  max_steps: 100
+  beta: library_default
+  # Half way and at the end, so the pilot shows which way val EX goes.
+  eval_every: 50
+ops:
+  checkpoint_every: 50
+  # FG-507 stops the pilot on purpose here and resumes it, which shows resume works.
+  time_guard_minutes: 40
+  est_gpu_hours: 1.5  # plan section 3.8

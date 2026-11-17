@@ -464,7 +464,7 @@ def test_jobs_a_later_story_builds_and_bad_options_are_refused_before_any_upload
     fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
     config = str(repo / "configs/eval/job.yaml")
     result = _run("--job", "grpo", "--config", config, "--yes")
-    assert result.exit_code == 1 and "error: --job grpo comes with FG-504" in result.stderr
+    assert result.exit_code == 1 and "error: --job grpo comes with FG-507" in result.stderr
 
     for text, message in (
         ("model: org/m\nbackend: llamacpp\nops: {est_gpu_hours: 1}\n", "comes with FG-702"),

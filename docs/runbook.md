@@ -97,7 +97,7 @@ holds HEAD, so the next push from the same commit mounts it.
    is refused on a T4), with an `ops` section giving `est_gpu_hours`. An SFT config
    (`--job sft`) is a `configs/sft/*.yaml` training config whose `run.device` is `auto` or
    `cuda`, with its `ops.est_gpu_hours`; it takes no `--reason` and no `--resume`, since an
-   SFT run can't be resumed yet. `--job grpo` comes with FG-504. The run id must make a
+   SFT run can't be resumed yet. `--job grpo` comes with FG-507. The run id must make a
    kernel slug Kaggle takes (`forge-<run_id>`, and `-<n>` on a resume: lowercase letters and
    digits with single hyphens between them, so not `a--b` or `run-`), the run must not clash
    with an earlier push, and a dev job needs a dev look left (see Dev).
@@ -443,6 +443,23 @@ It writes `eval/compare-<base val run id>.md` in run b's folder, which
 Add 3 to 5 bullets on it to `docs/notes/sft.md`, a list of their own beside the pilot's,
 from that report alone and linking it, and take FG-405's entry out of
 `docs/runs/pending.yaml`.
+
+## GRPO runs
+
+`forge train grpo --config configs/grpo/<name>.yaml` trains on the train split from the
+config's `grpo.init_adapter`, an SFT run's `checkpoints/best`, or from a fresh LoRA when
+that is null (ADR-0011). That run's folder must be in `runs/` with its manifest
+(`forge runs pull <sft_run_id>`): the run checks the adapter is of the same model and
+holds the files the SFT run saved there. The rewards run each reply's SQL on the train
+databases in one sandbox pool, and every `grpo.eval_every` steps fast EX on a fixed val
+subset goes to `metrics.jsonl` as `val/ex_fast`, beside each reward's
+`rewards/<name>/mean`.
+
+When the time guard stops a run, carry it on from its latest checkpoint with the same
+config, commit and data: `uv run forge train grpo --config <the config> --run-id <run_id>
+--resume`. The steps go on from where it stopped, and `sessions.json` lists each session.
+The ops section may change between sessions, since it changes no weight. The Kaggle job
+(`forge kaggle run --job grpo`) comes with FG-507.
 
 ## Troubleshooting
 

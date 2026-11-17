@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from forge import cli
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.prompts import build_prompt
@@ -193,3 +195,26 @@ def test_grpo_run_refuses_before_it_trains(spider_mini: Path, tmp_path: Path) ->
         run(run_id=RUN, resume=True)
     assert backend.loaded == [None]
     assert sorted(path.name for path in (tmp_path / "runs" / RUN).iterdir()) == before
+
+
+@pytest.mark.phase(5)
+def test_train_grpo_command_says_why_it_stops(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
+    config = tmp_path / "grpo.yaml"
+    runner = CliRunner()
+
+    def invoke(*args: str) -> tuple[int, str]:
+        done = runner.invoke(cli.app, ["train", "grpo", "--config", str(config), *args])
+        return done.exit_code, done.stderr
+
+    config.write_text(f"run: {{kind: sft, model_ref: '{MODEL}'}}\nsft: {{}}\n")
+    assert invoke("--allow-dirty") == (
+        1,
+        "error: run.kind is sft, and forge train grpo trains grpo runs\n",
+    )
+    config.write_text(f"run: {{kind: grpo, model_ref: '{MODEL}'}}\ngrpo: {{}}\n")
+    assert invoke("--resume", "--allow-dirty") == (1, "error: name the run to resume: its run id\n")
+    code, stderr = invoke("--resume", "--run-id", RUN, "--allow-dirty")
+    assert code == 1 and stderr.startswith(f"error: no run {RUN} in ")
