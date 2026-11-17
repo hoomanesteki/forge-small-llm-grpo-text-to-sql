@@ -1,5 +1,5 @@
 """What a GRPO run's metrics say about whether it is learning, while it trains and after
-(FG-506): the telemetry each step's line holds.
+(FG-506): the telemetry each step's line holds, and the alerts it sets off.
 
 Each step's line in a GRPO run's ``metrics.jsonl`` holds the trainer's logs. TRL 1.18
 logs these at every step, with ``logging_steps=1``:
@@ -27,6 +27,18 @@ batch's prompts, completions, token counts and every function's reward as TRL sc
 them: TRL keeps its own table of them private, and writes it only to trackers. A wrapped
 function keeps its name, which is what TRL logs it by.
 
+``AlertMonitor`` reads the lines step by step, and its rules say when a run has stopped
+learning, each as an event when it starts holding and another when it stops:
+
+- ``zero_variance``: ``frac_reward_zero_std`` above ``ZERO_STD_LIMIT`` (0.8) at every
+  step for ``ZERO_STD_STEPS`` (20) steps;
+- ``length_growth``: ``completions/mean_length`` above ``LENGTH_FACTOR`` (2) times the
+  run's first logged step's, which stands for step 0, the length before any update;
+- ``valid_drop``: ``sql/valid_rate`` more than ``VALID_DROP`` (20 points) below its peak.
+
+The events follow from the metrics alone, so anyone reading a run's metrics finds the
+same ones.
+
 Nothing here imports transformers or torch, so reading a run's metrics needs no cpu
 extra.
 """
@@ -35,15 +47,20 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import math
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+
+from forge.eval.run_files import RunCorrupt
 
 if TYPE_CHECKING:
     from forge.train.backends import RewardFunc
 
 ZERO_STD_KEY = "frac_reward_zero_std"
+MEAN_LENGTH_KEY = "completions/mean_length"
 P95_LENGTH_KEY = "completions/p95_length"
 VALID_KEY = "sql/valid_rate"
 MATCH_KEY = "sql/execution_match_rate"
@@ -54,10 +71,19 @@ RATE_SOURCES = {
     MATCH_KEY: "rewards/execution_reward/mean",
 }
 
+ZERO_STD_LIMIT = 0.8
+ZERO_STD_STEPS = 20
+LENGTH_FACTOR = 2.0
+VALID_DROP = 0.20
+# A drop of exactly 20 points is no alert, though 0.9 - 0.7 comes out a hair above 0.2.
+_DROP_SLACK = 1e-9
 # TRL counts a group flat when its rewards' spread is 0 under torch.isclose.
 _FLAT = 1e-8
 # The dataset columns a sample keeps beside each prompt, when the batch has them.
 SAMPLE_COLUMNS = ("example_id", "db_id", "hardness", "gold_sql")
+
+AlertRule = Literal["zero_variance", "length_growth", "valid_drop"]
+AlertState = Literal["fired", "cleared"]
 
 
 @dataclass(frozen=True)
@@ -282,3 +308,135 @@ def finite(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value) if math.isfinite(value) else None
+
+
+@dataclass(frozen=True)
+class AlertEvent:
+    """An alert rule starting or stopping to hold, at ``step``."""
+
+    step: int
+    rule: AlertRule
+    state: AlertState
+    message: str
+
+    def line(self) -> dict[str, Any]:
+        """The event as a line of ``alerts.jsonl``."""
+        return asdict(self)
+
+    def describe(self) -> str:
+        what = "alert" if self.state == "fired" else "cleared"
+        return f"step {self.step}: {what} {self.rule}: {self.message}"
+
+
+class AlertMonitor:
+    """The alert rules of the module docstring, fed one step's metrics at a time."""
+
+    def __init__(self) -> None:
+        self.active: dict[AlertRule, AlertEvent] = {}  # fired, and not cleared since
+        self._flat_since: int | None = None  # the first step of the run above the limit
+        self._first: tuple[int, float] | None = None  # the first logged mean length
+        self._peak: tuple[int, float] | None = None  # the highest valid rate so far
+
+    def observe(self, step: int, values: Mapping[str, Any]) -> list[AlertEvent]:
+        """The events the metrics ``values`` of ``step`` set off; a rule whose metric
+        they lack or hold no number for stays as it was."""
+        events: list[AlertEvent] = []
+        share = finite(values.get(ZERO_STD_KEY))
+        if share is not None:
+            above = share > ZERO_STD_LIMIT
+            if not above:
+                self._flat_since = None
+            elif self._flat_since is None:
+                self._flat_since = step
+            since = self._flat_since
+            held = since is not None and step - since + 1 >= ZERO_STD_STEPS
+            message = (
+                f"{share:.0%} of groups had zero reward variance, above {ZERO_STD_LIMIT:.0%} "
+                f"at every step since step {since}: no learning signal"
+                if held
+                else f"{share:.0%} of groups had zero reward variance"
+            )
+            events += self._turn("zero_variance", held, step, message)
+        length = finite(values.get(MEAN_LENGTH_KEY))
+        if length is not None:
+            if self._first is None:
+                self._first = (step, length)
+            first_step, first = self._first
+            longer = length > LENGTH_FACTOR * first
+            message = (
+                f"mean completion length {length:.0f} tokens, "
+                f"{'over' if longer else 'within'} {LENGTH_FACTOR:g} times step {first_step}'s "
+                f"{first:.0f}"
+            )
+            events += self._turn("length_growth", longer, step, message)
+        rate = finite(values.get(VALID_KEY))
+        if rate is not None:
+            if self._peak is None or rate > self._peak[1]:
+                self._peak = (step, rate)
+            peak_step, peak = self._peak
+            drop = peak - rate
+            dropped = drop > VALID_DROP + _DROP_SLACK
+            message = (
+                f"valid-SQL rate {rate:.0%}, {100 * drop:.1f} points below its peak of "
+                f"{peak:.0%} at step {peak_step}"
+            )
+            events += self._turn("valid_drop", dropped, step, message)
+        return events
+
+    def replay(
+        self, lines: Iterable[Mapping[str, Any]], *, up_to: int | None = None
+    ) -> list[AlertEvent]:
+        """Feed a run's metrics lines in, step by step as ``merged_steps`` gives them, up
+        to step ``up_to`` when given; returns the events they set off."""
+        events: list[AlertEvent] = []
+        for step, values in merged_steps(lines):
+            if up_to is not None and step > up_to:
+                break
+            events += self.observe(step, values)
+        return events
+
+    def _turn(self, rule: AlertRule, on: bool, step: int, message: str) -> list[AlertEvent]:
+        if on == (rule in self.active):
+            return []
+        event = AlertEvent(step, rule, "fired" if on else "cleared", message)
+        if on:
+            self.active[rule] = event
+        else:
+            del self.active[rule]
+        return [event]
+
+
+def jsonl_lines(data: bytes, where: str) -> list[dict[str, Any]]:
+    """The JSON objects of a JSONL file's bytes, ``where`` naming it in errors. A last
+    line with no newline yet is being written, and is left for the next read."""
+    complete, _, _ = data.decode("utf-8").rpartition("\n")
+    lines: list[dict[str, Any]] = []
+    for number, text in enumerate(complete.split("\n") if complete else [], start=1):
+        if not text.strip():
+            continue
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RunCorrupt(f"line {number} of {where} is not JSON: {exc}") from exc
+        if not isinstance(value, dict):
+            raise RunCorrupt(f"line {number} of {where} is not a JSON object")
+        lines.append(value)
+    return lines
+
+
+def read_file_lines(path: Path) -> list[dict[str, Any]]:
+    """``jsonl_lines`` of the file at ``path``; none when there is no file."""
+    return jsonl_lines(path.read_bytes(), str(path)) if path.is_file() else []
+
+
+def merged_steps(lines: Iterable[Mapping[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
+    """Each step's metrics, in step order: the lines of a step merged, a later line's
+    values over an earlier's. So the in-training eval's line joins its step's, and the
+    steps a session that failed logged past its last checkpoint give way to those the
+    resumed session logged again. A line without a whole-number step is left out."""
+    steps: dict[int, dict[str, Any]] = {}
+    for line in lines:
+        step = line.get("step")
+        if isinstance(step, int) and not isinstance(step, bool):
+            steps.setdefault(step, {}).update(line)
+    return sorted(steps.items())

@@ -1,24 +1,107 @@
-"""GRPO telemetry (FG-506): the rollouts the reward functions record, and the telemetry a
-step's line holds."""
+"""GRPO telemetry (FG-506): the alert rules on synthetic metric streams, the rollouts
+the reward functions record, and the telemetry a step's line holds."""
 
 from __future__ import annotations
 
 import asyncio
 import functools
+import math
 from collections.abc import Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from forge.eval.run_files import RunCorrupt
 from forge.train.config import RewardsConfig
 from forge.train.rewards import Rewards
 from forge.train.telemetry import (
+    LENGTH_FACTOR,
     RATE_SOURCES,
+    VALID_DROP,
+    ZERO_STD_LIMIT,
+    ZERO_STD_STEPS,
+    AlertMonitor,
     RolloutRecorder,
+    jsonl_lines,
+    merged_steps,
     percentile,
+    read_file_lines,
     step_metrics,
 )
+
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "telemetry" / "grpo-metrics.jsonl"
+
+
+def _stream(monitor: AlertMonitor, key: str, values: Sequence[float], start: int = 1) -> list[Any]:
+    """Feed ``values`` of ``key`` in, one step each from ``start``; the events, in order."""
+    events = []
+    for step, value in enumerate(values, start=start):
+        events += monitor.observe(step, {key: value})
+    return events
+
+
+@pytest.mark.phase(5)
+def test_alerts_trigger() -> None:
+    # Zero-variance groups: above 0.8 at every step for 20 steps fires, at the 20th; a
+    # step at exactly 0.8 is not above it, and starts the count again.
+    monitor = AlertMonitor()
+    assert _stream(monitor, "frac_reward_zero_std", [0.9] * 10 + [ZERO_STD_LIMIT]) == []
+    assert _stream(monitor, "frac_reward_zero_std", [0.95] * (ZERO_STD_STEPS - 1), 12) == []
+    (fired,) = monitor.observe(31, {"frac_reward_zero_std": 1.0})
+    assert (fired.step, fired.rule, fired.state) == (31, "zero_variance", "fired")
+    assert "above 80% at every step since step 12: no learning signal" in fired.message
+    assert monitor.observe(32, {"frac_reward_zero_std": 1.0}) == []  # once, while it holds
+    assert monitor.active == {"zero_variance": fired}
+    (cleared,) = monitor.observe(33, {"frac_reward_zero_std": 0.5})
+    assert (cleared.rule, cleared.state) == ("zero_variance", "cleared") and not monitor.active
+
+    # Completion length: over twice the first logged step's mean fires; twice is not over.
+    monitor = AlertMonitor()
+    lengths = [80.0, 120.0, LENGTH_FACTOR * 80.0, 161.0, 150.0]
+    events = _stream(monitor, "completions/mean_length", lengths)
+    assert [(e.step, e.rule, e.state) for e in events] == [
+        (4, "length_growth", "fired"),
+        (5, "length_growth", "cleared"),
+    ]
+    assert events[0].message == "mean completion length 161 tokens, over 2 times step 1's 80"
+
+    # Valid rate: more than 20 points below its peak so far fires; 20 points is not more.
+    monitor = AlertMonitor()
+    rates = [0.5, 0.9, 0.9 - VALID_DROP, 0.69, 0.95, 0.74]
+    events = _stream(monitor, "sql/valid_rate", rates)
+    assert [(e.step, e.rule, e.state) for e in events] == [
+        (4, "valid_drop", "fired"),
+        (5, "valid_drop", "cleared"),
+        (6, "valid_drop", "fired"),
+    ]
+    assert events[0].message == "valid-SQL rate 69%, 21.0 points below its peak of 90% at step 2"
+    assert "peak of 95% at step 5" in events[2].message
+
+    # All three from one stream of whole lines, as a run logs them; a step that lacks a
+    # metric or holds no number for it, as TRL's null, leaves its rule as it was.
+    lines = []
+    for step in range(1, 26):
+        line: dict[str, Any] = {
+            "step": step,
+            "frac_reward_zero_std": 0.9 if step >= 3 else 0.2,
+            "completions/mean_length": 40.0 if step < 10 else 90.0,
+            "sql/valid_rate": 0.8 if step < 15 else 0.55,
+        }
+        if step == 7:
+            line["frac_reward_zero_std"] = None
+        lines.append(line)
+    events = AlertMonitor().replay(lines)
+    assert [(e.step, e.rule, e.state) for e in events] == [
+        (10, "length_growth", "fired"),
+        (15, "valid_drop", "fired"),
+        (22, "zero_variance", "fired"),
+    ]
+    # Up to a step, as a resumed run replays its metrics.
+    assert [e.step for e in AlertMonitor().replay(lines, up_to=14)] == [10]
+    # A healthy run sets none off.
+    assert AlertMonitor().replay(read_file_lines(FIXTURE)) == []
 
 
 class FakeRewards:
@@ -158,3 +241,20 @@ def test_telemetry_names_match_their_sources() -> None:
     names = {reward.__name__ for reward in Rewards({}, None, RewardsConfig()).functions}  # type: ignore[arg-type]
     for source in RATE_SOURCES.values():
         assert source.split("/")[1] in names
+
+
+@pytest.mark.phase(5)
+def test_metrics_lines_merge_by_step() -> None:
+    data = b'{"step": 1, "a": 1}\n{"step": 2, "a": 2}\n\n{"step": 2, "b": 3}\n{"step": 1, "a": 9}\n'
+    # A last line with no newline yet is being written: the next read takes it.
+    lines = jsonl_lines(data + b'{"step": 3, "a"', "metrics.jsonl")
+    assert len(lines) == 4
+    assert merged_steps([*lines, {"a": 0}, {"step": True, "a": 0}]) == [
+        (1, {"step": 1, "a": 9}),
+        (2, {"step": 2, "a": 2, "b": 3}),
+    ]
+    with pytest.raises(RunCorrupt, match=r"line 2 of metrics\.jsonl is not JSON"):
+        jsonl_lines(b'{"step": 1}\n{"step": \n', "metrics.jsonl")
+    with pytest.raises(RunCorrupt, match=r"line 1 of metrics\.jsonl is not a JSON object"):
+        jsonl_lines(b"[1]\n", "metrics.jsonl")
+    assert math.isnan(jsonl_lines(b'{"step": 1, "loss": NaN}\n', "m")[0]["loss"])
