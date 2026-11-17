@@ -37,11 +37,11 @@ waits at most 14 s between the store's tries, and at most 23 s inside the client
 retries of one request, unless the Hub's answer says how long to wait (``Retry-After``,
 or a 429's ``RateLimit`` header): the client then waits that long and 1 s more before
 each of its 5 tries, so 305 s for a ``Retry-After: 60``. ``client_retried`` judges by
-the failure that ended the call, so when a download's first metadata request is refused
-and the client's retries of it then drop their connections, both layers retry: each of
-the store's 4 tries waits out the client's 23 s, 106 s of waiting in all with the store's
-14 s. A missing run is ``RunNotFound``, and anything else, such as a missing repo or a
-refused token, fails at once.
+the failure that ended the call, so when a download's first metadata request is refused,
+times out or gets one of the client's statuses, and the client's retries of it then drop
+their connections, both layers retry: each of the store's 4 tries waits out the client's
+23 s, 106 s of waiting in all with the store's 14 s. A missing run is ``RunNotFound``, and
+anything else, such as a missing repo or a refused token, fails at once.
 
 ``pull`` makes a local folder hold the store's copy of a run, as ``forge kaggle output``
 does with a kernel's (``replace_run``): what the copy lacks goes, such as a failed
@@ -438,7 +438,8 @@ def client_retried(exc: BaseException) -> bool:
     is, by what it retries for that request, as the module docstring says.
 
     It decides by the failure that ended the call: in the rare call whose first metadata
-    request is refused and whose retries then drop their connections, both layers retry.
+    request is refused, times out or gets one of the client's statuses (408, 429, 500,
+    502, 503 or 504), and whose retries then drop their connections, both layers retry.
     """
     import httpx2
     from huggingface_hub.errors import HfHubHTTPError
