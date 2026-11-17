@@ -27,7 +27,7 @@ Stories: `docs/progress.md` at `52abed7` marks every Phase 3 story done: FG-301 
 
 Contract drift: `git diff v0.2.0..52abed7 -- src/forge/core` is empty.
 
-Run audit: plan section 5.5's step 5 asks that each run's manifest exist in the run store, the private Hub repo `hoomanesteki/forge-runs` (section 3.9). A kernel has no `HF_TOKEN`, so a run reaches that store only through `forge runs push` from the laptop. Listed with `HfApi.list_repo_files` on 2026-11-17, the store holds the 50-question run and none of FG-307's eight. So this audit reads `docs/runs/` in place of the run store, a deviation from step 5 until those eight are pushed (Before release). Each eval run's manifest is committed under `docs/runs/`, each run has its ledger row, both dev evaluations are in `docs/dev-usage.md` with their reason, and every report rebuilds (I4 below). The spike has no manifest kind, so its `spike-report.json` and its ledger row stand in. The runs of 2026-11-16 were made from `c8f4b41`, which is on `dev`; the three of 2026-11-17 were made from `2f77281` and `d2d6a3a`, which need `run/` tags (Before release).
+Run audit: plan section 5.5's step 5 asks that each run's manifest exist in the run store, the private Hub repo `hoomanesteki/forge-runs` (section 3.9). A kernel has no `HF_TOKEN`, so a run reaches that store only through `forge runs push` from the laptop. The 50-question run was pushed there on 2026-11-16, and FG-307's eight on 2026-11-17, after the fresh-clone run, with `forge runs push` from `docs/runs/`; a listing with `HfApi.list_repo_files` then shows all nine manifests. Each eval run's manifest is committed under `docs/runs/`, each run has its ledger row, both dev evaluations are in `docs/dev-usage.md` with their reason, and every report rebuilds (I4 below). The spike has no manifest kind, so its `spike-report.json` and its ledger row stand in. The runs of 2026-11-16 were made from `c8f4b41`, which is on `dev`; the three of 2026-11-17 were made from `2f77281` and `d2d6a3a`, which need `run/` tags (Before release).
 
 ## Invariants I1..I7 (pass / fail / n.a.)
 
@@ -251,7 +251,6 @@ The run at `52abed7` found one new low: the squash merge of #128, `c036edc`, has
 
 - The PR that lands FG-301's completion carries FG-302's publish output and FG-303's push, wait and pull output in its description. FG-302's criterion "A real publish works once (paste the output in the PR)" is met only then.
 - The three stack branches land, and their PRs close #22, #23, #24, #28 and #141. With `dev` merged to main, the Phase 3 milestone then has no open issue (plan section 5.5, step 1).
-- `forge runs push` puts FG-307's eight runs in the Hub run store, which holds none of them today (Run audit, above).
 - Squash merges leave a run's commit off `dev`, so each committed run whose manifest names a stack commit needs a tag `run/<run_id>` on that commit, pushed when its branch lands:
   - `run/2026-11-17-qwen3-8b-awq-val-2f77281` on `2f77281`
   - `run/2026-11-17-qwen2-5-coder-1-5b-dev-2f77281` on `2f77281`
