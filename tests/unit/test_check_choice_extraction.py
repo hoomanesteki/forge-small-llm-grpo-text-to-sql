@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Callable
 from pathlib import Path
 
+import check_choice_extraction
 import pytest
 import yaml
 from check_choice_extraction import (
@@ -21,7 +23,7 @@ from forge.core.types import GenParams, Prompt
 from forge.data.spider import resolve_data_dir
 from forge.data.splits import load_val
 from forge.eval.config import EvalConfig
-from forge.eval.report import load_run
+from forge.eval.report import ReportRun, load_run
 from forge.eval.runner import run_eval
 from forge.infer.base import FakeBackend
 
@@ -46,18 +48,18 @@ def _over_two_lines(sql: str) -> str:
 
 @pytest.mark.phase(3)
 def test_rule_reads_cut_queries_whole_and_breaks_ties_by_size(
-    spider_mini: Path, tmp_path: Path
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     val = sorted(load_val(), key=lambda example: example.id)
     order = [example.id for example in val]
     gold = {example.id: example.gold_sql for example in val}
 
-    def make(run_id: str, reply: Callable[[int, str], str]) -> Path:
+    def make(run_id: str, reply: Callable[[int, str], str], limit: int | None = None) -> Path:
         def fn(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
             return reply(order.index(prompt.example_id), gold[prompt.example_id])
 
         run = run_eval(
-            EvalConfig(model="gold", backend="fake", run_id=run_id),
+            EvalConfig(model="gold", backend="fake", limit=limit, run_id=run_id),
             backend=FakeBackend(fn, model_ref="gold"),
             allow_dirty=True,
             runs_root=tmp_path / "runs",
@@ -133,6 +135,23 @@ def test_rule_reads_cut_queries_whole_and_breaks_ties_by_size(
     )
     with pytest.raises(ValueError, match="run coder's model gold is not a candidate"):
         load_candidates([folders["org/coder"]], models=models, data=data)
+
+    # Rule 1 reads one whole val run a candidate: a run of part of val, or a second run of
+    # the same model, which would replace the first's scores, is refused. The fake backend
+    # answers only as `gold`, so these runs are read as the model the file pins.
+    def as_pinned(run_id: str, runs_root: Path, data_dir: Path) -> ReportRun:
+        run = load_run(run_id, runs_root=runs_root, data_dir=data_dir)
+        manifest = run.stored.manifest.model_copy(update={"model_ref": f"org/x@{'a' * 40}"})
+        return dataclasses.replace(run, stored=dataclasses.replace(run.stored, manifest=manifest))
+
+    monkeypatch.setattr(check_choice_extraction, "load_run", as_pinned)
+    (loaded,) = load_candidates([folders["org/coder"]], models=models, data=data)
+    assert (loaded.name, loaded.params, loaded.run.run_id) == ("org/x", 1, "coder")
+    with pytest.raises(ValueError, match="runs coder and chat are both org/x's"):
+        load_candidates([folders["org/coder"], folders["org/chat"]], models=models, data=data)
+    part = make("part", lambda i, sql: _fenced(sql), limit=5)
+    with pytest.raises(ValueError, match="run part answered only the first 5 val questions"):
+        load_candidates([part], models=models, data=data)
 
 
 @pytest.mark.phase(3)

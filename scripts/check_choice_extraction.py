@@ -68,10 +68,11 @@ class Choice:
 
 def load_candidates(folders: Sequence[Path], *, models: Path, data: Path) -> list[Candidate]:
     """Each run in ``folders`` as a candidate, refusing a run that isn't a candidate's
-    p1 val run or that a report couldn't read."""
+    p1 run on the whole val split, a second run of one candidate, or a run that a report
+    couldn't read."""
     entries = yaml.safe_load(models.read_text(encoding="utf-8"))["candidates"].values()
     pinned = {f"{entry['repo']}@{entry['revision']}": entry for entry in entries}
-    found = []
+    found: dict[str, Candidate] = {}
     for folder in folders:
         run = load_run(folder.name, runs_root=folder.parent, data_dir=data)
         model = run.stored.manifest.model_ref
@@ -82,8 +83,20 @@ def load_candidates(folders: Sequence[Path], *, models: Path, data: Path) -> lis
                 f"run {run.run_id} answered {run.options.split} with prompt "
                 f"{run.options.prompt_version}; rule 1 reads each candidate's p1 val run"
             )
-        found.append(Candidate(pinned[model]["repo"], pinned[model]["params"], run))
-    return found
+        if run.options.limit is not None:
+            raise ValueError(
+                f"run {run.run_id} answered only the first {run.options.limit} val "
+                "questions; rule 1 reads each candidate's whole val run"
+            )
+        repo = pinned[model]["repo"]
+        # Results are kept by candidate, so a second run would replace the first's scores.
+        if repo in found:
+            raise ValueError(
+                f"runs {found[repo].run.run_id} and {run.run_id} are both {repo}'s; "
+                "rule 1 reads one run a candidate"
+            )
+        found[repo] = Candidate(repo, pinned[model]["params"], run)
+    return list(found.values())
 
 
 def read_whole_scores(candidate: Candidate, data: Path) -> tuple[list[Score], int]:
