@@ -19,12 +19,14 @@ from transformers import Qwen2Config, Qwen2ForCausalLM
 from trl import GRPOConfig
 
 from forge.train.backends import (
+    LIBRARY_SETTINGS,
     BackendUnavailable,
     Precision,
     TrlBackend,
     UnslothBackend,
     check_targets,
     drop_long_prompts,
+    grpo_library_values,
     peft_lora,
     precision_for,
     select_backend,
@@ -337,3 +339,85 @@ def test_trl_accepts_every_setting(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert grpo.chat_template_kwargs == {"enable_thinking": False}
     assert grpo.beta == GRPOConfig.__dataclass_fields__["beta"].default  # library_default
     assert grpo_beta.beta == 0.04
+
+
+@pytest.mark.phase(5)
+def test_grpo_args_take_weights_and_record_trl_choices(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # TRL's real GRPOConfig, so what the manifest records is what TRL then trains with.
+    made: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(trl, "GRPOTrainer", type("GRPOTrainer", (Recorder,), {"made": made}))
+    _devices(monkeypatch)
+    backend = TrlBackend("cpu")
+    dataset = Dataset.from_list([{"prompt": [{"role": "user", "content": "how many"}]}])
+    weights = [1.0, 0.1, 0.05, 1.0]
+    for cfg in (GrpoConfig(temperature=0.9), GrpoConfig(beta=0.04)):
+        backend.grpo_trainer(
+            "model",
+            WordTokenizer(),
+            dataset,
+            [],
+            cfg,
+            [],
+            output_dir=tmp_path,
+            seed=5,
+            reward_weights=weights,
+        )
+        args = made[-1][1]["args"]
+        assert args.reward_weights == weights and args.temperature == cfg.temperature
+        # One update a generation batch and one batch a step, so every checkpoint falls
+        # between two batches and a resume replays the same prompts (TRL issue 7787).
+        assert args.num_iterations == 1
+        assert args.steps_per_generation == cfg.gradient_accumulation_steps
+        recorded = grpo_library_values(cfg)
+        assert recorded["version"] == trl.__version__
+        assert {name: getattr(args, name) for name in LIBRARY_SETTINGS} == {
+            name: recorded[name] for name in LIBRARY_SETTINGS
+        }
+    # TRL 1.18 leaves out the reference model (beta 0) and trains the dapo loss, which a
+    # run's manifest says; a beta the config sets is the config's.
+    assert grpo_library_values(GrpoConfig())["beta"] == 0.0
+    assert grpo_library_values(GrpoConfig())["loss_type"] == "dapo"
+    assert grpo_library_values(GrpoConfig(beta=0.04))["beta"] == 0.04
+    # Without weights, TRL weighs each reward 1.
+    backend.grpo_trainer(
+        "model", WordTokenizer(), dataset, [], GrpoConfig(), [], output_dir=tmp_path, seed=5
+    )
+    assert made[-1][1]["args"].reward_weights is None
+
+
+class ResumedTrainer:
+    """A trainer that records how it was asked to train, and saves a stand-in adapter."""
+
+    def __init__(self) -> None:
+        self.resumed_from: list[str | None] = []
+
+    def train(self, resume_from_checkpoint: str | None = None) -> None:
+        self.resumed_from.append(resume_from_checkpoint)
+
+    def save_model(self, folder: str) -> None:
+        Path(folder).mkdir(parents=True)
+
+
+@pytest.mark.phase(5)
+def test_grpo_resumes_from_the_checkpoint_given(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unsloth: type[FastLanguageModel]
+) -> None:
+    _devices(monkeypatch)
+    backend = TrlBackend("cpu")
+    trainer = ResumedTrainer()
+    monkeypatch.setattr(backend, "grpo_trainer", lambda *args, **kwargs: trainer)
+    checkpoint = tmp_path / "runs" / "r" / "checkpoints" / "step-000002"
+    for out, resume in ((tmp_path / "a", None), (tmp_path / "b", checkpoint)):
+        adapter = backend.grpo(
+            "model", "tok", "rows", [], GrpoConfig(), [], output_dir=out, seed=0, resume_from=resume
+        )
+        assert adapter == str(out / "adapter")
+    assert trainer.resumed_from == [None, str(checkpoint)]
+
+    # Unsloth starts from a fresh LoRA only: its adapter loading is untried with this TRL.
+    _devices(monkeypatch, cuda=True)
+    with pytest.raises(BackendUnavailable, match="starts from a fresh LoRA, not from the adapter"):
+        UnslothBackend().load("org/m", LoraConfig(), load_in_4bit=False, seed=0, adapter="sft/best")
+    assert unsloth.calls == []

@@ -365,11 +365,14 @@ class TrainBackend(Protocol):                      # FG-402, ADR-0017
     device: str                                    # where it trains: cpu, mps or cuda
     precision: "Precision"                         # dtype and fp16/bf16 flags; the manifest records them
     def load(self, model_ref: str, lora: "LoraConfig", *, load_in_4bit: bool,
-             seed: int) -> tuple[Any, Any]: ...    # model, tokenizer; seed draws LoRA's first weights
+             seed: int, adapter: "str | Path | None" = None) -> tuple[Any, Any]: ...
+             # model, tokenizer; seed draws LoRA's first weights, adapter replaces them
     def sft(self, model, tok, dataset, cfg: "SftConfig", callbacks: Sequence["TrainerCallback"], *,
             output_dir: "str | Path", seed: int) -> str: ...  # returns adapter dir
     def grpo(self, model, tok, dataset, rewards: Sequence[RewardFunc], cfg: "GrpoConfig",
-             callbacks: Sequence["TrainerCallback"], *, output_dir: "str | Path", seed: int) -> str: ...
+             callbacks: Sequence["TrainerCallback"], *, output_dir: "str | Path", seed: int,
+             reward_weights: "Sequence[float] | None" = None,
+             resume_from: "str | Path | None" = None) -> str: ...  # FG-504, ADR-0017
 ```
 
 ### 3.6 Data

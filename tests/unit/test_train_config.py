@@ -426,3 +426,33 @@ def test_adr_0010_says_what_the_configs_and_the_pilot_did(monkeypatch: pytest.Mo
     table = "\n".join(line for line in adr.splitlines() if line.startswith("| "))
     held = set(re.findall(r"\d[\d,.]*\d|\d", table + config + pilot))
     assert set(re.findall(r"\d[\d,.]*\d|\d", prose)) <= held
+
+
+@pytest.mark.phase(5)
+def test_grpo_config_names_its_start_and_its_eval() -> None:
+    config = parse_train_config(_grpo())
+    assert config.grpo is not None and config.grpo.init_adapter is None  # a fresh LoRA
+    # TRL's temperature, and the plan's in-training eval: every 100 steps, 200 val questions.
+    assert (config.grpo.temperature, config.grpo.eval_every, config.grpo.eval_examples) == (
+        1.0,
+        100,
+        200,
+    )
+    best = "runs/2026-11-20-qwen3-4b-sft-abc1234/checkpoints/best"
+    started = parse_train_config(_grpo(init_adapter=best, eval_every=None))
+    assert started.grpo is not None and started.grpo.init_adapter == best
+    assert started.grpo.eval_every is None  # no in-training eval
+    assert parse_train_config(started.model_dump(mode="json")) == started
+    # Only GRPO starts from an adapter, so an SFT run's sections are what they were.
+    assert "init_adapter" not in parse_train_config(_sft()).model_dump(mode="json")["run"]
+
+    refused = [
+        (_grpo(temperature=0.0), r"grpo\.temperature: Input should be greater than 0"),
+        (_grpo(eval_every=0), r"grpo\.eval_every: Input should be greater than or equal to 1"),
+        (_grpo(eval_examples=0), r"grpo\.eval_examples: Input should be greater than or equal"),
+        (_grpo(init_adapter=""), r"grpo\.init_adapter: String should have at least 1 character"),
+        (_sft(sft={"init_adapter": best}), r"sft\.init_adapter: Extra inputs are not permitted"),
+    ]
+    for data, message in refused:
+        with pytest.raises(ValueError, match=message):
+            parse_train_config(data)

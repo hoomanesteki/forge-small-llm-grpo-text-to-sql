@@ -298,3 +298,38 @@ def test_grpo_trains_with_the_job_callbacks(
     lines = _lines(metrics)
     assert [line["step"] for line in lines if "reward" in line] == [1, 2]
     assert all("rewards/length_reward/mean" in line for line in lines if "reward" in line)
+
+
+@pytest.mark.phase(5)
+def test_lora_loads_from_an_adapter_to_train_on(tmp_path: Path, tiny_model_ref: str) -> None:
+    # An adapter as SFT saves one, with lora_B moved off the zeros LoRA starts at.
+    lora = LoraConfig(r=4, alpha=8)
+    backend = TrlBackend("cpu")
+    trained, _ = backend.load(tiny_model_ref, lora, load_in_4bit=False, seed=0)
+    with torch.no_grad():
+        for name, param in trained.named_parameters():
+            if "lora_B" in name:
+                param.fill_(0.01)
+    saved = dict(trained.named_parameters())
+    trained.save_pretrained(tmp_path / "sft")
+
+    model, _ = backend.load(
+        tiny_model_ref, lora, load_in_4bit=False, seed=1, adapter=tmp_path / "sft"
+    )
+    params = dict(model.named_parameters())
+    lora_params = {name: p for name, p in params.items() if "lora_" in name}
+    # The adapter's weights, all of them, and trainable, whatever the seed would draw.
+    assert lora_params.keys() == {name for name in saved if "lora_" in name}
+    assert all(torch.equal(p, saved[name]) for name, p in lora_params.items())
+    assert all(p.requires_grad for p in lora_params.values())
+    assert not any(p.requires_grad for name, p in params.items() if "lora_" not in name)
+
+    # The manifest records the config's LoRA, so an adapter with other settings is refused.
+    with pytest.raises(ValueError, match=r"has LoRA r=4, alpha=8, .* section r=8, alpha=8"):
+        backend.load(
+            tiny_model_ref,
+            LoraConfig(r=8, alpha=8),
+            load_in_4bit=False,
+            seed=0,
+            adapter=tmp_path / "sft",
+        )

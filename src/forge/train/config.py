@@ -35,11 +35,14 @@ any model does:
   zero or more and its guard penalties zero or less. Only GRPO has rewards, so an SFT
   config that changes them is refused.
 - Unsloth and 4-bit loading need CUDA, so a run on the CPU or MPS asks for neither.
+- ``grpo.init_adapter`` is the adapter GRPO starts from, such as an SFT run's
+  ``checkpoints/best``, or null for a fresh LoRA on the base model. Only GRPO starts from
+  an adapter, so it sits in the grpo section rather than in ``run`` as plan section 3.10
+  sketches it, and an SFT run's manifest is the same as before it existed.
 
 The run store is the one ``FORGE_RUN_STORE`` names (``forge.ops.hub``), so the plan's
 ``ops.hub_run_repo`` is not a setting here: one place names it. The plan's
-``run.init_adapter``, ``data.curriculum`` and ``data.filter_by_sft_pass_rate`` come with
-the stories that use them (FG-504 and FG-505).
+``data.curriculum`` and ``data.filter_by_sft_pass_rate`` come with FG-505.
 """
 
 from __future__ import annotations
@@ -171,6 +174,10 @@ class SftConfig(_Section):
 
 
 class GrpoConfig(_Section):
+    # The adapter GRPO starts from: a training run's checkpoint, as
+    # runs/<run_id>/checkpoints/best, or another adapter folder or Hub repo. None trains a
+    # fresh LoRA on the base model.
+    init_adapter: Annotated[StrictStr, Field(min_length=1)] | None = None
     num_generations: Annotated[int, Strict(), Field(ge=2)] = 6
     max_prompt_length: Count = MAX_PROMPT_TOKENS
     max_completion_length: Annotated[int, Strict(), Field(ge=1, le=MAX_COMPLETION_TOKENS)] = 256
@@ -182,8 +189,15 @@ class GrpoConfig(_Section):
     beta: (
         Annotated[float, Strict(), Field(ge=0, allow_inf_nan=False)] | Literal["library_default"]
     ) = LIBRARY_DEFAULT
+    # TRL's own default, set here so the manifest records it: rollouts sample the policy
+    # as it stands, which group-relative advantages assume.
+    temperature: Positive = 1.0
     # A GRPO step takes a minute or more on a T4, so every one is worth a metrics line.
     logging_steps: Count = 1
+    # In-training eval (forge.eval.callbacks): every eval_every steps, greedy replies to a
+    # fixed subset of eval_examples val questions, scored by fast EX. None turns it off.
+    eval_every: Count | None = 100
+    eval_examples: Count = 200
     # The share of GPU memory Unsloth's colocated vLLM takes for rollouts; the TRL backend
     # generates with transformers and has no use for it. 0.5 is Unsloth's own default.
     gpu_memory_utilization: Annotated[float, Strict(), Field(gt=0, le=1)] = 0.5

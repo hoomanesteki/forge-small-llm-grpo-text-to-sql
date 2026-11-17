@@ -78,3 +78,23 @@ part of it, so the gate's diff of `src/forge/core` never showed it.
 
 Unsloth becomes the GPU default (ADR-0006), or a backend needs a setting these signatures
 have no place for.
+
+## Amendment, 2026-11-16 (FG-504)
+
+GRPO needed three things these signatures had no place for, so each is an optional
+keyword, and a caller that leaves them out gets what it got before:
+
+- `load(..., adapter=None)`: GRPO starts from the adapter SFT ended with, not from fresh
+  LoRA weights. The TRL backend loads it with `PeftModel.from_pretrained(base, adapter,
+  is_trainable=True)` and refuses one whose `r`, `alpha`, `dropout` or target modules
+  differ from the config's `lora` section, which the run's manifest records. The Unsloth
+  backend refuses an adapter: its own loading is untried with TRL 1.18, and TRL with PEFT
+  is the GPU default (ADR-0006).
+- `grpo(..., reward_weights=None)`: TRL weighs the reward functions in `GRPOConfig`, and
+  the weights live in the config's `rewards` section, not its `grpo` one, so they come
+  apart from `cfg`. Weighing there keeps each `rewards/<name>/mean` a share of 0 or 1.
+- `grpo(..., resume_from=None)`: a checkpoint folder the trainer resumes from, with its
+  optimizer, scheduler, RNG state and step count, so a run carries on across sessions
+  (plan section 3.8). `forge.train.grpo` passes the run's latest stored checkpoint.
+
+Plan section 3.5 shows the amended signatures.

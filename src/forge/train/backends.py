@@ -5,7 +5,10 @@
 the model with LoRA on the config's target modules, the rest of it frozen, and its
 tokenizer; ``sft`` and ``grpo`` train it and return the folder they saved the adapter in.
 Where the trainer writes and the run's seed are keywords, and ``load`` takes the seed too:
-LoRA draws its first weights there, before any trainer seeds.
+LoRA draws its first weights there, before any trainer seeds. Given an ``adapter``,
+``load`` puts that one on the model instead, trainable, as GRPO starts from SFT's; its
+LoRA settings must be the config's. ``grpo`` takes the reward functions' weights and a
+checkpoint to resume from.
 
 - ``TrlBackend``: transformers, PEFT LoRA and TRL's trainers, generating with
   transformers rather than vLLM, at the precision ``precision_for`` picks for its
@@ -32,6 +35,7 @@ installed, and otherwise ``TrlBackend`` on the best device there is: the CPU in 
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import importlib.util
 import logging
@@ -65,6 +69,10 @@ ADAPTER_DIR = "adapter"  # in the output folder: where sft and grpo save the ada
 DEFAULT_MAX_SEQ_LENGTH = 2048
 # Plan section 3.5's reward, as TRL calls it: keywords carry the dataset's other columns.
 RewardFunc = Callable[..., list[float]]
+# GRPO settings a config leaves to TRL, which a run's manifest records with TRL's version,
+# since a release may change them: TRL 1.x has beta 0, so no reference model, and the dapo
+# loss (plan section 3.10).
+LIBRARY_SETTINGS = ("beta", "loss_type", "scale_rewards", "epsilon", "top_p", "top_k")
 
 
 class BackendUnavailable(RuntimeError):
@@ -77,7 +85,13 @@ class TrainBackend(Protocol):
     precision: Precision  # what it trains at there, which a run's manifest records
 
     def load(
-        self, model_ref: str, lora: LoraConfig, *, load_in_4bit: bool, seed: int
+        self,
+        model_ref: str,
+        lora: LoraConfig,
+        *,
+        load_in_4bit: bool,
+        seed: int,
+        adapter: str | Path | None = None,
     ) -> tuple[Any, Any]: ...  # model, tokenizer
 
     def sft(
@@ -103,6 +117,8 @@ class TrainBackend(Protocol):
         *,
         output_dir: str | Path,
         seed: int,
+        reward_weights: Sequence[float] | None = None,
+        resume_from: str | Path | None = None,
     ) -> str: ...
 
 
@@ -175,6 +191,21 @@ def check_targets(model: Any, lora: LoraConfig, model_ref: str) -> None:
         )
 
 
+def check_adapter(model: Any, lora: LoraConfig, adapter: str | Path) -> None:
+    """Raise ``ValueError`` unless the adapter loaded on ``model`` has the config's LoRA
+    settings: the run's manifest records the config's, so they must be what trains."""
+    found = model.peft_config["default"]
+    have = (found.r, found.lora_alpha, found.lora_dropout, sorted(found.target_modules))
+    want = (lora.r, lora.alpha, lora.dropout, sorted(lora.target))
+    if have != want:
+        raise ValueError(
+            f"the adapter at {adapter} has LoRA r={have[0]}, alpha={have[1]}, dropout={have[2]} "
+            f"on {', '.join(have[3])}, and the config's lora section r={want[0]}, "
+            f"alpha={want[1]}, dropout={want[2]} on {', '.join(want[3])}; make the section "
+            "the adapter's"
+        )
+
+
 def drop_long_prompts(dataset: Dataset, tokenizer: Any, max_prompt_length: int) -> Dataset:
     """The rows whose prompt fits in ``max_prompt_length`` tokens, counted as TRL's GRPO
     trainer encodes it (``count_chat_tokens``).
@@ -225,8 +256,9 @@ def sft_settings(cfg: SftConfig) -> dict[str, Any]:
     }
 
 
-def grpo_settings(cfg: GrpoConfig) -> dict[str, Any]:
-    """TRL ``GRPOConfig`` arguments for a GRPO config; never ``max_prompt_length``."""
+def grpo_settings(cfg: GrpoConfig, reward_weights: Sequence[float] | None = None) -> dict[str, Any]:
+    """TRL ``GRPOConfig`` arguments for a GRPO config and the reward functions' weights,
+    each 1 when None; never ``max_prompt_length`` nor ``steps_per_generation``."""
     settings: dict[str, Any] = {
         "num_generations": cfg.num_generations,
         "max_completion_length": cfg.max_completion_length,
@@ -234,13 +266,32 @@ def grpo_settings(cfg: GrpoConfig) -> dict[str, Any]:
         "per_device_train_batch_size": cfg.per_device_train_batch_size,
         "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
         "max_steps": cfg.max_steps,
+        "temperature": cfg.temperature,
         "logging_steps": cfg.logging_steps,
+        # One update a generation batch, and steps_per_generation left to TRL, which then
+        # takes gradient_accumulation_steps: each optimizer step has a batch of its own, so a
+        # checkpoint falls between two and a resume replays the same prompts (TRL issue 7787).
+        "num_iterations": 1,
         # Qwen3 answers without thinking (plan section 3.7); other templates ignore it.
         "chat_template_kwargs": {THINKING_FLAG: False},
     }
     if cfg.beta != LIBRARY_DEFAULT:
         settings["beta"] = cfg.beta
+    if reward_weights is not None:
+        settings["reward_weights"] = list(reward_weights)
     return settings
+
+
+def grpo_library_values(cfg: GrpoConfig) -> dict[str, Any]:
+    """What TRL's ``GRPOConfig`` trains with for each of ``LIBRARY_SETTINGS`` under
+    ``grpo_settings(cfg)``, TRL's default where the config leaves it to TRL, and TRL's
+    version, for a GRPO run's manifest."""
+    import trl
+
+    defaults = {field.name: field.default for field in dataclasses.fields(trl.GRPOConfig)}
+    chosen = grpo_settings(cfg)
+    values = {name: chosen.get(name, defaults[name]) for name in LIBRARY_SETTINGS}
+    return {"version": trl.__version__, **values}
 
 
 class _TrlTrainers:
@@ -285,10 +336,11 @@ class _TrlTrainers:
         *,
         output_dir: str | Path,
         seed: int,
+        reward_weights: Sequence[float] | None = None,
     ) -> GRPOTrainer:
         from trl import GRPOConfig, GRPOTrainer
 
-        args = GRPOConfig(**self._common(output_dir, seed), **grpo_settings(cfg))
+        args = GRPOConfig(**self._common(output_dir, seed), **grpo_settings(cfg, reward_weights))
         # TRL types a reward's list as list[float | None], which list[float] is not.
         reward_funcs: list[Any] = list(rewards)
         trainer = GRPOTrainer(
@@ -329,11 +381,21 @@ class _TrlTrainers:
         *,
         output_dir: str | Path,
         seed: int,
+        reward_weights: Sequence[float] | None = None,
+        resume_from: str | Path | None = None,
     ) -> str:
         trainer = self.grpo_trainer(
-            model, tok, dataset, rewards, cfg, callbacks, output_dir=output_dir, seed=seed
+            model,
+            tok,
+            dataset,
+            rewards,
+            cfg,
+            callbacks,
+            output_dir=output_dir,
+            seed=seed,
+            reward_weights=reward_weights,
         )
-        return _train_and_save(trainer, output_dir)
+        return _train_and_save(trainer, output_dir, resume_from)
 
     def _common(self, output_dir: str | Path, seed: int) -> dict[str, Any]:
         return {
@@ -351,8 +413,11 @@ class _TrlTrainers:
         """What a backend changes on a trainer once it is built."""
 
 
-def _train_and_save(trainer: Any, output_dir: str | Path) -> str:
-    trainer.train()
+def _train_and_save(
+    trainer: Any, output_dir: str | Path, resume_from: str | Path | None = None
+) -> str:
+    # The checkpoint's weights, optimizer, scheduler, RNG and step count, all of them.
+    trainer.train(resume_from_checkpoint=None if resume_from is None else str(resume_from))
     adapter = Path(output_dir) / ADAPTER_DIR
     # A PEFT model saves its adapter alone, and the trainer the tokenizer beside it.
     trainer.save_model(str(adapter))
@@ -375,14 +440,20 @@ class TrlBackend(_TrlTrainers):
         self.precision = precision_for(self.device)
 
     def load(
-        self, model_ref: str, lora: LoraConfig, *, load_in_4bit: bool, seed: int
+        self,
+        model_ref: str,
+        lora: LoraConfig,
+        *,
+        load_in_4bit: bool,
+        seed: int,
+        adapter: str | Path | None = None,
     ) -> tuple[Any, Any]:
         if load_in_4bit and self.device != "cuda":
             raise ValueError(
                 f"load_in_4bit needs bitsandbytes on CUDA, and this backend trains on {self.device}"
             )
         import torch
-        from peft import get_peft_model
+        from peft import PeftModel, get_peft_model
         from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
         from forge.infer.hf_backend import split_ref
@@ -401,7 +472,12 @@ class TrlBackend(_TrlTrainers):
         tokenizer = AutoTokenizer.from_pretrained(repo, revision=revision)
         base = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=dtype, **options)
         set_seed(seed)
-        model = get_peft_model(base, peft_lora(lora))
+        model: PeftModel
+        if adapter is None:
+            model = get_peft_model(base, peft_lora(lora))
+        else:
+            model = PeftModel.from_pretrained(base, str(adapter), is_trainable=True)
+            check_adapter(model, lora, adapter)
         check_targets(model, lora, model_ref)
         return model, tokenizer
 
@@ -453,8 +529,21 @@ class UnslothBackend(_TrlTrainers):
         self.precision = precision_for(self.device)
 
     def load(
-        self, model_ref: str, lora: LoraConfig, *, load_in_4bit: bool, seed: int
+        self,
+        model_ref: str,
+        lora: LoraConfig,
+        *,
+        load_in_4bit: bool,
+        seed: int,
+        adapter: str | Path | None = None,
     ) -> tuple[Any, Any]:
+        if adapter is not None:
+            # Unsloth's own adapter loading is untested against Forge's TRL, and TRL with
+            # PEFT is the GPU default (ADR-0006), so this backend starts from fresh LoRA only.
+            raise BackendUnavailable(
+                f"the unsloth backend starts from a fresh LoRA, not from the adapter {adapter}; "
+                "use the trl backend (run.backend: trl)"
+            )
         import torch
 
         from forge.infer.hf_backend import split_ref
