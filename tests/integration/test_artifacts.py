@@ -302,30 +302,97 @@ def test_p2_is_checked_against_the_chosen_model() -> None:
         assert_p2_ran_for_the_chosen_model({**runs, f"{chosen} val": run("org/chosen", 9)})
 
 
+def _adr(name: str) -> str:
+    return (ROOT / "docs" / "adr" / f"{name}.md").read_text(encoding="utf-8")
+
+
+def _adr_chosen_model() -> str:
+    chosen = re.search(r"\n- Chosen model: `([^`]+)`\n", _adr("0012-model-choice"))
+    assert chosen, "ADR-0012 names no chosen model"
+    return chosen.group(1)
+
+
 @pytest.mark.phase(3)
 def test_phase3_baseline_reports_present() -> None:
     val = gpu_story_runs("FG-307", VAL_BASELINES)
-    # I6 on the T4: the first 100 val questions again agree with the whole run's.
+    # I6 on the T4: the first 100 val questions again agree with the whole run's, as
+    # ADR-0012 quotes.
     i6 = compare_runs(val["I6 repeat"], val[f"{I6_MODEL} val"])
     assert i6.ok, i6.describe()
+    assert " ".join(i6.describe().split(": ", 1)[1].split()) in " ".join(
+        _adr("0012-model-choice").split()
+    )
     for run in val.values():
         assert _kaggle_rows(run.manifest.run_id) == ["kaggle"], run.manifest.run_id
+    # The ADRs the val runs decide are accepted, and p2 ran for the model ADR-0012 chose,
+    # which left headroom.
+    for adr in ("0012-model-choice", "0007-prompt-format"):
+        assert "\n- Status: accepted\n" in _adr(adr), adr
+    chosen = _adr_chosen_model()
+    assert val["chosen val p2"].manifest.model_ref.split("@")[0] == chosen
+    (chosen_val,) = [
+        val[f"{name} val"]
+        for name in CANDIDATES
+        if val[f"{name} val"].manifest.model_ref.split("@")[0] == chosen
+    ]
+    assert _official_ex(chosen_val) < HEADROOM
 
     # The rest skip, naming what is missing, while FG-307 waits in pending.yaml.
     runs = gpu_story_runs("FG-307", BASELINES)
     assert_p2_ran_for_the_chosen_model(runs)
+    assert runs["chosen dev"].manifest.model_ref.split("@")[0] == chosen
     # Each dev run spent one look, logged with its reason (dev looks 1 and 2 of 6).
     uses = read_uses(ROOT / "docs" / "dev-usage.md")
     for name in ("chosen dev", "reference dev"):
         run_id = runs[name].manifest.run_id
         assert [reason for _, used, reason in uses if used == run_id] == ["baseline"], name
-    # The ADRs that wait on these runs are decided, and the chosen model is ADR-0012's.
-    for adr in ("0012-model-choice", "0007-prompt-format"):
-        text = (ROOT / "docs" / "adr" / f"{adr}.md").read_text(encoding="utf-8")
-        assert "\n- Status: accepted" in text, adr
-    chosen = runs["chosen dev"].manifest.model_ref.split("@")[0]
-    adr = (ROOT / "docs" / "adr" / "0012-model-choice.md").read_text(encoding="utf-8")
-    assert f"\n- Chosen model: `{chosen}`\n" in adr
+
+
+def _report_rates(report: str) -> tuple[str, str, list[str]]:
+    """A run report's model and prompt version, and the rates an ADR row quotes from it:
+    official EX, fast EX and valid SQL with their intervals, then official EX at each
+    hardness level, from easy to extra."""
+    model = re.search(r"\n\| Model \| `([^`@]+)@", report)
+    prompt = re.search(r"\n\| Prompt version \| `(\w+)` \|", report)
+    assert model and prompt
+    totals = {
+        name: re.search(rf"\n\| {name} \| [\d,]+ \| [\d,]+ \| ([^|]+) \|", report)
+        for name in ("official EX", "fast EX", "valid SQL")
+    }
+    levels = re.findall(
+        r"\n\| (?:easy|medium|hard|extra) \| [\d,]+ \| [^|]+ \| ([\d.]+%) \[", report
+    )
+    assert all(totals.values()) and len(levels) == 4
+    rates = [match.group(1).strip() for match in totals.values() if match]
+    return model.group(1), prompt.group(1), rates + levels
+
+
+@pytest.mark.phase(3)
+def test_baseline_adrs_quote_the_reports() -> None:
+    # Each row of ADR-0007's and ADR-0012's measured tables is its run's report: the
+    # prompt or the model it names first, then every rate in report order, never typed by
+    # hand.
+    rows = 0
+    for name, names in (("0007-prompt-format", "prompt"), ("0012-model-choice", "model")):
+        measured = _adr(name).split("\n## Measured\n", 1)[1].split("\n## ", 1)[0]
+        for line in measured.splitlines():
+            link = re.search(r"\]\(\.\./runs/([^/)]+)/eval/val-report\.md\)", line)
+            if not line.startswith("| ") or link is None:
+                continue
+            report = (RUNS / link.group(1) / "eval" / "val-report.md").read_text(encoding="utf-8")
+            model, prompt, rates = _report_rates(report)
+            first, _, *quoted = (cell.strip() for cell in line.strip("|").split("|"))
+            assert first == (prompt if names == "prompt" else f"`{model}`"), line
+            assert quoted == rates[: len(quoted)], line
+            rows += 1
+    assert rows == 5
+    # ADR-0007 quotes the p1 and p2 compare report's lines as it wrote them.
+    p2 = RUNS / "2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41" / "eval"
+    compare = (p2 / "compare-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41.md").read_text(
+        encoding="utf-8"
+    )
+    quotes = re.findall(r"^> (.+)$", _adr("0007-prompt-format"), flags=re.MULTILINE)
+    assert quotes and all(quote in compare for quote in quotes)
 
 
 def assert_rebuilds(runs: Mapping[str, StoredRun]) -> None:

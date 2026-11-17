@@ -77,7 +77,8 @@ no `run/` tag. To make one again from there: the 50-question job with
 
 [pending.yaml](pending.yaml) lists the runs a story needs that haven't been made and
 committed yet, what blocks each one, since when, and what it will fill in. FG-307's
-baselines are there until they come back from Kaggle; FG-301's spike, FG-302's publish and
-FG-303's eval job left it on 2026-11-16. `tests/integration/test_artifacts.py` finds a GPU
+reference runs and the chosen model's dev run are there until they come back from Kaggle; its
+five val runs left it when they were committed, and FG-301's spike, FG-302's publish and
+FG-303's eval job on 2026-11-16. `tests/integration/test_artifacts.py` finds a GPU
 story's runs here by the configs they were made from, and skips its checks on them only
 while the story has an entry in pending.yaml; once it has none, a missing run fails.

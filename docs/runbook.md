@@ -399,6 +399,12 @@ Push them in this order, from one clean commit that passed `make smoke`:
 5. The model ADR-0012's rule chooses, and the reference, on dev, once each:
    `<name>-dev` and `qwen3-8b-dev`, with `--reason baseline`. These are dev looks 1 and 2.
 
+Steps 1, 2 and 4 ran from `c8f4b41` on 2026-11-16 and are committed under `docs/runs/`: the
+rule chose `Qwen/Qwen2.5-Coder-1.5B-Instruct` (ADR-0012), and p2 won (ADR-0007). So steps 3
+and 5 run `qwen3-8b-val`, `qwen2-5-coder-1-5b-dev` and `qwen3-8b-dev`, whose configs use p2
+since FG-307 recorded those runs: push them from that commit or a later one, never from
+`c8f4b41`, where they still say p1.
+
 The same model's runs from one commit on one day would share a default run id, so name each:
 `--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Kaggle
 runs at most two GPU sessions at once and

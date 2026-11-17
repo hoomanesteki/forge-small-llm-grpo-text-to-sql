@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from datetime import date
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 import yaml
 
 from forge.eval.config import EvalConfig, check_config, read_config_file, read_config_sections
+from forge.ops.ledger import read_rows
 
 ROOT = Path(__file__).resolve().parents[2]
 MODELS = ROOT / "configs" / "models.yaml"
@@ -74,6 +76,14 @@ def _models() -> dict[str, Any]:
     return models
 
 
+def _chosen_repo() -> str:
+    """The model ADR-0012's rule chose from the candidates' val runs."""
+    adr = (ROOT / "docs" / "adr" / "0012-model-choice.md").read_text(encoding="utf-8")
+    chosen = re.search(r"\n- Chosen model: `([^`]+)`\n", adr)
+    assert chosen, "ADR-0012 names no chosen model"
+    return chosen.group(1)
+
+
 @pytest.mark.phase(3)
 def test_baseline_models_are_open_pinned_and_sized_for_their_role() -> None:
     models = _models()
@@ -102,21 +112,28 @@ def test_baseline_models_are_open_pinned_and_sized_for_their_role() -> None:
 def test_baseline_configs_run_each_model_as_its_run_needs() -> None:
     models = _models()
     greedy = {"backend": "vllm", "limit": None, "n": 1, "temperature": 0.0, "retry": 0}
-    runs = {"val": ("val", "p1"), "val-p2": ("val", "p2"), "dev": ("dev", "p1")}
+    p1, p2 = {"prompt_version": "p1"}, {"prompt_version": "p2"}
+    # The runs after the choice use p2, the prompt ADR-0007 fixed from the val runs: the
+    # chosen model's dev look, to compare with its trained model's, and the reference's
+    # two, to show a larger model with the same prompt. The other candidates' dev configs
+    # never run, and stay as they were written.
+    chosen = _chosen_repo()
+    assert chosen in {entry["repo"] for entry in models["candidates"].values()}
+    runs: list[tuple[str, dict[str, Any], dict[str, dict[str, Any]]]] = []
+    for name, entry in models["candidates"].items():
+        dev = p2 if entry["repo"] == chosen else p1
+        kinds = {"val": {"split": "val", **p1}, "val-p2": {"split": "val", **p2}}
+        runs.append((name, entry, {**kinds, "dev": {"split": "dev", **dev}}))
+    for name, entry in models["reference"].items():
+        runs.append((name, entry, {"val": {"split": "val", **p2}, "dev": {"split": "dev", **p2}}))
     expected: dict[str, EvalConfig] = {}
-    for group, kinds in (
-        ("candidates", runs),
-        ("reference", {"val": runs["val"], "dev": runs["dev"]}),
-    ):
-        for name, entry in models[group].items():
-            pinned = {
-                "model": f"{entry['repo']}@{entry['revision']}",
-                "quantization": entry.get("quantization"),
-            }
-            for kind, (split, prompt) in kinds.items():
-                expected[f"{name}-{kind}.yaml"] = EvalConfig(
-                    **greedy, **pinned, split=split, prompt_version=prompt
-                )
+    for name, entry, kinds in runs:
+        pinned = {
+            "model": f"{entry['repo']}@{entry['revision']}",
+            "quantization": entry.get("quantization"),
+        }
+        for kind, options in kinds.items():
+            expected[f"{name}-{kind}.yaml"] = EvalConfig(**greedy, **pinned, **options)
     # I6's repeat of the first 100 val questions, and the phase 3 smoke's 50.
     coder = expected["qwen2-5-coder-1-5b-val.yaml"]
     expected["qwen2-5-coder-1-5b-val-100.yaml"] = dataclasses.replace(coder, limit=100)
@@ -128,6 +145,17 @@ def test_baseline_configs_run_each_model_as_its_run_needs() -> None:
         options, ops = read_config_sections(paths[name])
         assert EvalConfig(**options) == config, name
         assert ops.est_gpu_hours is not None and ops.est_gpu_hours <= 0.5, name
+
+
+def _committed_runs() -> dict[str, dict[str, Any]]:
+    """The config each run committed under docs/runs records in its manifest, by run id."""
+    runs = {}
+    for path in sorted((ROOT / "docs" / "runs").glob("*/manifest.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        # A push over the week's budget says so in its config, which changes no score.
+        manifest["config"].pop("allow_over_budget", None)
+        runs[manifest["run_id"]] = manifest["config"]
+    return runs
 
 
 @pytest.mark.phase(3)
@@ -144,8 +172,33 @@ def test_baseline_runs_wait_in_pending_within_the_story_budget() -> None:
         budget = max(hours) if "pick" in entry else sum(hours)
         assert entry["est_gpu_hours"] == pytest.approx(budget), entry["run"]
         listed += entry["configs"]
-    # Every baseline config waits for its run here, once, and together they fit the story.
+
+    # Each baseline config has made its committed run, waits for its run here, or is the
+    # p2 or dev config of a candidate ADR-0012 didn't choose, which never runs: one of the
+    # three, once.
     configs = (ROOT / "configs" / "eval").glob("*.yaml")
-    expected = {path for path in configs if path not in (PILOT_CONFIG, SMOKE_CONFIG)}
-    assert sorted(listed) == sorted(path.relative_to(ROOT).as_posix() for path in expected)
-    assert sum(entry["est_gpu_hours"] for entry in baseline) <= BASELINE_BUDGET
+    baselines = {path for path in configs if path not in (PILOT_CONFIG, SMOKE_CONFIG)}
+    committed = _committed_runs()
+    ran = {
+        run_id: path
+        for path in baselines
+        for run_id, config in committed.items()
+        if EvalConfig(**read_config_file(path)).manifest_config() == config
+    }
+    chosen = _chosen_repo()
+    unchosen = {
+        ROOT / "configs" / "eval" / f"{name}-{kind}.yaml"
+        for name, entry in _models()["candidates"].items()
+        if entry["repo"] != chosen
+        for kind in ("val-p2", "dev")
+    }
+    assert len(set(ran.values())) == len(ran) and not set(ran.values()) & unchosen
+    waiting = baselines - set(ran.values()) - unchosen
+    assert sorted(listed) == sorted(path.relative_to(ROOT).as_posix() for path in waiting)
+    # Together they fit the story: the ledger rows of the runs made, the estimates of the
+    # runs waiting.
+    spent = sum(
+        row.hours for row in read_rows(ROOT / "docs" / "compute-ledger.md") if row.run_id in ran
+    )
+    assert spent > 0
+    assert spent + sum(entry["est_gpu_hours"] for entry in baseline) <= BASELINE_BUDGET

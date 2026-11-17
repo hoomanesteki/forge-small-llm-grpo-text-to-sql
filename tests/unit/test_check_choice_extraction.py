@@ -13,6 +13,7 @@ from check_choice_extraction import (
     apply_rule,
     describe,
     load_candidates,
+    main,
     read_whole_scores,
 )
 
@@ -23,6 +24,15 @@ from forge.eval.config import EvalConfig
 from forge.eval.report import load_run
 from forge.eval.runner import run_eval
 from forge.infer.base import FakeBackend
+
+ROOT = Path(__file__).resolve().parents[2]
+RUNS = ROOT / "docs" / "runs"
+# FG-307's three candidates on val with p1 (ADR-0012).
+CANDIDATE_RUNS = (
+    "2026-11-16-qwen3-1-7b-val-c8f4b41",
+    "2026-11-16-qwen3-4b-val-c8f4b41",
+    "2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41",
+)
 
 
 def _fenced(sql: str) -> str:
@@ -123,3 +133,16 @@ def test_rule_reads_cut_queries_whole_and_breaks_ties_by_size(
     )
     with pytest.raises(ValueError, match="run coder's model gold is not a candidate"):
         load_candidates([folders["org/coder"]], models=models, data=data)
+
+
+@pytest.mark.phase(3)
+@pytest.mark.requires_full_data
+def test_adr_0012_quotes_the_choice_check(capsys: pytest.CaptureFixture[str]) -> None:
+    # The choice under both readings of rule 3 comes from the script, never typed by hand.
+    assert main([str(RUNS / run) for run in CANDIDATE_RUNS]) == 0
+    printed = capsys.readouterr().out
+    adr = (ROOT / "docs" / "adr" / "0012-model-choice.md").read_text(encoding="utf-8")
+    assert printed in adr
+    chosen = re.search(r"\n- Chosen model: `([^`]+)`\n", adr)
+    assert chosen is not None
+    assert printed.count(f"- chosen: {chosen.group(1)}, ") == 2
