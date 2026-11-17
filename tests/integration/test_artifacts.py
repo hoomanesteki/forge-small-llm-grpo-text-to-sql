@@ -246,15 +246,16 @@ def test_sft_pilot_adapter_run_is_committed_whole() -> None:
 
 
 @pytest.mark.phase(4)
-def test_sft_pilot_push_waits_with_its_adapter_digest() -> None:
-    # The pilot's manifests record no digest of its adapter, so pending.yaml does, and the
-    # push it describes checks the folder against it before any upload.
+def test_sft_pilot_adapter_digest_is_the_one_its_push_checked() -> None:
+    # The pilot's manifests record no digest of its adapter, so docs/runs/README.md does, on
+    # a line of its own, beside the push to the run store that checked the folder against it
+    # before any upload; nothing in pending.yaml waits for that push any more.
+    readme = (RUNS / "README.md").read_text(encoding="utf-8")
+    (digest,) = re.findall(r"^`([0-9a-f]{64})`$", readme, flags=re.MULTILINE)
+    assert f"\n$ uv run forge runs push {SFT_PILOT_RUN} --adapter-sha256 {digest}\n" in readme
+    assert f"\nrun {SFT_PILOT_RUN} (sft, finished): uploaded to " in readme
     entries = yaml.safe_load(PENDING.read_text(encoding="utf-8"))["pending"]
-    (push,) = [entry for entry in entries if entry["run"] == "sft-pilot-to-run-store"]
-    digest = push["adapter_sha256"]
-    assert re.fullmatch(r"[0-9a-f]{64}", digest), digest
-    assert f"forge runs push {SFT_PILOT_RUN} --adapter-sha256 {digest}," in push["how"]
-    assert f"`{digest}`" in (RUNS / "README.md").read_text(encoding="utf-8")
+    assert [entry["run"] for entry in entries if entry["story"] == "FG-491"] == []
     assert digest_output(FINAL) not in LocalRunStore(RUNS).get_manifest(SFT_PILOT_RUN).outputs
     # Where the laptop that trained it still holds the adapter, its files have that digest.
     local = ROOT / SFT_PILOT_ADAPTER

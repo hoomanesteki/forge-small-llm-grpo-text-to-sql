@@ -43,8 +43,8 @@ citing no number it doesn't hold (FG-405).
 A pilot that trains (FG-491) commits its training run without its weights: the manifest,
 `config.yaml` and `metrics.jsonl`, one line a logging step. The adapter stays in
 `runs/<run_id>/checkpoints/final/` on the laptop that trained it, where the eval run's
-`--adapter` names it, until the push [pending.yaml](pending.yaml) lists puts it in the run
-store.
+`--adapter` names it, and the run store holds a copy of the run with it since the push of
+2026-11-17 below.
 The manifest's `sft_data` says which rows it trained on: the hash of the rows
 `forge data build-sft` builds, how many were over `max_length` and left out, and how many
 of the rest the subset took.
@@ -88,9 +88,17 @@ started at 05:41:29. It is
 
 `e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562`
 
-and [pending.yaml](pending.yaml)'s push of the run checks the folder against it before it
-uploads anything (`forge runs push --adapter-sha256`). The committed manifests stay as they
-are.
+and the push of the run to the run store checked the folder against it before it uploaded
+anything (`forge runs push --adapter-sha256`). It ran on 2026-11-17, from the laptop that
+trained the run, and exited 0:
+
+```bash
+$ uv run forge runs push 2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8 --adapter-sha256 e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562
+run 2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8 (sft, finished): uploaded to hoomanesteki/forge-runs as runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8
+```
+
+So the run store holds the SFT pilot with its adapter in `checkpoints/final`, the files the
+eval run scored. The committed manifests stay as they are.
 
 Story branches land on `dev` as squash merges, so the commit a manifest names is not on
 `dev` itself. Each committed run has a tag `run/<run_id>` on that commit, which keeps it
@@ -165,11 +173,10 @@ must train on p2 (ADR-0007): the main run the model ADR-0012 chose from FG-307's
 `Qwen/Qwen2.5-Coder-1.5B-Instruct`, and the pilot Qwen3-1.7B, the small model plan section
 3.8 keeps it on. FG-405's comparison of the main model with and without SFT waits on
 FG-404's runs alone, since FG-307's p2 run of the chosen model, its base, is here. FG-491's
-push of the SFT pilot, adapter and all, waits only
-for the operator to run it, with the digest above. A kernel pushed with the CLI gets no
-`HF_TOKEN`, so a kernel job's results come back as its kernel output (`forge kaggle
-output`), and an eval job's checkpoint adapter comes from the output of the kernel that
-trained it, which its kernel mounts. `tests/integration/test_artifacts.py` finds a GPU
+push of the SFT pilot, adapter and all, left it on 2026-11-17, with the digest above. A
+kernel pushed with the CLI gets no `HF_TOKEN`, so a kernel job's results come back as its
+kernel output (`forge kaggle output`), and an eval job's checkpoint adapter comes from the
+output of the kernel that trained it, which its kernel mounts. `tests/integration/test_artifacts.py` finds a GPU
 story's runs here by the configs they were made from, and skips its checks on them only
 while the story has an entry in pending.yaml; once it has none, a missing run fails. A
 Kaggle SFT run is committed as FG-491's is, without its checkpoints, which the run store

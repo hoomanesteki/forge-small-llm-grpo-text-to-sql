@@ -6,21 +6,6 @@
 # an entry here. An entry whose run was made, with its ledger row, but can't be committed
 # yet names it in run_id.
 pending:
-  - story: FG-491
-    run: sft-pilot-to-run-store
-    platform: local-mps
-    accelerator: none (an upload of a finished run)
-    est_gpu_hours: 0
-    status: blocked
-    since: 2026-11-16
-    # forge.ops.adapters.adapter_sha256 of runs/<run_id>/checkpoints/final on the laptop that
-    # trained it, taken after both runs, on the files the eval run read (docs/runs/README.md).
-    adapter_sha256: e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562
-    blocked_on:
-      - nothing but the operator running the push below; the Hugging Face account, its write token and the run store repo exist since 2026-11-16
-    how: docs/runbook.md, "Run store", forge runs push 2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8 --adapter-sha256 e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562, which uploads nothing unless checkpoints/final holds those files
-    fills:
-      - the run store's copy of the SFT pilot run, its adapter in checkpoints/final with it, which only the laptop that trained it holds until then
   - story: FG-404
     run: sft-pilot
     platform: kaggle
