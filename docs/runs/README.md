@@ -160,10 +160,12 @@ committed yet, what blocks each one, since when, and what it will fill in. The K
 Hugging Face accounts, their tokens and the run store repo exist since 2026-11-16. FG-307's
 runs left it when they were committed, the reference's dev run last, on 2026-11-17, once
 ADR-0008's note of that day settled I5 for it, and FG-301's spike, FG-302's publish and
-FG-303's eval job on 2026-11-16. FG-404's Kaggle SFT runs wait on their configs, which must
-train the model ADR-0012 chose from FG-307's baselines, `Qwen/Qwen2.5-Coder-1.5B-Instruct`,
-on p2 (ADR-0007), and FG-405's comparison of the main model with and without SFT on
-FG-404's runs, beside FG-307's. FG-491's push of the SFT pilot, adapter and all, waits only
+FG-303's eval job on 2026-11-16. FG-404's Kaggle SFT runs wait on their configs, which
+must train on p2 (ADR-0007): the main run the model ADR-0012 chose from FG-307's baselines,
+`Qwen/Qwen2.5-Coder-1.5B-Instruct`, and the pilot Qwen3-1.7B, the small model plan section
+3.8 keeps it on. FG-405's comparison of the main model with and without SFT waits on
+FG-404's runs alone, since FG-307's p2 run of the chosen model, its base, is here. FG-491's
+push of the SFT pilot, adapter and all, waits only
 for the operator to run it, with the digest above. A kernel pushed with the CLI gets no
 `HF_TOKEN`, so a kernel job's results come back as its kernel output (`forge kaggle
 output`). `tests/integration/test_artifacts.py` finds a GPU story's runs here by the configs

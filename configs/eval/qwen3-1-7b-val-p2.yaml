@@ -1,6 +1,8 @@
 # FG-307 baseline: Qwen3-1.7B on the whole val split with the p2 prompt, which adds sample
-# rows to the schema. Run for the model ADR-0012 chooses only (ADR-0007). The model is
-# configs/models.yaml's candidates.qwen3-1-7b, pinned to the same commit.
+# rows to the schema. As a baseline it runs for the model ADR-0012 chooses only (ADR-0007).
+# The model is configs/models.yaml's candidates.qwen3-1-7b, pinned to the same commit.
+# FG-404's SFT pilot, which trains this model on p2, scores its adapter with it
+# (docs/runbook.md, "SFT runs").
 model: Qwen/Qwen3-1.7B@70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
 backend: vllm
 split: val

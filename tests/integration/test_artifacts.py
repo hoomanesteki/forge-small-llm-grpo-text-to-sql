@@ -930,7 +930,8 @@ def test_sft_runs_are_scored_on_their_base_models_full_val(
 
 # FG-405: what SFT changed on val, from the comparisons of each committed val run of an SFT
 # adapter with its base run. The SFT pilot's is FG-491's; the main model's, FG-405's own,
-# waits in pending.yaml for FG-404's and FG-307's runs.
+# waits in pending.yaml for FG-404's runs, against FG-307's committed run of the model's val
+# config at the prompt version the main run trains on.
 COMPARISON = RUNS / SFT_PILOT_EVAL / "eval" / f"{COMPARE_PREFIX}{PILOT_RUN}.md"
 MAIN_COMPARISON = "sft-main-comparison"  # its name in pending.yaml
 NOTES = ROOT / "docs" / "notes" / "sft.md"

@@ -201,7 +201,8 @@ for the guard's last save and the upload. A training run writes no `sessions.jso
 own, so the kernel's session is added to the run with the run's status.
 
 `--adapter` gives an eval job its adapter when the config names none, so a checkpoint is
-scored with its base model's config (`configs/eval/<name>-val.yaml`) and the two runs
+scored with its base model's val config at the prompt version the run trained on, which
+ADR-0007 makes p2 for every SFT run (`configs/eval/<name>-val-p2.yaml`), and the two runs
 differ in the adapter alone. An adapter that is a training run's checkpoint,
 `runs/<run_id>/checkpoints/<name>` as on the laptop, is fetched from the run store to the
 same path in the kernel before the model loads, so it needs the `HF_TOKEN` secret; the
@@ -476,34 +477,46 @@ their replies: pooled, and for each run of the chosen model alone (ADR-0008).
 
 ## SFT runs
 
-FG-404 trains the LoRA SFT adapters on Kaggle T4s and picks the main run's on val, about
-4.5 GPU hours in all (plan section 3.8). Push the jobs in this order, from one clean
+FG-404 trains the LoRA SFT adapters on Kaggle T4s and picks the main run's on val, in the
+story's budget of about 4.5 GPU hours (FG-404 in the plan); plan section 3.8's rows give
+4.4 of them, 1 for the pilot, 2.5 for the main run and 0.90 for its two checkpoints on
+val, and have none for the pilot's val run. Push the jobs in this order, from one clean
 commit that passed `make smoke`, with the `HF_TOKEN` secret attached to each kernel: the
 runs go to the run store, and an eval job fetches its checkpoint from there. After each,
 `forge kaggle wait <run_id>`, then `forge runs pull <run_id>`, which adds its ledger row.
 
+Every SFT run trains on p2, which ADR-0007 fixed for every later phase, and its checkpoints
+are scored with its base model's val config at p2, as `forge runs promote` requires. The
+pilot trains the small candidate, Qwen3-1.7B (plan section 3.8), and the main run the model
+ADR-0012 chose, `Qwen/Qwen2.5-Coder-1.5B-Instruct`. Both SFT configs predate FG-307's runs
+and still train on p1, and the main one names Qwen3-4B, so each needs the change
+`docs/runs/pending.yaml` lists before its run.
+
 1. The pilot, 1 epoch on the small candidate, to show the setup works before the main
    run: `uv run forge kaggle run --job sft --config configs/sft/qwen3-1p7b-pilot.yaml`.
-2. Its final adapter on val, with that candidate's FG-307 config, so the two runs differ
-   in the adapter alone: `uv run forge kaggle run --job eval --config
-   configs/eval/qwen3-1-7b-val.yaml --adapter runs/<pilot_run_id>/checkpoints/final
+2. Its final adapter on val, with that candidate's FG-307 config at p2, so the two runs
+   differ in the adapter alone: `uv run forge kaggle run --job eval --config
+   configs/eval/qwen3-1-7b-val-p2.yaml --adapter runs/<pilot_run_id>/checkpoints/final
    --run-id <date>-qwen3-1-7b-sft-val-<sha7>`. The push checks the adapter first: a run's
    checkpoint in `runs/`, as here, which the kernel fetches, or a Hub repo@revision. Then
-   `uv run forge runs promote <pilot_run_id> --config configs/eval/qwen3-1-7b-val.yaml
+   `uv run forge runs promote <pilot_run_id> --config configs/eval/qwen3-1-7b-val-p2.yaml
    --eval <that run id>` sets the pilot's `checkpoints/best`, where FG-507's GRPO pilot
    starts.
 3. The main run, 1 epoch on the chosen model: `uv run forge kaggle run --job sft --config
-   configs/sft/qwen3-4b-main.yaml`. If ADR-0012 chooses another model, the config names it
-   first. It keeps its checkpoint half way (`ops.keep_checkpoints_at: [0.5]`) beside
-   `checkpoints/final`; `forge runs show <run_id>` lists both, the first as `kept_at_0.5`.
-4. Both checkpoints on val, each with `configs/eval/qwen3-4b-val.yaml` and its own
-   `--adapter runs/<main_run_id>/<checkpoint>` and `--run-id`.
-5. `uv run forge runs promote <main_run_id> --config configs/eval/qwen3-4b-val.yaml --eval
-   <half run id> --eval <final run id>`: the higher official EX goes to `checkpoints/best`,
-   the final adapter on a tie. Each eval run must be that config, the base model's on the
-   whole val split, with its checkpoint as the adapter and nothing else changed, and must
-   have scored the files the run saved there: an eval run records the `adapter_sha256` of
-   its adapter, and the SFT run the digest of each checkpoint it keeps.
+   <main config>`, the main SFT config once it trains `Qwen/Qwen2.5-Coder-1.5B-Instruct` on
+   p2. Until that change it is `configs/sft/qwen3-4b-main.yaml`, Qwen3-4B on p1. It keeps
+   its checkpoint half way (`ops.keep_checkpoints_at: [0.5]`) beside `checkpoints/final`;
+   `forge runs show <run_id>` lists both, the first as `kept_at_0.5`.
+4. Both checkpoints on val, each with `configs/eval/qwen2-5-coder-1-5b-val-p2.yaml`, the
+   chosen model's FG-307 config at p2, and its own `--adapter
+   runs/<main_run_id>/<checkpoint>` and `--run-id`.
+5. `uv run forge runs promote <main_run_id> --config
+   configs/eval/qwen2-5-coder-1-5b-val-p2.yaml --eval <half run id> --eval <final run id>`:
+   the higher official EX goes to `checkpoints/best`, the final adapter on a tie. Each eval
+   run must be that config, the base model's on the whole val split, with its checkpoint as
+   the adapter and nothing else changed, and must have scored the files the run saved
+   there: an eval run records the `adapter_sha256` of its adapter, and the SFT run the
+   digest of each checkpoint it keeps.
 
 Render each eval run's report on the laptop (`FORGE_DATA_DIR=data/spider uv run forge
 report run <run_id>`) and copy the folder whole to `docs/runs/`. Copy each SFT run
@@ -515,10 +528,10 @@ No step reads dev. If val EX was still rising at the end of the epoch and the bu
 allows, a second epoch is the product owner's call (ADR-0010), recorded in
 `docs/progress.md`.
 
-Last, FG-405 compares the main model with and without SFT, on the laptop, once FG-307's
-val run of the chosen model is in `docs/runs/` too. Run b is the val run of the main run's
-`checkpoints/best`, the one its `best.json` names under `eval_runs`; run a is that FG-307
-run, made with the same config, so the two differ in the adapter alone:
+Last, FG-405 compares the main model with and without SFT, on the laptop. Run b is the val
+run of the main run's `checkpoints/best`, the one its `best.json` names under `eval_runs`;
+run a is FG-307's run of the same config, `2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41`,
+already in `docs/runs/`, so the two differ in the adapter alone:
 
 ```bash
 FORGE_RUNS_DIR=docs/runs FORGE_DATA_DIR=data/spider uv run forge report compare <base val run id> <best val run id>

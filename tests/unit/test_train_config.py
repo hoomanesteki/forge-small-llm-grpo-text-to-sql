@@ -324,7 +324,10 @@ def test_sft_runs_wait_in_pending_within_the_story_budget() -> None:
         assert entries[evaluated]["est_gpu_hours"] == pytest.approx(
             ops.est_gpu_hours * checkpoints
         ), evaluated
-    # Plan section 3.8: 1 h for the pilot, 2.5 h for the main run and 1 h of val runs.
+    # The story's own budget, 4.5 h in its block in the plan, which the configs' estimates
+    # fill: 1 h for the pilot and 0.3 h for its val run, 2.5 h for the main run and 0.7 h
+    # for its checkpoints. Plan section 3.8's rows give FG-404 4.4 h: the pilot, the main
+    # run and 0.90 h for the main run's 2 checkpoint evals, with no row for the pilot's.
     assert sum(entry["est_gpu_hours"] for entry in entries.values()) == pytest.approx(4.5)
 
 

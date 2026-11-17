@@ -184,3 +184,13 @@ the I5 lines against the reports, and `tests/unit/test_count_extraction.py` and
   questions, at 59.3% and 37.6%, leave training the most room.
 - Its dev run with p2 (Measured) is the baseline the trained model's dev evaluation is
   set against, with the same prompt (plan section 3.6).
+
+## Notes
+
+- 2026-11-17, Phase 4's configs (FG-494). The first consequence above holds for the configs
+  of the runs that train the chosen model, and Phase 4's don't meet it yet: FG-403 wrote its
+  SFT configs before this choice, and `configs/sft/qwen3-4b-main.yaml` trains Qwen3-4B on
+  p1. The main run must train `Qwen/Qwen2.5-Coder-1.5B-Instruct` on p2. The SFT pilot,
+  `configs/sft/qwen3-1p7b-pilot.yaml`, stays on Qwen3-1.7B, the small model plan section
+  3.8 budgets it on, but trains on p2 too. FG-404's runs wait on those changes
+  (`docs/runs/pending.yaml`).

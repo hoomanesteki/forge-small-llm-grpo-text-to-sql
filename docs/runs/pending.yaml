@@ -31,7 +31,7 @@ pending:
     status: blocked
     since: 2026-11-16
     blocked_on:
-      - its config, which trains Qwen3-1.7B on p1, while the SFT runs train the model ADR-0012 chose from FG-307's baselines on 2026-11-17, Qwen/Qwen2.5-Coder-1.5B-Instruct, on p2 (ADR-0007)
+      - its config, which trains on p1, where ADR-0007, accepted on 2026-11-17, has SFT data use p2; the pilot keeps Qwen3-1.7B, plan section 3.8's small model, and only the main run trains ADR-0012's choice
     how: docs/runbook.md, "SFT runs", step 1
     fills:
       - docs/runs/<run_id>/, the SFT run without its checkpoints, which the run store holds
@@ -46,7 +46,7 @@ pending:
     status: blocked
     since: 2026-11-16
     blocked_on:
-      - the sft-pilot run, whose final adapter it scores, and so the change to its config
+      - the sft-pilot run, whose final adapter it scores, and so the change to its config; once the pilot trains on p2, its adapter is scored with configs/eval/qwen3-1-7b-val-p2.yaml, the model's val config at that prompt version
       - a way for that adapter into the kernel, which fetches it from the private run store, since a kernel pushed with the CLI gets no HF_TOKEN
     how: docs/runbook.md, "SFT runs", step 2, with --adapter runs/<pilot_run_id>/checkpoints/final
     fills:
@@ -79,7 +79,7 @@ pending:
     status: blocked
     since: 2026-11-16
     blocked_on:
-      - the sft-main run, whose checkpoints at 50% (kept_at_0.5) and 100% (final) it scores
+      - the sft-main run, whose checkpoints at 50% (kept_at_0.5) and 100% (final) it scores, and so the change to its config; once the main run trains ADR-0012's choice on p2, each checkpoint is scored with configs/eval/qwen2-5-coder-1-5b-val-p2.yaml
       - a way for those checkpoints into the kernel, as for sft-pilot-val
     how: docs/runbook.md, "SFT runs", steps 4 and 5, the config once a checkpoint, each with its --adapter
     fills:
@@ -94,9 +94,10 @@ pending:
     est_gpu_hours: 0
     status: blocked
     since: 2026-11-16
+    # The base run it is compared with is committed: FG-307's val run of ADR-0012's choice at
+    # p2, the prompt the main run trains on, 2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41.
     blocked_on:
       - FG-404's sft-main-checkpoints-val runs and the main run's best.json, which names the val run of checkpoints/best
-      - FG-307's baseline-val-p1 run of ADR-0012's chosen model, the base that run is compared with
     how: docs/runbook.md, "SFT runs", the last paragraph
     fills:
       - docs/runs/<best_val_run_id>/eval/compare-<base_val_run_id>.md (forge report compare)

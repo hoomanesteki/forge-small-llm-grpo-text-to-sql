@@ -1,7 +1,9 @@
-# The main Kaggle SFT run (FG-404): 1 epoch on the chosen model. Qwen/Qwen3-4B is the
-# plan's choice and configs/models.yaml's qwen3-4b candidate, pinned at its commit; FG-307
-# fixes the model from measured baselines (ADR-0012) and may change it. In 4-bit on the
-# T4, with fp16 compute and fp32 adapters (ADR-0006, ADR-0010).
+# The main Kaggle SFT run (FG-404): 1 epoch on the chosen model. Qwen/Qwen3-4B, pinned at
+# the commit of configs/models.yaml's qwen3-4b candidate, was the plan's choice when this
+# file was written. FG-307's baselines since chose Qwen/Qwen2.5-Coder-1.5B-Instruct
+# (ADR-0012) and p2 (ADR-0007), so the main run must train that model on p2: this file
+# still names Qwen3-4B on p1 until that change, which docs/runs/pending.yaml lists. In
+# 4-bit on the T4, with fp16 compute and fp32 adapters (ADR-0006, ADR-0010).
 run:
   kind: sft
   model_ref: Qwen/Qwen3-4B@1cfa9a7208912126459214e8b04321603b3df60c
