@@ -1,6 +1,6 @@
 """What a GRPO run's metrics say about whether it is learning, while it trains and after
-(FG-506): the telemetry each step's line holds, the alerts it sets off, and the plots of
-``forge runs plot``.
+(FG-506): the telemetry each step's line holds, the alerts it sets off, the plots of
+``forge runs plot`` and the polling of ``forge runs watch``.
 
 ``forge.train.callbacks.TelemetryCallback`` writes each step's line in ``metrics.jsonl``.
 TRL 1.18 logs these at every step, with ``logging_steps=1``:
@@ -40,10 +40,10 @@ learning, each as an event when it starts holding and another when it stops:
 An event is a line of the run's ``alerts.jsonl`` (``forge.ops.hub.ALERTS_FILE``), which
 the manifest's outputs name ``alerts``: ``RunManifest`` has no field for them, and the
 contract stays as it is. The events follow from the metrics alone, so the training
-callback and anyone reading a run's metrics find the same ones.
+callback, ``forge runs watch`` and anyone reading a run's metrics find the same ones.
 
-Nothing here imports transformers or torch, so ``forge runs plot`` runs without the cpu
-extra.
+Nothing here imports transformers or torch, so ``forge runs plot`` and ``forge runs
+watch`` run without the cpu extra.
 """
 
 from __future__ import annotations
@@ -52,13 +52,15 @@ import functools
 import inspect
 import json
 import math
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from forge.core.types import RunManifest
 from forge.eval.run_files import RunCorrupt
-from forge.ops.hub import METRICS_FILE, RunStore
+from forge.ops.hub import METRICS_FILE, RunStore, StoreUnavailable
 
 if TYPE_CHECKING:
     from forge.train.backends import RewardFunc
@@ -91,6 +93,7 @@ _DROP_SLACK = 1e-9
 _FLAT = 1e-8
 # The dataset columns a sample keeps beside each prompt, when the batch has them.
 SAMPLE_COLUMNS = ("example_id", "db_id", "hardness", "gold_sql")
+WATCH_EVERY_S = 600.0
 
 AlertRule = Literal["zero_variance", "length_growth", "valid_drop"]
 AlertState = Literal["fired", "cleared"]
@@ -456,6 +459,93 @@ def merged_steps(lines: Iterable[Mapping[str, Any]]) -> list[tuple[int, dict[str
         if isinstance(step, int) and not isinstance(step, bool):
             steps.setdefault(step, {}).update(line)
     return sorted(steps.items())
+
+
+def _percent(value: float | None) -> str | None:
+    return None if value is None else f"{value:.0%}"
+
+
+def status_line(
+    step: int,
+    values: Mapping[str, Any],
+    active: Mapping[AlertRule, AlertEvent],
+    *,
+    max_steps: int | None = None,
+) -> str:
+    """What ``forge runs watch`` prints of a run's latest step."""
+    parts = []
+    reward = finite(values.get(REWARD_KEY))
+    if reward is not None:
+        parts.append(f"reward {reward:.3f}")
+    for label, key in (
+        ("execution match", MATCH_KEY),
+        ("valid", VALID_KEY),
+        ("zero-variance groups", ZERO_STD_KEY),
+        ("val fast EX", VAL_EX_KEY),
+    ):
+        shown = _percent(finite(values.get(key)))
+        if shown is not None:
+            parts.append(f"{label} {shown}")
+    length = finite(values.get(MEAN_LENGTH_KEY))
+    if length is not None:
+        parts.append(f"mean length {length:.0f} tokens")
+    of = "" if max_steps is None else f" of {max_steps}"
+    line = f"step {step}{of}: " + (", ".join(parts) if parts else "no telemetry")
+    if active:
+        on = ", ".join(f"{rule} since step {event.step}" for rule, event in active.items())
+        line += f"; alerts on: {on}"
+    return line
+
+
+def _max_steps(manifest: RunManifest) -> int | None:
+    grpo = manifest.config.get("grpo")
+    steps = grpo.get("max_steps") if isinstance(grpo, Mapping) else None
+    return steps if isinstance(steps, int) else None
+
+
+def watch(
+    store: RunStore,
+    run_id: str,
+    *,
+    every_s: float = WATCH_EVERY_S,
+    sleep: Callable[[float], None] = time.sleep,
+    echo: Callable[[str], None] = print,
+) -> RunManifest:
+    """Read the run's metrics from ``store`` every ``every_s`` seconds, and ``echo`` each
+    alert event not echoed before and the latest step whenever it moves on, until the
+    manifest says the run is no longer running; returns that manifest.
+
+    The store holds what the run has pushed so far: its callbacks push the metrics with
+    each checkpoint. A poll the store can't answer for the network is echoed and tried
+    again at the next; a run the store doesn't hold raises ``RunNotFound``.
+    """
+    if every_s < 0:
+        raise ValueError(f"a watch polls every 0 s or more, not every {every_s} s")
+    echoed: set[tuple[int, str, str]] = set()
+    last_step: int | None = None
+    while True:
+        try:
+            manifest = store.get_manifest(run_id)
+            lines = read_metrics(store, run_id)
+        except StoreUnavailable as exc:
+            echo(f"run {run_id}: {store} can't be reached ({exc}); trying again in {every_s:g} s")
+        else:
+            monitor = AlertMonitor()
+            for event in monitor.replay(lines or []):
+                key = (event.step, event.rule, event.state)
+                if key not in echoed:
+                    echoed.add(key)
+                    echo(event.describe())
+            steps = merged_steps(lines or [])
+            if not steps:
+                echo(f"run {run_id}: no metrics yet")
+            elif steps[-1][0] != last_step:
+                last_step, values = steps[-1]
+                echo(status_line(last_step, values, monitor.active, max_steps=_max_steps(manifest)))
+            if manifest.status != "running":
+                echo(f"run {run_id} is {manifest.status}")
+                return manifest
+        sleep(every_s)
 
 
 # The eval report chart's surface and ink (forge.eval.report), and three series hues

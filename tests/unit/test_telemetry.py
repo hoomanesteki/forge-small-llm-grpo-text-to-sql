@@ -1,6 +1,6 @@
 """GRPO telemetry (FG-506): the alert rules on synthetic metric streams, the plots of a
 fixture run's metrics, the rollouts the reward functions record, the telemetry callback
-driven by hand, event by event, and ``forge runs plot`` on a local store."""
+driven by hand, event by event, and ``forge runs plot|watch`` on a local store."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import functools
 import json
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +43,7 @@ from forge.train.telemetry import (
     plot_metrics,
     read_file_lines,
     step_metrics,
+    watch,
 )
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "telemetry" / "grpo-metrics.jsonl"
@@ -448,6 +449,71 @@ def _manifest(status: str = "running") -> RunManifest:
     )
 
 
+def _append(path: Path, lines: Sequence[dict[str, Any]]) -> None:
+    with path.open("a", encoding="utf-8") as file:
+        for line in lines:
+            file.write(json.dumps(line) + "\n")
+
+
+def _flat_steps(steps: range) -> list[dict[str, Any]]:
+    return [
+        {"step": s, "reward": 0.1, "frac_reward_zero_std": 0.9, "sql/valid_rate": 0.6}
+        for s in steps
+    ]
+
+
+@pytest.mark.phase(5)
+def test_watch_prints_new_alerts_until_the_run_ends(tmp_path: Path) -> None:
+    store = LocalRunStore(tmp_path)
+    store.put_manifest(_manifest())
+    metrics = tmp_path / RUN / "metrics.jsonl"
+    printed: list[str] = []
+    waits: list[float] = []
+    polls = _polls(store, metrics)
+
+    def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        next(polls)
+
+    final = watch(store, RUN, every_s=600, sleep=sleep, echo=printed.append)
+
+    assert final.status == "finished" and waits == [600, 600, 600, 600]
+    assert printed == [
+        f"run {RUN}: no metrics yet",
+        "step 10 of 600: reward 0.100, valid 60%, zero-variance groups 90%",
+        f"run {RUN}: {store} can't be reached (the Hub is down); trying again in 600 s",
+        "step 20: alert zero_variance: 90% of groups had zero reward variance, above 80% at "
+        "every step since step 1: no learning signal",
+        "step 20 of 600: reward 0.100, valid 60%, zero-variance groups 90%; alerts on: "
+        "zero_variance since step 20",
+        # Nothing new at the next read: the alert isn't printed again.
+        "step 21: cleared zero_variance: 10% of groups had zero reward variance",
+        "step 21 of 600: reward 0.900, zero-variance groups 10%",
+        f"run {RUN} is finished",
+    ]
+    with pytest.raises(ValueError, match="every 0 s or more"):
+        watch(store, RUN, every_s=-1)
+
+
+def _polls(store: LocalRunStore, metrics: Path) -> Iterator[None]:
+    """What happens to the run between the watch's reads."""
+    _append(metrics, _flat_steps(range(1, 11)))
+    yield
+    down = store.read_file
+
+    def unreachable(run_id: str, dest: str) -> bytes | None:
+        raise StoreUnavailable("the Hub is down")
+
+    store.read_file = unreachable  # type: ignore[method-assign]
+    yield
+    store.read_file = down  # type: ignore[method-assign]
+    _append(metrics, _flat_steps(range(11, 21)))
+    yield
+    _append(metrics, [{"step": 21, "reward": 0.9, "frac_reward_zero_std": 0.1}])
+    store.put_manifest(_manifest("finished"))
+    yield
+
+
 @pytest.mark.phase(5)
 def test_runs_plot_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
@@ -469,4 +535,23 @@ def test_runs_plot_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     elsewhere = runner.invoke(cli.app, ["runs", "plot", RUN, "--store", "local", "--out", str(out)])
     assert elsewhere.exit_code == 0 and (out / "sql-rates.png").is_file()
     unknown = runner.invoke(cli.app, ["runs", "plot", "2026-11-20-none", "--store", "local"])
+    assert unknown.exit_code == 1 and "error: no run 2026-11-20-none" in unknown.output
+
+
+@pytest.mark.phase(5)
+def test_runs_watch_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
+    store = LocalRunStore(tmp_path / "runs")
+    store.put_manifest(_manifest("finished"))
+    store.put_file(RUN, FIXTURE, "metrics.jsonl")
+    runner = CliRunner()
+
+    watched = runner.invoke(cli.app, ["runs", "watch", RUN, "--store", "local", "--every", "0"])
+    assert watched.exit_code == 0, watched.output
+    assert watched.output.splitlines() == [
+        "step 60 of 600: reward 0.698, execution match 56%, valid 88%, zero-variance groups "
+        "27%, val fast EX 48%, mean length 68 tokens",
+        f"run {RUN} is finished",
+    ]
+    unknown = runner.invoke(cli.app, ["runs", "watch", "2026-11-20-none", "--store", "local"])
     assert unknown.exit_code == 1 and "error: no run 2026-11-20-none" in unknown.output

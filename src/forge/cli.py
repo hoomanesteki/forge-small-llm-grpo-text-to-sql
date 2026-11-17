@@ -1626,6 +1626,30 @@ def runs_plot(
         typer.echo(str(path))
 
 
+@runs_app.command("watch")
+def runs_watch(
+    run_id: RunArgument,
+    store: StoreOption = "hub",
+    every: Annotated[
+        float, typer.Option("--every", min=0, help="Minutes between reads of the run's metrics.")
+    ] = 10.0,
+) -> None:
+    """Read the run's metrics every --every minutes and print each new alert and the
+    latest step, until its manifest says it is no longer running (FG-506).
+
+    The store has the metrics the run pushed with its latest checkpoint. A read that
+    fails on the network is printed and tried again at the next.
+    """
+    from forge.ops.hub import open_store
+    from forge.train.telemetry import watch
+
+    try:
+        watch(open_store(store), run_id, every_s=60 * every, echo=typer.echo)
+    except _runs_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
 train_app = typer.Typer(help="Train LoRA adapters on the train split.", no_args_is_help=True)
 app.add_typer(train_app, name="train")
 

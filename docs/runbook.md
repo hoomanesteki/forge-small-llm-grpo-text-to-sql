@@ -471,6 +471,27 @@ config, commit and data: `uv run forge train grpo --config <the config> --run-id
 The ops section may change between sessions, since it changes no weight. The Kaggle job
 (`forge kaggle run --job grpo`) comes with FG-507.
 
+### Watching a GRPO run
+
+Each step's line in `metrics.jsonl` holds TRL's logs (each reward's mean and spread,
+`frac_reward_zero_std`, completion lengths, `kl` when beta isn't 0, the learning rate) and
+what Forge adds: `sql/valid_rate`, `sql/execution_match_rate` and
+`completions/p95_length`. Every 50 steps `samples/step-NNNNNN.jsonl` keeps the latest 12
+prompts with all their completions and each reward. Three alerts go to the log and to
+`alerts.jsonl`, which the manifest's outputs name `alerts` (an empty file is a run with
+none): over 80% of groups with zero reward variance for 20 steps, a mean completion
+length over twice the first step's, and the valid-SQL rate more than 20 points below its
+peak. Each fires once, and clears once it no longer holds.
+
+```bash
+uv run forge runs watch <run_id>                # every 10 min: new alerts, the latest step
+uv run forge runs watch <run_id> --store local --every 1   # a run on this machine
+uv run forge runs plot <run_id> --store local   # PNGs in runs/<run_id>/plots/ (--out)
+```
+
+`watch` stops once the manifest says the run is no longer running. The store has the
+metrics the run pushed with its latest checkpoint.
+
 ## Troubleshooting
 
 - **`ModuleNotFoundError: forge` on macOS.** The venv can come out with the hidden file
