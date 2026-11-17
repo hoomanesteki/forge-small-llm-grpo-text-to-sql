@@ -1,0 +1,28 @@
+{
+  "run_id": "2026-11-16-qwen3-1-7b-val-c8f4b41",
+  "job": "eval",
+  "code_sha": "c8f4b419f1f2666984a48c49eeb7827fc0b7d1e4",
+  "options": {
+    "model": "Qwen/Qwen3-1.7B@70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "backend": "vllm",
+    "split": "val",
+    "limit": null,
+    "prompt_version": "p1",
+    "n": 1,
+    "temperature": 0.0,
+    "retry": 0
+  },
+  "kernels": [
+    {
+      "kernel": "hoomanesteki/forge-2026-11-16-qwen3-1-7b-val-c8f4b41",
+      "version": 1,
+      "pushed_at": "2026-11-16T18:49:59+00:00",
+      "code": "hoomanesteki/forge-code/1",
+      "est_gpu_hours": 0.3,
+      "timeout_s": 1620,
+      "allow_over_budget": false,
+      "over_budget": false,
+      "kaggle_gpu_hours_left": 29.23
+    }
+  ]
+}

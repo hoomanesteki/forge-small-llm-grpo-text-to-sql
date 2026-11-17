@@ -1,0 +1,28 @@
+{
+  "run_id": "2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41",
+  "job": "eval",
+  "code_sha": "c8f4b419f1f2666984a48c49eeb7827fc0b7d1e4",
+  "options": {
+    "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a",
+    "backend": "vllm",
+    "split": "val",
+    "limit": null,
+    "prompt_version": "p1",
+    "n": 1,
+    "temperature": 0.0,
+    "retry": 0
+  },
+  "kernels": [
+    {
+      "kernel": "hoomanesteki/forge-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41",
+      "version": 1,
+      "pushed_at": "2026-11-16T19:18:16+00:00",
+      "code": "hoomanesteki/forge-code/1",
+      "est_gpu_hours": 0.3,
+      "timeout_s": 1620,
+      "allow_over_budget": false,
+      "over_budget": false,
+      "kaggle_gpu_hours_left": 28.77
+    }
+  ]
+}
