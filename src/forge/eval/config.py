@@ -12,8 +12,9 @@ the option says where hf runs. ``read_config_file`` reads the options a file in
 ``configs/eval/`` sets, which ``forge eval run --config`` takes as its defaults. A file may
 also hold an ``ops`` section saying how a job is run rather than what it computes, such as
 the GPU hours ``forge kaggle run`` budgets for it; ``read_config_sections`` returns it
-apart. ``quantization`` loads a vllm model's weights in 4-bit, for a reference model too
-big for a T4 in fp16 (plan section 3.13, FG-307); the manifest records it, as it changes
+apart. ``quantization`` loads a vllm model's 4-bit weights from an AWQ checkpoint, for a
+reference model too big for a T4 in fp16 (plan section 3.13, FG-307, FG-398); bitsandbytes,
+which vLLM 0.33.0 doesn't have, is refused with why. The manifest records it, as it changes
 the scores, but only when set, so a run made before the option keeps its config hash.
 ``gpu_memory_utilization`` is the share of the GPU's memory vllm's engine takes, the
 backend's default when unset; the manifest records it the same way, as the memory left for
@@ -39,6 +40,7 @@ from forge.data.splits import SPLITS
 from forge.eval.agreement import GOLD_TIMEOUT_MS
 from forge.eval.gold_cache import MAX_ROWS
 from forge.infer.base import check_params
+from forge.infer.vllm_backend import check_quantization
 from forge.ops.manifest import Platform
 from forge.sql.executor import DEFAULT_TIMEOUT_MS
 
@@ -48,9 +50,9 @@ Device = Literal["cpu", "mps"]
 Store = Literal["local", "hub"]
 # The hosted machines a kernel job runs on: kaggle/entry.py names the one it is on.
 Host = Literal["kaggle", "colab"]
-# How vllm may load weights in fewer bits: bitsandbytes' 4-bit, as forge.infer.vllm_backend
-# allows, and nothing else.
-Quantization = Literal["bitsandbytes"]
+# How vllm may load weights in fewer bits: an AWQ checkpoint's 4-bit, as
+# forge.infer.vllm_backend allows, and nothing else.
+Quantization = Literal["awq"]
 BACKENDS: tuple[Backend, ...] = get_args(Backend)
 DEVICES: tuple[Device, ...] = get_args(Device)
 STORES: tuple[Store, ...] = get_args(Store)
@@ -228,13 +230,10 @@ def check_config(config: EvalConfig) -> None:
             "with forge kaggle run --job eval"
         )
     if config.quantization is not None:
-        if config.quantization not in QUANTIZATIONS:
-            raise ValueError(
-                f"quantization must be one of {', '.join(QUANTIZATIONS)}, "
-                f"got {config.quantization!r}"
-            )
+        # The backend's own check, so a config is refused before a push with its reason.
+        check_quantization(config.quantization)
         if config.backend != "vllm":
-            # hf runs on the CPU or MPS, where bitsandbytes' 4-bit kernels don't.
+            # hf runs on the CPU or MPS, and the AWQ kernels are vLLM's, on CUDA.
             raise ValueError(f"quantization is for backend vllm, not {config.backend}")
     if config.gpu_memory_utilization is not None:
         # Negated so that NaN fails too.

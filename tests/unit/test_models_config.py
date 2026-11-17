@@ -87,11 +87,15 @@ def test_baseline_models_are_open_pinned_and_sized_for_their_role() -> None:
     # The plan's Qwen2.5-Coder-3B-Instruct is under the non-commercial Qwen Research license.
     assert "Qwen/Qwen2.5-Coder-3B-Instruct" not in {e["repo"] for e in candidates.values()}
     # Candidates are about 1.5B to 4B; the reference is larger, so vllm loads it in 4-bit,
-    # and only it.
+    # and only it: Qwen's AWQ checkpoint, since vLLM 0.33.0 has no bitsandbytes (FG-301).
     assert all(1.5e9 <= e["params"] <= 4.1e9 for e in candidates.values())
     assert not any("quantization" in e for e in candidates.values())
     (big,) = reference.values()
-    assert big["params"] > 4.1e9 and big["quantization"] == "bitsandbytes"
+    assert big["params"] > 4.1e9 and big["quantization"] == "awq"
+    assert (big["repo"], big["revision"]) == (
+        "Qwen/Qwen3-8B-AWQ",
+        "4da05a8edb55c6046cce958586c33b61da07bb79",
+    )
 
 
 @pytest.mark.phase(3)

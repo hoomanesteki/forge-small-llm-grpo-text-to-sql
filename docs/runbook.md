@@ -46,22 +46,26 @@ A GPU job runs the code and reads the data from two private Kaggle datasets, bot
    again later; and when the last version failed or was deleted, it uploads the files again
    as a new version.
 2. `uv run forge kaggle publish-code`, on a clean tree, for each commit a job runs. It builds
-   the wheel into `build/kaggle-code/` with `kaggle/requirements-gpu.txt` and `GIT_SHA`, then
-   uploads it as a new version of `<owner>/forge-code` noted with the SHA, creating the
-   dataset the first time.
+   the wheel into `build/kaggle-code/` with both GPU package lists,
+   `kaggle/requirements-gpu.txt` and `kaggle/requirements-train-gpu.txt` (see GPU stack), and
+   `GIT_SHA`, then uploads it as a new version of `<owner>/forge-code` noted with the SHA,
+   creating the dataset the first time.
 
 Both datasets are private: Forge never passes `-u`, and each `dataset-metadata.json` says
 `"isPrivate": true`, so `kaggle datasets metadata --update` keeps them private too.
 
 ## GPU stack
 
-A kernel installs `kaggle/requirements-gpu.txt` over Kaggle's image, after the wheel. vLLM
-decides most of it (FG-306). FG-301 ran it on a T4: vLLM 0.33.0 generated in fp16 on these
-versions, and only GRPO through it failed, at vLLM's load of the 4-bit policy, since vLLM
-0.33.0 has no bitsandbytes. So it is the evaluation stack; training jobs get the spike's
-`trl` stack (ADR-0006) once FG-398 lands, and until then every job installs this list. pip
-took 392 s over the image in the 50-question eval job, where uv takes 96 s for the same
-list into an empty venv (`docs/spikes/kaggle-gpu.md`, question 3).
+A kernel installs one of two package lists over Kaggle's image, after the wheel, chosen by
+its job (ADR-0006): an eval job `kaggle/requirements-gpu.txt`, vLLM's stack, and a training
+job (`--job sft` or `grpo`) `kaggle/requirements-train-gpu.txt`, the `trl` stack, which has
+no vLLM. The install stage's result in `status.json` names the file it installed.
+
+The eval list is vLLM's: vLLM decides most of it (FG-306). FG-301 ran it on a T4: vLLM
+0.33.0 generated in fp16 on these versions, and only GRPO through it failed, at vLLM's load
+of the 4-bit policy, since vLLM 0.33.0 has no bitsandbytes. pip took 392 s over the image in
+the 50-question eval job, where uv takes 96 s for the same list into an empty venv
+(`docs/spikes/kaggle-gpu.md`, question 3).
 
 | Package | Version | Why this one |
 |---|---|---|
@@ -77,6 +81,13 @@ transformers calls Forge makes in a kernel (`apply_chat_template` and `get_chat_
 for prompts, the trainer callback classes for the time guard) were checked against the
 5.20.2 source and do the same for Forge's arguments. A test keeps the file the same as the
 spike's `trl-vllm` stack.
+
+The training list is the spike's `trl` stack, on which FG-301 ran GRPO in 4-bit with fp16
+for Qwen3 1.7B and 4B (question 5): uv.lock's trl 1.18.0, transformers 5.23.0, peft 0.21.3,
+accelerate 1.15.0, datasets 5.2.0 and huggingface-hub 2.4.0, the versions CI tests, and
+bitsandbytes 0.50.2. It pins no torch, so training runs on the image's torch
+2.11.0+cu130, as the spike's did, and no vLLM. pip installed it in 20.0 s into a venv over
+the image's packages (`install:trl`). A test keeps the file the same as that stack.
 
 ## Kaggle jobs
 
@@ -103,13 +114,11 @@ holds HEAD, so the next push from the same commit mounts it.
    `configs/eval/*.yaml` file whose `backend` is `vllm` (FG-306; `hf` runs on the CPU, so it
    is refused on a T4), with an `ops` section giving `est_gpu_hours`. `--job sft` and
    `--job grpo` come with FG-403 and FG-504. The run id must make a kernel slug Kaggle
-   takes (`forge-<run_id>`, and `-<n>` on a resume: lowercase letters and digits with
-   single hyphens between them, so not `a--b` or `run-`), the run must not clash with an
-   earlier push, and a dev job needs a dev look left (see Dev). Kaggle also refuses a
-   kernel title over 50 characters, and the title is `Forge <run_id>` (with ` <n>` on a
-   resume), so a run id may have 44 characters at most, 42 for a resume: a longer one gets
-   `400 Client Error: Bad Request` from the push after the code dataset step (FG-301).
-   Until FG-398 checks it and shortens such a kernel's name, pick a shorter `--run-id`.
+   takes (`forge-<run_id>`: lowercase letters and digits with single hyphens between
+   them, so not `a--b` or `run-`), the run must not clash with an earlier push, and a dev
+   job needs a dev look left (see Dev). Kaggle refuses a kernel title or slug over 50
+   characters with a bare `400 Client Error: Bad Request` (FG-301), so the metadata check
+   refuses one before any push, and a run's kernel name is kept within it (below).
 3. The current version of `<owner>/forge-code` must hold HEAD's wheel (its `GIT_SHA`), or
    HEAD is published as a new version, which is waited for until Kaggle says `ready`. The
    kernel mounts that version by number, with `<owner>/forge-spider`, which must exist
@@ -123,15 +132,22 @@ holds HEAD, so the next push from the same commit mounts it.
    in `KERNEL_ARGV`, and private GPU metadata with internet. It pushes with
    `--accelerator NvidiaTeslaT4` and a timeout of the estimate and half again (at most 12
    hours: plan section 5.3 stops a job 50% over its estimate), and reads the CLI's output:
-   a push error fails the command although kaggle exits 0. A source the CLI says it could
-   not add is a warning instead, since Kaggle has saved and started that version without
-   it. Either way a version Kaggle started is added to `runs/<run_id>/kernels.json`, which
-   `status`, `logs`, `wait` and `output` read.
+   a push error fails the command although kaggle exits 0, and a CLI that fails before it
+   says the kernel was pushed is checked against Kaggle's own status (see Dev). A source
+   the CLI says it could not add is a warning instead, since Kaggle has saved and started
+   that version without it. Either way a version Kaggle started is added to
+   `runs/<run_id>/kernels.json`, which `status`, `logs`, `wait` and `output` read.
 
 The run id is `<date>-<model>-eval-<sha7>` unless `--run-id` names it, and the kernel
-`<owner>/forge-<run_id>`. A run id that was pushed before is refused. `--resume` pushes the
-run again from the same commit with the same options, as `<owner>/forge-<run_id>-<n>`,
-mounting the last attempt's kernel so the eval carries on from its stored files. An attempt
+`<owner>/forge-<run_id>`, titled `Forge <run_id>`. A run id that was pushed before is
+refused. `--resume` pushes the run again from the same commit with the same options, as
+`<owner>/forge-<run_id>-<n>` (` <n>` in the title), mounting the last attempt's kernel so
+the eval carries on from its stored files. A name that would pass Kaggle's 50 characters,
+such as the 57 of `Forge 2026-11-16-qwen2-5-coder-1-5b-instruct-eval-c8f4b41`, keeps the run
+id up to a dash and adds 8 hex digits of its sha256 (`forge-2026-11-16-qwen2-5-coder-1-5b-`
+and the digits, with `-<n>` on a resume), the same on every machine. The run id itself
+stays as it is, in the kernel's arguments and everywhere else: `kernels.json` maps it to
+its kernels, so `status`, `logs`, `wait`, `output` and `--resume` take the run id. An attempt
 whose own kernel source Kaggle dropped failed to restore the run, so `kernels.json` marks it
 (`kernel_source_dropped`) and the next resume mounts the attempt before it.
 
@@ -144,8 +160,9 @@ once. Rows already committed keep the dates they were written with.
 In the kernel, `entry.py` runs its stages in order: restore (on a resume, the run's files
 from the last attempt's output, first, so that an attempt failing at any later stage still
 carries the run to the next resume), env (the interpreter, for the log), code (the code
-dataset's `GIT_SHA` must be the pushed commit), install (`pip install --no-deps` the wheel,
-then `requirements-gpu.txt`; it names any package the wheel needs that the image lacks),
+dataset's `GIT_SHA` must be the pushed commit, and it must hold the wheel and both package
+lists), install (`pip install --no-deps` the wheel, then the job's package list, see GPU
+stack; it names any package the wheel needs that the image lacks),
 data (the dataset found by its `spider.sha256`, `database.zip` unpacked if Kaggle left it
 packed, every file checked against the list the installed wheel pins, not the dataset's own
 copy), secrets, preflight (the same job on 5 examples, in `preflight/`), job, and upload
@@ -180,21 +197,40 @@ checkpoint's `generation_config.json` defaults, and each question has a seed of 
 A temperature between 0 and 0.01 is refused, on every backend, since vLLM would decode it
 at 0.01. The preflight and the job share one engine, loaded once, since a second might not
 fit beside the first. `forge eval run --backend vllm` on the laptop is refused: its manifest
-would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: bitsandbytes`
-asks for 4-bit weights, for a reference model too big for the T4 in fp16, but vLLM 0.33.0
-has no bitsandbytes and refuses it ("Unknown quantization method: bitsandbytes", FG-301);
-FG-398 moves the reference to an AWQ checkpoint.
+would call a GPU run `local-cpu` (ADR-0016). A config with `quantization: awq` loads an
+AWQ checkpoint's 4-bit weights, for a reference model too big for the T4 in fp16, as
+FG-307's `Qwen/Qwen3-8B-AWQ` (ADR-0012); vLLM's AWQ kernels need compute capability 7.5,
+which the T4 has, and no run has loaded that checkpoint on a T4 yet. `quantization:
+bitsandbytes` is refused before any push, in one line: vLLM 0.33.0 has no bitsandbytes and
+refused it as "Unknown quantization method: bitsandbytes" (FG-301).
 
 Dev. A config with `split: dev` needs `--reason`, as `forge eval run --split dev` does, and
 is refused once `docs/dev-usage.md` holds six looks (ADR-0004). The push spends the look:
 `forge kaggle run` writes its row, with the run id and the reason, as soon as Kaggle
 accepts the push, and records the kernel whether or not that write worked: if either step
-fails, the error names it and says not to push again, since the kernel runs. A push fails
-only when Kaggle refuses it ("Kernel push error") or the kaggle CLI exits with an error
-before it says the kernel was pushed; any other answer, one that names no version among
-them, is a kernel that runs, and its look is spent. So a kernel that may read dev has its
-row unless the error says it hasn't, and a push that fails spends nothing. A
-`--resume` carries on the same run, from the same commit with the same options, so it is
+fails, the error names it and says not to push again, since the kernel runs. A push that
+Kaggle refuses ("Kernel push error") fails and spends nothing. A kaggle CLI that exits with
+an error before it says the kernel was pushed may only have lost Kaggle's answer, a
+timeout among them, after Kaggle saved the kernel, so `forge kaggle run` then asks Kaggle
+with `kaggle kernels status` whether it has the attempt's kernel, which no earlier push
+made:
+
+- Kaggle has it: the push was made. It is recorded in `kernels.json`, with no version, so
+  the kernel's latest is followed, its look is logged, and a warning says the answer was
+  lost.
+- Kaggle has no such kernel: the push never started, so it fails and spends nothing.
+- Kaggle can't be asked either: the push fails and records nothing, and the error says
+  whether Kaggle saved the kernel is unknown. Check with `kaggle kernels status
+  <owner>/<slug>` before pushing again: a kernel Kaggle has runs, and a dev job's then
+  reads dev without its row in `docs/dev-usage.md`.
+
+Any other answer from the CLI, one that names no version among them, is a kernel that runs,
+and its look is spent. So a kernel that may read dev has its row unless the error says it
+hasn't. The spike, which reads no dev, isn't checked: its push makes a new version of the
+one kernel earlier pushes made, and the status names no version, so it can't tell this
+push's from the one before. When its CLI fails, the spike's push fails as before.
+
+A `--resume` carries on the same run, from the same commit with the same options, so it is
 the same look: it adds no row, and it goes even once the six are spent. In the kernel the
 preflight answers 5 val questions instead, so dev loads once, in the job, whose own row
 goes to `dev-usage.md` in the kernel's output. A dev job has no `--emit-notebook`, since a
@@ -355,17 +391,17 @@ Push them in this order, from one clean commit that passed `make smoke`:
 2. The model ADR-0012's rule chooses from step 1's runs, with p2: its `<name>-val-p2`
    (ADR-0007). The rule also needs FG-301's GRPO memory check, which every candidate
    passed (ADR-0012).
-3. The reference on val, in 4-bit: `qwen3-8b-val`. Its `quantization: bitsandbytes` fails
-   on vLLM 0.33.0 (FG-301), so it waits for FG-398's AWQ checkpoint.
+3. The reference on val, in 4-bit: `qwen3-8b-val`, the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`
+   (FG-398), since vLLM 0.33.0 has no bitsandbytes (FG-301). This run is the first to load
+   it on a T4, so push the reference's dev run (step 5) only once this one has loaded it:
+   that push spends a dev look.
 4. I6's repeat: `qwen2-5-coder-1-5b-val-100`, the first 100 val questions again.
 5. The model ADR-0012's rule chooses, and the reference, on dev, once each:
    `<name>-dev` and `qwen3-8b-dev`, with `--reason baseline`. These are dev looks 1 and 2.
 
 The same model's runs from one commit on one day would share a default run id, so name each:
-`--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Until
-FG-398 lands the id may have 44 characters at most (Kaggle jobs, step 2), and of that
-pattern's ids only the I6 repeat's is longer, at 45: shorten it, for example to
-`<date>-qwen2-5-coder-1-5b-val100-<sha7>`. Kaggle runs at most two GPU sessions at once and
+`--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Kaggle
+runs at most two GPU sessions at once and
 refuses a third push ("Maximum batch GPU session count of 2 reached."), so push two and wait
 for one to end before the next. For each run, `forge kaggle wait <run_id>`, which adds its
 ledger row, then `forge runs pull <run_id> --store kaggle` (the kernel has no `HF_TOKEN`, so

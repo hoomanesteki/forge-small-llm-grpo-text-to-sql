@@ -18,7 +18,9 @@ Before a push, in the plan's order (FG-303):
 6. ``KaggleClient.push_kernel`` with a T4 and a timeout of the estimate and half again, at
    most a session's 12 hours: plan section 5.3 stops a job 50% over its estimate. The
    entry script gets the timeout too, and its eval job stops at the time guard before
-   it. Each push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait
+   it. A push whose CLI failed without saying it pushed is a push made when Kaggle has
+   the attempt's new kernel all the same (``JobPlan.new_kernel``): only its answer was
+   lost. Each push is recorded in ``runs/<run_id>/kernels.json``, which status, logs, wait
    and output read to find the run's kernel. A resume mounts the last attempt whose
    output holds the run: not one whose own kernel source Kaggle dropped, since that one
    failed to restore it.
@@ -26,14 +28,20 @@ Before a push, in the plan's order (FG-303):
 A dev eval job takes ``--reason``, as ``forge eval run --split dev`` does, and is refused
 once the six dev looks are spent (ADR-0004). The push spends its look: ``log_dev_look``
 writes the row in ``docs/dev-usage.md`` here, where the repo is, since the kernel's own
-log stays in its output, as soon as Kaggle has accepted the push. ``settle_push`` logs it
-and records the push each whatever the other raises, as Kaggle runs the kernel either
-way. A ``--resume`` of the same run is the same look, so it adds no row and goes even
+log stays in its output, as soon as Kaggle has accepted the push, a push whose answer was
+lost among them. ``settle_push`` logs it and records the push each whatever the other
+raises, as Kaggle runs the kernel either way. A ``--resume`` of the same run is the same
+look, so it adds no row and goes even
 once the looks are spent. A notebook can run any number of times, so a dev job has none,
 and it can't fetch a kernel's output, so it resumes nothing.
 
-The kernel's slug, ``forge-<run_id>`` with ``-<attempt>`` on a resume, must be one Kaggle
-takes; ``plan_job`` checks it with the run id, before any dataset is published.
+A run id must make a kernel slug Kaggle takes, ``forge-<run_id>``, which ``plan_job``
+checks before any dataset is published. Each push gets a kernel of its own, named by
+``kernel_name``: ``forge-<run_id>``, with ``-<attempt>`` on a resume, titled ``Forge
+<run_id>`` (`` <attempt>``) so the title slugifies to the slug. Kaggle refuses a title
+over 50 characters, so a longer name keeps the run id up to a dash and adds a hash of the
+whole run id. The run id itself never changes: ``kernels.json`` maps it to its kernels,
+which is how status, logs, wait, output and ``--resume`` find them.
 
 The ``spike`` job pushes FG-301's throughput script instead of the entry script. It runs
 without Forge, so it mounts no dataset and has no preflight.
@@ -41,6 +49,7 @@ without Forge, so it mounts no dataset and has no preflight.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -79,6 +88,7 @@ from forge.ops.kaggle import (
     DATA_SLUG,
     DATASET_BROKEN,
     GIT_SHA_FILE,
+    MAX_KERNEL_NAME,
     KaggleClient,
     KaggleError,
     PushedKernel,
@@ -101,6 +111,9 @@ SPIKE = Path("kaggle") / "spike" / "throughput.py"
 # The FG-301 GPU kernel's name, the one scripts/kaggle_spike.py bundles.
 SPIKE_SLUG = "forge-throughput-spike"
 SPIKE_TITLE = "Forge throughput spike"
+# Hex digits of the run id's sha256 in a shortened kernel name: enough that two long run
+# ids that begin alike still name kernels of their own.
+NAME_HASH_DIGITS = 8
 KERNEL_BUILD = Path("build") / "kaggle-kernel"
 STATUS_FILE = "status.json"  # what kaggle/entry.py writes in the run's folder
 SESSION_HOURS = 12.0
@@ -140,6 +153,12 @@ class JobPlan:
 
     @property
     def mounts_datasets(self) -> bool:
+        return self.job != "spike"
+
+    @property
+    def new_kernel(self) -> bool:
+        """Whether the push makes a kernel no earlier push made: each attempt of an entry
+        job has its own, while the spike's one kernel gets a new version every push."""
         return self.job != "spike"
 
     @property
@@ -261,10 +280,7 @@ def plan_job(
     check_run_id(run_id)
     record = read_record(runs_root, run_id)
     kernel_sources: tuple[str, ...] = ()
-    if job == "spike":
-        slug, title = SPIKE_SLUG, SPIKE_TITLE
-    else:
-        slug, title = f"forge-{run_id}", f"Forge {run_id}"
+    attempt = 1
     if record is not None and not resume:
         carry_on = "" if job == "spike" else "--resume to carry it on, or "
         raise JobRefused(
@@ -289,12 +305,16 @@ def plan_job(
         holding = [k for k in record["kernels"] if not k.get("kernel_source_dropped")]
         kernel_sources = (kernel_ref(holding[-1]),)
         attempt = len(record["kernels"]) + 1
-        slug, title = f"{slug}-{attempt}", f"{title} {attempt}"
-    if not valid_slug(slug):
+    if job == "spike":
+        slug, title = SPIKE_SLUG, SPIKE_TITLE
+    elif not valid_slug(f"forge-{run_id}"):
         raise JobRefused(
-            f"run id {run_id} makes the kernel slug {slug}, which Kaggle refuses: lowercase "
-            "letters and digits with single hyphens between them; pass another --run-id"
+            f"run id {run_id} makes the kernel slug forge-{run_id}, which Kaggle refuses: "
+            "lowercase letters and digits with single hyphens between them; pass another "
+            "--run-id"
         )
+    else:
+        slug, title = kernel_name(run_id, attempt)
     reads_dev = options.get("split") == "dev"
     same_look = resume and _look_logged(run_id)
     if reads_dev and not same_look and count_dev_uses() >= MAX_DEV_USES:
@@ -314,6 +334,36 @@ def plan_job(
         resume=resume,
         kernel_sources=kernel_sources,
     )
+
+
+def kernel_name(run_id: str, attempt: int = 1) -> tuple[str, str]:
+    """The slug and title of the kernel that pushes ``attempt`` of the run ``run_id``.
+
+    ``forge-<run_id>`` and ``Forge <run_id>``, with ``-<attempt>`` and `` <attempt>`` after
+    the first, while they fit Kaggle's 50 characters. Past that, the run id is cut at a
+    dash to leave room for a hash of all of it, so the name is the same on every machine
+    and two run ids that begin alike still get kernels of their own.
+    """
+    after = f"-{attempt}" if attempt > 1 else ""
+    stem = run_id
+    if len(f"forge-{run_id}{after}") > MAX_KERNEL_NAME:
+        digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:NAME_HASH_DIGITS]
+        room = MAX_KERNEL_NAME - len("forge-") - len(after) - len(digest) - 1
+        stem = f"{_cut_at_dash(run_id, room)}-{digest}"
+    title = f"Forge {stem}" + (f" {attempt}" if attempt > 1 else "")
+    return f"forge-{stem}{after}", title
+
+
+def _cut_at_dash(run_id: str, room: int) -> str:
+    """The longest start of ``run_id`` that ends before one of its dashes and has at most
+    ``room`` characters, or its first ``room`` characters when its first word is longer."""
+    first, *rest = run_id.split("-")
+    kept = first[:room]
+    for word in rest:
+        if len(kept) + 1 + len(word) > room:
+            break
+        kept = f"{kept}-{word}"
+    return kept
 
 
 def read_spike_config(path: Path) -> tuple[list[str], Ops]:

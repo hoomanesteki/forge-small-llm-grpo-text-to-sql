@@ -31,9 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# CPU training and inference: used locally and in CI. GPU packages (unsloth, vllm,
-# bitsandbytes) are pinned in kaggle/requirements-gpu.txt against the Kaggle image
-# instead of this lock file, see docs/adr/0002-dependency-pins.md.
+# CPU training and inference: used locally and in CI. GPU packages (vllm, bitsandbytes)
+# are pinned in kaggle/requirements-gpu.txt and kaggle/requirements-train-gpu.txt against
+# the Kaggle image instead of this lock file, see docs/adr/0002-dependency-pins.md.
 cpu = [
     "accelerate>=1.0",
     "datasets>=3.0",

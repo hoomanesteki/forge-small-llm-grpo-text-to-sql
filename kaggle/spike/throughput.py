@@ -69,8 +69,9 @@ OUT_DIR = "/kaggle/working"  # the folder Kaggle keeps as a kernel's output
 CHILD_ENV = "FORGE_SPIKE_CHILD"
 PROBE_NAME = "limit-probe.json"
 DEFAULT_MODELS = ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B")
-# configs/models.yaml's reference, which FG-307 has vLLM load in 4-bit with bitsandbytes;
-# the kernel can't read that file, so a unit test keeps the two the same.
+# FG-307's reference as FG-301 asked about it: vLLM loading it in 4-bit with bitsandbytes,
+# which vLLM 0.33.0 refused, so configs/models.yaml now names Qwen's AWQ checkpoint of it
+# (FG-398). The kernel can't read that file, so a unit test keeps the two in step.
 REFERENCE_MODEL = "Qwen/Qwen3-8B"
 BNB_PROMPTS = 10  # enough to show it loads and answers
 MODEL_FILES = ["*.json", "*.safetensors", "*.txt", "*.jinja"]

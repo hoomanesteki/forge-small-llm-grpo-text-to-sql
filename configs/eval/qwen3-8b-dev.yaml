@@ -1,9 +1,11 @@
 # FG-307 baseline on Spider dev, for the reference: one of the six dev looks, pushed with
 # --reason baseline, which logs it (ADR-0004, docs/runbook.md "Baselines"). The model is
-# configs/models.yaml's reference.qwen3-8b, pinned to the same commit, loaded in 4-bit.
-model: Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218
+# configs/models.yaml's reference.qwen3-8b, Qwen's 4-bit AWQ checkpoint of Qwen3-8B, pinned
+# to the same commit. As on val, the estimate is not worked out by plan section 3.8's eval
+# formula: no run has measured this checkpoint on a T4.
+model: Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79
 backend: vllm
-quantization: bitsandbytes
+quantization: awq
 split: dev
 limit: null
 prompt_version: p1

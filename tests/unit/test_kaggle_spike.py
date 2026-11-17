@@ -315,14 +315,16 @@ def test_plan_runs_each_stack_after_its_install(tmp_path: Path) -> None:
 @pytest.mark.phase(3)
 def test_bnb_stage_loads_the_reference_model() -> None:
     # The kernel can't read configs/models.yaml, so the script names FG-307's 4-bit
-    # reference itself, and vLLM's stack carries the bitsandbytes it needs.
+    # reference itself, and vLLM's stack carries the bitsandbytes it needs. vLLM 0.33.0
+    # refused that load, so the reference is now Qwen's AWQ checkpoint of the same model
+    # (FG-398), and the script keeps the model FG-301 asked about.
     models = yaml.safe_load((ROOT / "configs" / "models.yaml").read_text(encoding="utf-8"))
-    four_bit = [
-        entry["repo"]
-        for entry in models["reference"].values()
-        if entry.get("quantization") == "bitsandbytes"
-    ]
-    assert spike.parse_args(["run"]).bnb_models == four_bit == [spike.REFERENCE_MODEL]
+    (reference,) = models["reference"].values()
+    assert (reference["repo"], reference["quantization"]) == (
+        f"{spike.REFERENCE_MODEL}-AWQ",
+        "awq",
+    )
+    assert spike.parse_args(["run"]).bnb_models == [spike.REFERENCE_MODEL]
     bnb_pin = [r for r in spike.STACKS["trl-vllm"].requirements if r.startswith("bitsandbytes==")]
     assert bnb_pin and set(bnb_pin) <= set(spike.STACKS["vllm"].requirements)
 
@@ -925,6 +927,28 @@ def test_requirements_file_is_the_trl_vllm_stack() -> None:
     for name, version in _pins(spike.STACKS["trl"].requirements).items():
         if f'\nname = "{name}"\n' in lock:
             assert locked(name, version), (name, version)
+
+
+@pytest.mark.phase(3)
+def test_train_requirements_file_is_the_trl_stack() -> None:
+    # ADR-0006 trains on the stack FG-301 measured GRPO on: the spike's trl list, installed
+    # over the image's torch, so the file pins no torch and no vLLM.
+    trl = spike.STACKS["trl"]
+    path = ROOT / "kaggle" / "requirements-train-gpu.txt"
+    assert tuple(_requirement_lines(path)) == trl.requirements
+    assert trl.system_site_packages
+    pins = _pins(trl.requirements)
+    assert "torch" not in pins and "vllm" not in pins
+    text = path.read_text(encoding="utf-8")
+    for stage in ("install:trl", "grpo:trl:<model>"):
+        assert stage in text, stage
+    # The numbers the file's comment gives, from the spike's own report.
+    report = json.loads((ROOT / "docs" / "spikes" / "kaggle-gpu" / "spike-report.json").read_text())
+    stages = {stage["name"]: stage["result"] for stage in report["stages"]}
+    assert tuple(stages["install:trl"]["requirements"]) == trl.requirements
+    assert f"{stages['install:trl']['install_seconds']:.1f} s" in text
+    four_b = stages["grpo:trl:Qwen/Qwen3-4B"]["memory"]["peak_allocated_bytes"] / 1e9
+    assert f"{four_b:.2f} GB" in text
 
 
 @pytest.mark.phase(3)

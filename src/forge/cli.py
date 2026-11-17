@@ -68,7 +68,7 @@ AgreementSplitName = Literal["train", "val"]
 BackendName = Literal["hf", "vllm", "llamacpp", "fake"]
 DeviceName = Literal["cpu", "mps"]
 StoreName = Literal["local", "hub"]
-QuantizationName = Literal["bitsandbytes"]
+QuantizationName = Literal["awq"]
 
 # Printed by the commands that read dev without a model, so nobody logs them as dev uses
 # or holds back from running them.
@@ -395,7 +395,7 @@ def eval_run(
     ] = 0,
     quantization: Annotated[
         QuantizationName | None,
-        typer.Option(help="Load vllm's model in 4-bit with bitsandbytes, for a model past 4B."),
+        typer.Option(help="Load vllm's model from its 4-bit AWQ checkpoint, for one past 4B."),
     ] = None,
     gpu_memory_utilization: Annotated[
         float | None,
@@ -830,11 +830,12 @@ def _kaggle_owner() -> str:
 def kaggle_publish_code() -> None:
     """Publish the wheel built at HEAD as the private dataset <owner>/forge-code.
 
-    build/kaggle-code gets the wheel, kaggle/requirements-gpu.txt and GIT_SHA, and goes up
+    build/kaggle-code gets the wheel, kaggle/requirements-gpu.txt (evaluation jobs' GPU
+    packages), kaggle/requirements-train-gpu.txt (training jobs') and GIT_SHA, and goes up
     as a new version noted with the SHA, or as the first one. The owner is
     FORGE_KAGGLE_USER, else the Kaggle credentials' username. A dirty tree is refused.
     """
-    from forge.ops.kaggle import KaggleClient, KaggleError, publish_code
+    from forge.ops.kaggle import REQUIREMENTS_FILES, KaggleClient, KaggleError, publish_code
     from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound, repo_root
 
@@ -852,7 +853,8 @@ def kaggle_publish_code() -> None:
     ) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"bundle {bundle.path}: {bundle.wheel}, requirements-gpu.txt, GIT_SHA")
+    lists = ", ".join(path.name for path in REQUIREMENTS_FILES)
+    typer.echo(f"bundle {bundle.path}: {bundle.wheel}, {lists}, GIT_SHA")
     action = "created" if published.created else "uploaded a new version of"
     typer.echo(f"{action} {published.ref} at {bundle.git_sha}")
     typer.echo(published.output)
@@ -995,6 +997,8 @@ def kaggle_run(
     take. A dev job's push spends one of the six dev looks, logged in docs/dev-usage.md as
     soon as Kaggle accepts it; a --resume of the run is the same look. A source Kaggle
     could not add is a warning: that version runs without it, recorded like any other.
+    So is a kaggle CLI that fails before it says the kernel was pushed while Kaggle has
+    the new kernel all the same: only the answer was lost.
     """
     import json
 
@@ -1056,7 +1060,9 @@ def kaggle_run(
             typer.echo("nothing pushed")
             raise typer.Exit(1)
         folder = jobs.write_kernel(root, plan, code=code, data=data, run_store=run_store)
-        pushed = client.push_kernel(folder, timeout_s=plan.timeout_s, gpu=True)
+        pushed = client.push_kernel(
+            folder, timeout_s=plan.timeout_s, gpu=True, new_kernel=plan.new_kernel
+        )
     except _kaggle_job_errors() as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -1072,7 +1078,14 @@ def kaggle_run(
             err=True,
         )
         raise typer.Exit(1)
-    typer.echo(pushed.output)
+    if pushed.lost is not None:
+        typer.echo(
+            f"warning: {pushed.lost}; but Kaggle has {kernel}, so the push was made and only "
+            "its answer was lost",
+            err=True,
+        )
+    else:
+        typer.echo(pushed.output)
     for line in pushed.dropped:
         typer.echo(f"warning: {line}", err=True)
     if pushed.dropped:

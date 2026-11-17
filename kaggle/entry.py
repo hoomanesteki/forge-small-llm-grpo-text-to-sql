@@ -11,10 +11,14 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
   this attempt's output holds the run too and the next resume carries on from it.
 - env: the interpreter, the platform and the GPUs, for the log.
 - code: the code dataset under the input folder, whose ``GIT_SHA`` must be the commit the
-  job was pushed at. That commit goes to the job in ``FORGE_CODE_SHA``, which a manifest
-  takes as its commit where there is no git checkout (``forge.ops.manifest.code_sha``).
-- install: ``pip install --no-deps`` the wheel, then its ``requirements-gpu.txt``; every
-  package the wheel needs must then be there, or the stage says which is not.
+  job was pushed at, with the wheel and both GPU package lists. That commit goes to the
+  job in ``FORGE_CODE_SHA``, which a manifest takes as its commit where there is no git
+  checkout (``forge.ops.manifest.code_sha``).
+- install: ``pip install --no-deps`` the wheel, then the GPU packages its job needs
+  (``REQUIREMENTS_FILES``, ADR-0006): an eval job ``requirements-gpu.txt``, vLLM's stack,
+  and a training job ``requirements-train-gpu.txt``, the trl stack FG-301 ran GRPO on,
+  which has no vLLM. Every package the wheel needs must then be there, or the stage says
+  which is not. Its result names the file it installed.
 - data: the Spider dataset, found by its ``spider.sha256``, with ``database.zip`` unpacked
   if Kaggle left it packed, and every file checked before any job runs against the list
   the installed wheel pins (``forge.data.spider.CHECKSUMS``), not the dataset's own copy.
@@ -89,7 +93,16 @@ SECRET_LABELS = ("HF_TOKEN", "WANDB_API_KEY")
 # The names forge.ops.kaggle and forge.ops.manifest use; this script can't import them
 # before the wheel is installed, so a unit test keeps each copy in step.
 GIT_SHA_FILE = "GIT_SHA"
-REQUIREMENTS_FILE = "requirements-gpu.txt"
+EVAL_REQUIREMENTS = "requirements-gpu.txt"
+TRAIN_REQUIREMENTS = "requirements-train-gpu.txt"
+# The GPU packages each job installs: vLLM generates for evaluation, and training runs on
+# the trl stack, since vLLM 0.33.0 can't load a 4-bit policy (ADR-0006). A unit test keeps
+# this in step with the jobs forge kaggle run pushes this script for.
+REQUIREMENTS_FILES = {
+    "eval": EVAL_REQUIREMENTS,
+    "sft": TRAIN_REQUIREMENTS,
+    "grpo": TRAIN_REQUIREMENTS,
+}
 CHECKSUM_FILE = "spider.sha256"
 CODE_SHA_ENV = "FORGE_CODE_SHA"
 MANIFEST_FILE = "manifest.json"
@@ -195,7 +208,8 @@ def env_stage(kernel: Kernel) -> dict[str, Any]:
 
 
 def code_stage(kernel: Kernel) -> dict[str, Any]:
-    """Find the wheel and its requirements, and check they are the pushed commit's."""
+    """Find the wheel and the job's GPU package list, and check they are the pushed
+    commit's."""
     folder = _one(Path(kernel.args.input_dir), GIT_SHA_FILE, "the code dataset").parent
     found = (folder / GIT_SHA_FILE).read_text(encoding="utf-8").strip()
     if found != kernel.args.code_sha:
@@ -206,9 +220,15 @@ def code_stage(kernel: Kernel) -> dict[str, Any]:
     wheels = sorted(folder.glob("forge-*.whl"))
     if len(wheels) != 1:
         raise JobError(f"{folder} must hold one forge wheel, not {[w.name for w in wheels]}")
-    kernel.wheel, kernel.requirements = wheels[0], folder / REQUIREMENTS_FILE
-    if not kernel.requirements.is_file():
-        raise JobError(f"{folder} has no {REQUIREMENTS_FILE}")
+    # forge kaggle publish-code puts both lists in every version, so a version without one
+    # wasn't made by it.
+    missing = [
+        name for name in sorted(set(REQUIREMENTS_FILES.values())) if not (folder / name).is_file()
+    ]
+    if missing:
+        raise JobError(f"{folder} has no {' or '.join(missing)}")
+    kernel.wheel = wheels[0]
+    kernel.requirements = folder / REQUIREMENTS_FILES[kernel.args.job]
     os.environ[CODE_SHA_ENV] = found
     return {"folder": str(folder), "wheel": wheels[0].name, "sha": found}
 
@@ -224,9 +244,9 @@ def install_stage(kernel: Kernel) -> dict[str, Any]:
         raise JobError(
             "the image lacks what forge needs: "
             + "; ".join(unmet)
-            + f". Pin each in kaggle/{REQUIREMENTS_FILE} at its uv.lock version"
+            + f". Pin each in kaggle/{kernel.requirements.name} at its uv.lock version"
         )
-    return {"forge": importlib.metadata.version("forge")}
+    return {"forge": importlib.metadata.version("forge"), "requirements": kernel.requirements.name}
 
 
 def unmet_requirements(

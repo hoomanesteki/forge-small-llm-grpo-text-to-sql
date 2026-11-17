@@ -3,16 +3,20 @@
 ``kaggle kernels push -p DIR`` reads ``DIR/kernel-metadata.json`` and uploads the one
 script it names. The CLI (kaggle 2.2.5) lets some mistakes through quietly: it ignores a
 misspelt key, a missing ``enable_internet`` means internet on although its docs say off,
-and a retired accelerator such as the P100 is swapped for a T4 with only a warning.
-``check_kernel_metadata`` makes each of those an error here, so a bad push fails on the
-laptop instead of in a queued GPU session.
+and a retired accelerator such as the P100 is swapped for a T4 with only a warning. Kaggle
+itself refuses a title over 50 characters with a bare ``400 Client Error: Bad Request``,
+which the CLI passes on only after the code dataset is checked. ``check_kernel_metadata``
+makes each of those an error here, so a bad push fails on the laptop instead of in a
+queued GPU session.
 
 Every Forge kernel is a private Python script. The template in
 ``kaggle/kernel-metadata.template.json`` asks for a T4 with internet; a CPU kernel drops
 the GPU and the machine shape.
 
 A GPU job mounts two private datasets: ``<owner>/forge-code``, the wheel built at one
-commit with ``requirements-gpu.txt`` and ``GIT_SHA``, and ``<owner>/forge-spider``, the
+commit with ``GIT_SHA`` and both GPU package lists, ``requirements-gpu.txt`` for
+evaluation jobs and ``requirements-train-gpu.txt`` for training jobs (ADR-0006), and
+``<owner>/forge-spider``, the
 Spider files ``spider.sha256`` lists, with that file. ``KaggleClient`` runs the kaggle CLI
 as an argument list, never through a shell, and reads what it prints as well as its exit
 code: ``datasets create`` and ``version`` report a refused upload and still exit 0, and so
@@ -21,7 +25,10 @@ does ``kernels push`` for a push error. A push is refused only when Kaggle says 
 that names no version (kaggle 2.2.5 prints one when the server sends none). When
 ``kernels push`` says a source could not be added, Kaggle has still saved and started
 that version, without the source, so the push is returned with those lines in
-``PushedKernel.dropped`` rather than refused.
+``PushedKernel.dropped`` rather than refused. A CLI that exits with an error before it
+says the kernel was pushed may only have lost Kaggle's answer, a timeout among them, after
+Kaggle saved the kernel, so ``push_kernel`` asks Kaggle whether it has a kernel no earlier
+push made before it calls the push failed.
 """
 
 from __future__ import annotations
@@ -47,6 +54,9 @@ from forge.ops.manifest import DirtyTreeError, git_sha
 TEMPLATE = Path("kaggle") / "kernel-metadata.template.json"  # relative to the repo root
 METADATA_FILE = "kernel-metadata.json"
 GPU_MACHINE_SHAPE = "NvidiaTeslaT4"
+# The longest kernel title Kaggle saves: FG-301 saved 50 characters and got the 400 at 51,
+# with nothing else in the metadata changed. A slug is its title's, so it has the same bound.
+MAX_KERNEL_NAME = 50
 
 # Every key kaggle 2.2.5's kernels_push reads. Any other key is a typo the CLI would drop.
 KNOWN_KEYS = frozenset(
@@ -131,9 +141,13 @@ def check_kernel_metadata(meta: Mapping[str, Any]) -> list[str]:
             problems.append(f"id has a bad owner {owner!r}")
         if not valid_slug(slug):
             problems.append(f"id has a bad slug {slug!r}: lowercase letters, digits, hyphens")
+        if len(slug) > MAX_KERNEL_NAME:
+            problems.append(_too_long("slug", slug))
         title = meta.get("title")
         if not isinstance(title, str) or len(title) < 5:
             problems.append(f"title must be at least 5 characters, got {title!r}")
+        elif len(title) > MAX_KERNEL_NAME:
+            problems.append(_too_long("title", title))
         elif title_slug(title) != slug:
             problems.append(f"title {title!r} slugifies to {title_slug(title)!r}, not {slug!r}")
 
@@ -171,6 +185,13 @@ def check_kernel_metadata(meta: Mapping[str, Any]) -> list[str]:
             problem for source in sources if (problem := _source_problem(key, count, source))
         ]
     return problems
+
+
+def _too_long(what: str, name: str) -> str:
+    return (
+        f"{what} {name!r} has {len(name)} characters, and Kaggle refuses a kernel's over "
+        f"{MAX_KERNEL_NAME}"
+    )
 
 
 def _source_problem(key: str, count: int, source: str) -> str | None:
@@ -268,8 +289,11 @@ OWNER_ENV = "FORGE_KAGGLE_USER"
 DATASET_METADATA_FILE = "dataset-metadata.json"
 GIT_SHA_FILE = "GIT_SHA"
 CHECKSUM_FILE = "spider.sha256"
-# Relative to the repo root; git ignores build/.
+# Relative to the repo root; git ignores build/. The GPU packages an evaluation job
+# installs, vLLM's stack, and those a training job installs, the trl stack without vLLM.
 REQUIREMENTS = Path("kaggle") / "requirements-gpu.txt"
+TRAIN_REQUIREMENTS = Path("kaggle") / "requirements-train-gpu.txt"
+REQUIREMENTS_FILES = (REQUIREMENTS, TRAIN_REQUIREMENTS)
 CODE_BUNDLE = Path("build") / "kaggle-code"
 DATA_BUNDLE = Path("build") / "kaggle-data"
 # kagglesdk's DatabundleVersionStatus names, lowercased as `kaggle datasets status` prints
@@ -424,12 +448,20 @@ class KaggleClient:
             raise KaggleError(f"kaggle downloaded no {name} from {ref} into {folder}")
         return path
 
-    def push_kernel(self, folder: Path, *, timeout_s: int, gpu: bool) -> PushedKernel:
+    def push_kernel(
+        self, folder: Path, *, timeout_s: int, gpu: bool, new_kernel: bool = False
+    ) -> PushedKernel:
         """Push and start the kernel ``folder`` holds; returns its id, its version and
         the sources Kaggle dropped from it, if any.
 
-        Raises ``KaggleError`` only for a push Kaggle never started: one it refused, or a
-        CLI that failed before it said the kernel was pushed.
+        A CLI that fails before it says the kernel was pushed may have lost the answer to
+        a push Kaggle saved. With ``new_kernel``, for a kernel no earlier push made, Kaggle
+        is then asked whether it has the kernel (``kaggle kernels status``): if it does,
+        the push was made, and is returned with no version, so the kernel's latest is
+        followed, and with ``lost`` set to the CLI's error. A push to a kernel an earlier
+        push made is not checked, since the status names no version and so can't tell
+        this push's from the one before. Raises ``KaggleError`` for a push Kaggle refused,
+        one whose kernel it doesn't have, or one it couldn't be asked about, which says so.
         """
         accelerator = ["--accelerator", GPU_MACHINE_SHAPE] if gpu else []
         command = [self.executable, "kernels", "push", "-p", str(folder), *accelerator]
@@ -438,7 +470,21 @@ class KaggleClient:
         if _PUSH_REFUSED.search(output):
             raise KaggleError(f"{_display(command)} was refused: {_tail(output)}")
         if result.returncode != 0 and not _PUSHED.search(output):
-            raise _failed(command, result)
+            failure = _failed(command, result)
+            if not new_kernel:
+                raise failure
+            sent = _pushed_id(folder)
+            try:
+                saved = self.find_kernel(sent)
+            except KaggleError as exc:
+                raise KaggleError(
+                    f"{failure}; whether Kaggle saved {sent} all the same is unknown, since "
+                    f"asking failed too ({exc}): check kaggle kernels status {sent} before "
+                    "pushing again"
+                ) from exc
+            if saved is None:
+                raise failure
+            return PushedKernel(sent, None, output.strip(), lost=str(failure))
         url = _KERNEL_URL.search(output)
         kernel = "/".join(url.groups()) if url else None
         version = _PUSHED_VERSION.search(output)
@@ -449,12 +495,22 @@ class KaggleClient:
     def kernel_status(self, kernel: str) -> KernelStatus:
         """The worker state of ``kernel`` (``owner/slug[/version]``), as kagglesdk names it."""
         command = [self.executable, "kernels", "status", kernel]
-        output = _check(self.run, command)
-        state = _KERNEL_STATUS.search(output)
-        if state is None or state.group(1) not in KERNEL_STATES:
-            raise KaggleError(f"{_display(command)} printed {_tail(output)!r}")
-        failure = _FAILURE.search(output)
-        return KernelStatus(state.group(1), failure.group(1).strip() if failure else None)
+        return _kernel_state(command, _check(self.run, command))
+
+    def find_kernel(self, kernel: str) -> KernelStatus | None:
+        """The worker state of ``kernel``, or None when Kaggle has no such kernel; raises
+        on any other failure."""
+        command = [self.executable, "kernels", "status", kernel]
+        result = _run(self.run, command)
+        if result.returncode == 0:
+            return _kernel_state(command, result.stdout)
+        # kaggle 2.2.5 prints a 404 as "404 Client Error: Not Found ...", and turns a 403,
+        # which Kaggle may answer for a private slug it holds nothing at, into "Cannot
+        # access kernel ... (Permission 'kernels.get' was denied)".
+        text = _output(result).lower()
+        if "404 client error" in text or "permission 'kernels.get' was denied" in text:
+            return None
+        raise _failed(command, result)
 
     def kernel_logs(self, kernel: str) -> str:
         return _check(self.run, [self.executable, "kernels", "logs", kernel])
@@ -489,6 +545,7 @@ class PushedKernel:
     version: int | None  # None when the CLI named none: the kernel's latest is this push
     output: str
     dropped: tuple[str, ...] = ()  # the CLI's lines naming sources it could not add
+    lost: str | None = None  # the CLI's error, when Kaggle had the kernel all the same
 
     @property
     def kernel_source_dropped(self) -> bool:
@@ -558,7 +615,7 @@ class Published:
 
 
 def build_code_bundle(root: Path, owner: str, *, run: Runner = run_command) -> CodeBundle:
-    """Write ``build/kaggle-code``: the wheel built at HEAD, the pinned GPU requirements,
+    """Write ``build/kaggle-code``: the wheel built at HEAD, both pinned GPU package lists,
     ``GIT_SHA`` and the dataset metadata, and nothing else.
 
     A tree with uncommitted changes is refused before anything is built: the wheel would
@@ -571,9 +628,10 @@ def build_code_bundle(root: Path, owner: str, *, run: Runner = run_command) -> C
             "the working tree has uncommitted changes; commit them first, so the code "
             "dataset holds a commit CI can test"
         ) from exc
-    unpinned = unpinned_requirements((root / REQUIREMENTS).read_text(encoding="utf-8"))
-    if unpinned:
-        raise ValueError(f"{REQUIREMENTS} must pin each package with ==, not {unpinned}")
+    for requirements in REQUIREMENTS_FILES:
+        unpinned = unpinned_requirements((root / requirements).read_text(encoding="utf-8"))
+        if unpinned:
+            raise ValueError(f"{requirements} must pin each package with ==, not {unpinned}")
     out = _fresh_dir(root / CODE_BUNDLE)
     _check(
         run, ["uv", "build", str(root), "--wheel", "--out-dir", str(out), "--no-create-gitignore"]
@@ -581,7 +639,8 @@ def build_code_bundle(root: Path, owner: str, *, run: Runner = run_command) -> C
     built = sorted(path.name for path in out.iterdir())
     if len(built) != 1 or not built[0].endswith(".whl"):
         raise KaggleError(f"uv build should leave one wheel in {out}, but left {built}")
-    shutil.copyfile(root / REQUIREMENTS, out / REQUIREMENTS.name)
+    for requirements in REQUIREMENTS_FILES:
+        shutil.copyfile(root / requirements, out / requirements.name)
     (out / GIT_SHA_FILE).write_text(f"{sha}\n", encoding="utf-8")
     _write_json(out / DATASET_METADATA_FILE, dataset_metadata(f"{owner}/{CODE_SLUG}", "MIT"))
     return CodeBundle(out, built[0], sha)
@@ -688,6 +747,23 @@ def _fresh_dir(path: Path) -> Path:
 
 def _write_json(path: Path, data: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _kernel_state(command: list[str], output: str) -> KernelStatus:
+    state = _KERNEL_STATUS.search(output)
+    if state is None or state.group(1) not in KERNEL_STATES:
+        raise KaggleError(f"{_display(command)} printed {_tail(output)!r}")
+    failure = _FAILURE.search(output)
+    return KernelStatus(state.group(1), failure.group(1).strip() if failure else None)
+
+
+def _pushed_id(folder: Path) -> str:
+    """The kernel ``folder``'s metadata names: the one ``kernels push`` sent."""
+    meta = json.loads((folder / METADATA_FILE).read_text(encoding="utf-8"))
+    kernel = meta.get("id") if isinstance(meta, dict) else None
+    if not isinstance(kernel, str):
+        raise ValueError(f"{folder / METADATA_FILE} names no kernel id")
+    return kernel
 
 
 def _run(run: Runner, command: list[str]) -> subprocess.CompletedProcess[str]:

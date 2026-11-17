@@ -13,26 +13,29 @@ leaves little for training to show.
 
 The candidates are open instruct models of about 1.5B to 4B, each pinned to a commit in
 `configs/models.yaml`, whose license, gated flag and parameter count are the Hub's.
-`scripts/check_models.py` checked them on 2026-11-15, reading metadata only, and checks
-them again whenever it is run:
+`scripts/check_models.py` checked them on 2026-11-15, and the reference's AWQ checkpoint
+on 2026-11-16, reading metadata only, and checks them again whenever it is run:
 
 | Name | Model | Parameters | License | Gated | Role |
 |---|---|---|---|---|---|
 | `qwen3-1-7b` | `Qwen/Qwen3-1.7B` | 2.03B | Apache-2.0 | no | candidate |
 | `qwen3-4b` | `Qwen/Qwen3-4B` | 4.02B | Apache-2.0 | no | candidate |
 | `qwen2-5-coder-1-5b` | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | 1.54B | Apache-2.0 | no | candidate |
-| `qwen3-8b` | `Qwen/Qwen3-8B` | 8.19B | Apache-2.0 | no | reference, 4-bit |
+| `qwen3-8b` | `Qwen/Qwen3-8B-AWQ` | 8.19B | Apache-2.0 | no | reference, 4-bit AWQ |
 
 - The plan's example Qwen2.5-Coder-3B-Instruct is left out. Its Hub license is `other`,
   named `qwen-research`: the Qwen Research License, for non-commercial research and
   evaluation only, which would bind every model Forge publishes from it.
   Qwen2.5-Coder-1.5B-Instruct, Apache-2.0, keeps a coding model among the candidates.
-- The reference is about 16 GB of weights in 16 bits, more than a T4 holds, so vLLM loads
-  it in 4-bit with bitsandbytes (`quantization` in its configs, recorded in its manifest).
-  It shows what a larger model scores with the same prompt and harness, and is never a
-  candidate. FG-301 found that vLLM 0.33.0 doesn't load bitsandbytes weights: it has no
-  such quantization (the spike's `vllm:Qwen/Qwen3-8B:bnb` stage), so FG-398 moves the
-  reference to an AWQ checkpoint.
+- Qwen3-8B is about 16 GB of weights in 16 bits, more than a T4 holds, so the reference
+  is Qwen's own 4-bit AWQ checkpoint of it, `Qwen/Qwen3-8B-AWQ`, which vLLM loads with
+  `quantization: awq` (in its configs, recorded in its manifest). It shows what a larger
+  model scores with the same prompt and harness, and is never a candidate. It was to load
+  in 4-bit with bitsandbytes, but FG-301 found vLLM 0.33.0 has no such quantization (the
+  spike's `vllm:Qwen/Qwen3-8B:bnb` stage, whose error lists `awq` among the methods it
+  has), so FG-398 moved it to AWQ. vLLM's AWQ kernels need compute capability 7.5, which
+  the T4 has; their Marlin form needs 8.0, so a T4 gets the plain ones. No run has loaded
+  the checkpoint on a T4: the reference's own val run is the first.
 - Every run is greedy on the whole val split with prompt p1, through vLLM in fp16 on a
   Kaggle T4 (FG-306), one kernel job per config in `configs/eval/`. Qwen3 runs in
   non-thinking mode (ADR-0007).
