@@ -1128,7 +1128,7 @@ def test_budget_rows_follow_the_measurements() -> None:
 
     # Spider's dev split is 1,034 questions (ADR-0004); only its size is used here.
     val, dev = len(read_split_ids("val")), 1034
-    # The reference's own config estimates: no run has loaded an 8B model on the T4.
+    # The reference's own config estimates, which the row keeps: the formula has no 8B rates.
     reference = 0.45 + 0.50
     candidates = 2 * evaluate(val, "1.7B") + evaluate(val, "4B")
     # ADR-0012 chose Qwen2.5-Coder-1.5B-Instruct, which takes the 1.7B model's rates.

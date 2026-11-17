@@ -195,10 +195,21 @@ def test_baseline_runs_wait_in_pending_within_the_story_budget() -> None:
     assert len(set(ran.values())) == len(ran) and not set(ran.values()) & unchosen
     waiting = baselines - set(ran.values()) - unchosen
     assert sorted(listed) == sorted(path.relative_to(ROOT).as_posix() for path in waiting)
-    # Together they fit the story: the ledger rows of the runs made, the estimates of the
-    # runs waiting.
-    spent = sum(
-        row.hours for row in read_rows(ROOT / "docs" / "compute-ledger.md") if row.run_id in ran
-    )
-    assert spent > 0
-    assert spent + sum(entry["est_gpu_hours"] for entry in baseline) <= BASELINE_BUDGET
+    # A run that was made but waits here names itself in its entry, so its ledger row
+    # counts instead of its estimate. Together they fit the story: the ledger rows of the
+    # runs made, one or more each, and the estimates of the runs waiting.
+    held = {entry["run_id"] for entry in baseline if "run_id" in entry}
+    assert not held & committed.keys()
+    made = ran.keys() | held
+    rows = [row for row in read_rows(ROOT / "docs" / "compute-ledger.md") if row.run_id in made]
+    assert {row.run_id for row in rows} == made
+    spent = sum(row.hours for row in rows)
+    waiting_hours = sum(entry["est_gpu_hours"] for entry in baseline if "run_id" not in entry)
+    assert spent + waiting_hours <= BASELINE_BUDGET
+    # Plan section 3.8's note gives the hours they took, beside its row's estimate.
+    plan = (ROOT / "docs" / "PLAN.md").read_text(encoding="utf-8")
+    note = " ".join(plan.split("\n### 3.8 ", 1)[1].split("\n### ", 1)[0].split())
+    took = re.search(r"FG-307's runs took ([\d.]+) h by their (\d+) ledger rows", note)
+    assert took, "plan section 3.8 doesn't say what FG-307's runs took"
+    assert float(took.group(1)) == pytest.approx(spent)
+    assert int(took.group(2)) == len(rows)
