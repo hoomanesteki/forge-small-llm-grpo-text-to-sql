@@ -574,9 +574,9 @@ def _build_rows(
     return save_sft(built, sft_root), built.meta
 
 
-def _outputs(run_dir: Path, kept: Mapping[float, int] | None = None) -> dict[str, str]:
-    """The run's ``OUTPUTS`` that exist, the kept checkpoints of ``kept``, a share of the
-    run to its step, and the digest of each checkpoint in the folder."""
+def run_outputs(run_dir: Path, kept: Mapping[float, int] | None = None) -> dict[str, str]:
+    """A training run's ``OUTPUTS`` that exist, the kept checkpoints of ``kept``, a share
+    of the run to its step, and the digest of each checkpoint in the folder."""
     found = {name: rel for name, rel in OUTPUTS.items() if (run_dir / rel).exists()}
     for share, step in (kept or {}).items():
         rel = checkpoint_dir(step)
@@ -588,7 +588,7 @@ def _outputs(run_dir: Path, kept: Mapping[float, int] | None = None) -> dict[str
 def _start(run_dir: Path, manifest: RunManifest, store: LocalRunStore) -> RunManifest:
     """Write the config and the running manifest, which the time guard reads back."""
     write_atomic(run_dir / CONFIG_FILE, yaml.safe_dump(manifest.config, sort_keys=False).encode())
-    manifest = manifest.model_copy(update={"outputs": _outputs(run_dir)})
+    manifest = manifest.model_copy(update={"outputs": run_outputs(run_dir)})
     store.put_manifest(manifest)
     return manifest
 
@@ -605,6 +605,6 @@ def _end(
     """Write the run's final manifest, with the traceback beside it when it failed."""
     if error is not None:
         write_atomic(run_dir / ERROR_FILE, "".join(traceback.format_exception(error)).encode())
-    final = close(manifest, status).model_copy(update={"outputs": _outputs(run_dir, kept)})
+    final = close(manifest, status).model_copy(update={"outputs": run_outputs(run_dir, kept)})
     store.put_manifest(final)
     return final
