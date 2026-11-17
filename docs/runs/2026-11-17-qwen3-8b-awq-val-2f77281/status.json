@@ -1,0 +1,90 @@
+{
+  "schema": "forge-kaggle-job/1",
+  "run_id": "2026-11-17-qwen3-8b-awq-val-2f77281",
+  "job": "eval",
+  "host": "kaggle",
+  "code_sha": "2f772811aa28ddea5b5f2a3282b47ab4698c5ba1",
+  "options": {
+    "backend": "vllm",
+    "limit": null,
+    "model": "Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79",
+    "n": 1,
+    "prompt_version": "p2",
+    "quantization": "awq",
+    "retry": 0,
+    "split": "val",
+    "temperature": 0.0
+  },
+  "preflight": true,
+  "resume": false,
+  "status": "finished",
+  "stage": "upload",
+  "error": null,
+  "started_at": "2026-11-17T01:08:11+00:00",
+  "ended_at": "2026-11-17T01:20:57+00:00",
+  "session": 1,
+  "stages": {
+    "restore": {
+      "seconds": 0.0,
+      "result": "skipped: a new run"
+    },
+    "env": {
+      "seconds": 0.0,
+      "result": {
+        "python": "3.13.16",
+        "platform": "Linux-6.18.55+-x86_64-with-glibc2.39",
+        "run_type": "Batch",
+        "gpus": [
+          "Tesla T4, 15360 MiB",
+          "Tesla T4, 15360 MiB"
+        ]
+      }
+    },
+    "code": {
+      "seconds": 8.8,
+      "result": {
+        "folder": "/kaggle/input/datasets/hoomanesteki/forge-code",
+        "wheel": "forge-0.2.0-py3-none-any.whl",
+        "sha": "2f772811aa28ddea5b5f2a3282b47ab4698c5ba1"
+      }
+    },
+    "install": {
+      "seconds": 275.5,
+      "result": {
+        "forge": "0.2.0",
+        "requirements": "requirements-gpu.txt"
+      }
+    },
+    "data": {
+      "seconds": 27.0,
+      "result": {
+        "folder": "/kaggle/input/datasets/hoomanesteki/forge-spider",
+        "files": 170
+      }
+    },
+    "secrets": {
+      "seconds": 0.2,
+      "result": {
+        "HF_TOKEN": "kaggle secrets: ConnectionError",
+        "WANDB_API_KEY": "kaggle secrets: ConnectionError"
+      }
+    },
+    "preflight": {
+      "seconds": 215.8,
+      "result": {
+        "status": "finished",
+        "examples": 5
+      }
+    },
+    "job": {
+      "seconds": 239.1,
+      "result": {
+        "status": "finished"
+      }
+    },
+    "upload": {
+      "seconds": 0.0,
+      "result": "skipped: no HF_TOKEN, so the kernel output is the only copy"
+    }
+  }
+}
