@@ -1,7 +1,7 @@
 # ADR-0007: Non-thinking output with the SQL in a code block, and the prompt version
 
-- Status: proposed, the p1 and p2 comparison pending FG-307's runs (`docs/runs/pending.yaml`)
-- Date: 2026-11-15
+- Status: accepted
+- Date: 2026-11-17 (proposed 2026-11-15)
 
 ## Context
 
@@ -19,9 +19,10 @@ Plan section 3.7 fixes the output format and leaves the prompt version to FG-307
   last line that starts with `SELECT` or `WITH` and parses, and only that line, so an
   unfenced query written over several lines loses every line after its first.
 
-The only real model replies so far are the FG-291 pilot's: Qwen2.5-Coder-0.5B-Instruct on
-the whole val split with p1, on the laptop's GPU (`local-mps`, ADR-0016). Counted from its
-stored generations and scores by `scripts/count_extraction.py`:
+When this was proposed, the only real model replies were the FG-291 pilot's:
+Qwen2.5-Coder-0.5B-Instruct on the whole val split with p1, on the laptop's GPU
+(`local-mps`, ADR-0016). Counted from its stored generations and scores by
+`scripts/count_extraction.py`:
 
 | Run | Replies | sql block | Rule 3 | No SQL | Rule 3 cut a query | Cut, by class |
 |---|---|---|---|---|---|---|
@@ -35,7 +36,7 @@ from the format, then, and a model or prompt that leaves the block off is marked
 it. The pilot is a 0.5B model on another device, so this says what to count in FG-307, not
 how the candidates will behave.
 
-## Decision (proposed)
+## Decision
 
 - Output: non-thinking mode for Qwen3 and 256 new tokens at most, the SQL in a
   ```` ```sql ```` block, as plan section 3.7 says. This ADR changes no extraction rule.
@@ -56,12 +57,49 @@ how the candidates will behave.
 
 ## Measured
 
-Pending FG-307's runs. This section will hold the two val runs' official EX with their
-intervals and the compare report's test, from the reports committed under `docs/runs/`,
-and the extraction rows of both runs. Nothing here is typed by hand.
+FG-307's runs of Qwen/Qwen2.5-Coder-1.5B-Instruct, the model ADR-0012's rule chose from the
+p1 val runs (and the best of them, so section 3.7's reading and the story block's agree
+here), on the whole val split, greedy, from `c8f4b41` on a Kaggle T4, 2026-11-16. From the
+reports committed under `docs/runs/`:
+
+| Prompt | Run | Official EX [95% interval] | Fast EX | Valid SQL |
+|---|---|---|---|---|
+| p1 | [2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41](../runs/2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41/eval/val-report.md) | 65.3% [61.2%, 69.1%] | 65.1% [61.0%, 69.0%] | 85.2% [82.2%, 88.1%] |
+| p2 | [2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41](../runs/2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41/eval/val-report.md) | 67.4% [63.3%, 71.3%] | 67.5% [63.4%, 71.2%] | 86.6% [83.8%, 89.4%] |
+
+`forge report compare 2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41
+2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41`, whose report is in the p2 run's folder
+([compare-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41.md](../runs/2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41/eval/compare-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41.md)),
+says, with run a the p1 run and run b the p2 run:
+
+> Official EX on val, run b against run a: +2.2 points [+0.6, +3.8], McNemar p = 0.0115 on clusters
+>
+> The runs disagree on 51 of 872 questions: run b alone is right on 35, run a alone on 16.
+>
+> The test pairs whole clusters, as the intervals draw them: run b gets more right in 29 clusters, run a in 12, and the rest tie.
+
+The extraction rows, from `uv run python scripts/count_extraction.py` on both runs:
+
+| Run | Replies | sql block | Rule 3 | No SQL | Rule 3 cut a query | Cut, by class |
+|---|---|---|---|---|---|---|
+| 2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41 | 872 | 764 | 106 | 2 | 0 | - |
+| 2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41 | 872 | 724 | 148 | 0 | 0 | - |
+
+With p2 the model left the code block off more often, but rule 3 cut no query in either
+run, so the change in EX is not the format's.
+
+The rule above, applied: p2's official EX is higher and McNemar's p is below 0.05, so **p2
+is fixed for every later phase**. The chosen model's dev baseline and the reference's runs
+use it too (`configs/eval/qwen2-5-coder-1-5b-dev.yaml`, `qwen3-8b-val.yaml` and
+`qwen3-8b-dev.yaml`): the dev baseline has to compare with the trained model's dev
+evaluation, which uses p2, and the reference shows what a larger model scores with the same
+prompt and harness (ADR-0012).
 
 ## Consequences
 
+- SFT data (FG-401), GRPO prompts (plan section 3.10's `prompt_version`) and every
+  evaluation from here on use p2. Where a schema's sample rows would pass
+  `MAX_PROMPT_TOKENS`, the overflow policy drops them, so for those prompts p2 is p1.
 - SFT data (FG-401) puts every gold query in a ```` ```sql ```` block, so a model that
   ignores the block now is taught it before GRPO; the format reward (plan section 3.10)
   keeps it.

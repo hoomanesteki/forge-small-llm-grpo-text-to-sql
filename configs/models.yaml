@@ -51,8 +51,8 @@ reference:
   # Qwen's own 4-bit AWQ checkpoint of it, which vLLM loads with quantization awq: its eval
   # configs set it, and the manifest records it. vLLM 0.33.0 has no bitsandbytes, the 4-bit
   # loading first planned (FG-301, docs/spikes/kaggle-gpu.md question 4). Its AWQ kernels
-  # need compute capability 7.5, which the T4 has, but no run has loaded this checkpoint on
-  # a T4 yet: the reference's own val run is the first.
+  # need compute capability 7.5, which the T4 has, and its val and dev runs of 2026-11-17
+  # loaded and scored it on a T4 (ADR-0012).
   qwen3-8b:
     repo: Qwen/Qwen3-8B-AWQ
     revision: 4da05a8edb55c6046cce958586c33b61da07bb79

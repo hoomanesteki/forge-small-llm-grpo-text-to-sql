@@ -60,3 +60,32 @@ def test_adr_0007_quotes_the_pilots_counts(capsys: pytest.CaptureFixture[str]) -
     assert printed.startswith(HEADER)
     adr = (ROOT / "docs" / "adr" / "0007-prompt-format.md").read_text(encoding="utf-8")
     assert printed in adr
+
+
+@pytest.mark.phase(3)
+def test_baseline_adrs_quote_the_runs_counts(capsys: pytest.CaptureFixture[str]) -> None:
+    # FG-307's rows: the chosen model with p1 and p2 in ADR-0007, the candidates in
+    # ADR-0012, and in a table of its own there the reference, which ran with p2.
+    quoted = (
+        (
+            "0007-prompt-format",
+            (
+                "2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41",
+                "2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41",
+            ),
+        ),
+        (
+            "0012-model-choice",
+            (
+                "2026-11-16-qwen3-1-7b-val-c8f4b41",
+                "2026-11-16-qwen3-4b-val-c8f4b41",
+                "2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41",
+            ),
+        ),
+        ("0012-model-choice", ("2026-11-17-qwen3-8b-awq-val-2f77281",)),
+    )
+    for adr, runs in quoted:
+        assert main([str(ROOT / "docs" / "runs" / run) for run in runs]) == 0
+        printed = capsys.readouterr().out
+        text = (ROOT / "docs" / "adr" / f"{adr}.md").read_text(encoding="utf-8")
+        assert printed in text.split("\n## Measured\n", 1)[1], adr

@@ -1,0 +1,21 @@
+adapter: null
+backend: vllm
+device: cpu
+execution:
+  gold_timeout_ms: 10000
+  max_rows: 100000
+  official_item_timeout_s: 10.0
+  timeout_ms: 2000
+generation:
+  max_new_tokens: 256
+  n: 1
+  seed: 0
+  temperature: 0.0
+  top_p: 1.0
+limit: null
+max_prompt_tokens: 1536
+model: Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79
+prompt_version: p2
+quantization: awq
+retry: 0
+split: dev

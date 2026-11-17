@@ -322,8 +322,9 @@ uv run forge runs push <run_id>                 # make the store's copy runs/<ru
   commit, the repo lookup that starts a pull, a connection dropped on a download, and a 5xx
   other than 500, 502, 503 and 504. The store tells which from the failure that ended the
   call (`forge.ops.hub.client_retried`), so both retry when a download's first metadata
-  request is refused and the client's retries of it then drop their connections: each of
-  the store's 4 tries then waits out the client's 23 s, 106 s of waiting in all with the
+  request is refused, times out or gets a status the client retries (408, 429, 500, 502,
+  503 or 504), and the client's retries of it then drop their connections: each of the
+  store's 4 tries then waits out the client's 23 s, 106 s of waiting in all with the
   store's 14 s. Otherwise a call that keeps failing waits at most 14 s between the store's
   tries or 23 s inside the client's, then says the store is unavailable; when the Hub's
   answer says how long to wait (`Retry-After`, or a 429's `RateLimit` header), the client
@@ -399,6 +400,14 @@ Push them in this order, from one clean commit that passed `make smoke`:
 5. The model ADR-0012's rule chooses, and the reference, on dev, once each:
    `<name>-dev` and `qwen3-8b-dev`, with `--reason baseline`. These are dev looks 1 and 2.
 
+Steps 1, 2 and 4 ran from `c8f4b41` on 2026-11-16 and are committed under `docs/runs/`: the
+rule chose `Qwen/Qwen2.5-Coder-1.5B-Instruct` (ADR-0012), and p2 won (ADR-0007). So steps 3
+and 5 run `qwen3-8b-val`, `qwen2-5-coder-1-5b-dev` and `qwen3-8b-dev`, whose configs use p2
+since FG-307 recorded those runs: push them from that commit or a later one, never from
+`c8f4b41`, where they still say p1. They ran on 2026-11-17: the reference's val run and the
+chosen model's dev run from `2f77281`, and the reference's dev run from `d2d6a3a`, once its
+val run had loaded the AWQ checkpoint. All of them are committed under `docs/runs/`.
+
 The same model's runs from one commit on one day would share a default run id, so name each:
 `--run-id <date>-<config name>-<sha7>`, such as `2026-11-20-qwen3-4b-val-p2-abc1234`. Kaggle
 runs at most two GPU sessions at once and
@@ -409,7 +418,9 @@ the Hub store gets the run only from `forge runs push`). Render its report on th
 with `FORGE_DATA_DIR=data/spider uv run forge report run <run_id>`, so its rebuild compares
 the chart, and copy the folder whole to `docs/runs/`.
 `tests/integration/test_artifacts.py::test_phase3_baseline_reports_present` then checks
-every run is there with its report, I5 on its replies and I6 on step 4 against step 1.
+every run is there with its report and I6 on step 4 against step 1, and
+`tests/integration/test_invariants.py::test_i5_agreement_on_committed_runs` checks I5 on
+their replies: pooled, and for each run of the chosen model alone (ADR-0008).
 
 ## Troubleshooting
 

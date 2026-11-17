@@ -53,8 +53,9 @@ Once `uv run forge doctor` shows Kaggle auth ok, on a clean commit that passed `
    `uv run forge ledger add --platform kaggle --gpu T4 --hours <h> --run-id <run_id> --purpose "FG-301 throughput spike"`,
    with the run id step 4 printed (`<YYYY-MM-DD>-throughput-spike-<sha7>`).
    The CPU probe gets no row.
-8. Commit both JSON reports under `docs/spikes/kaggle-gpu/`, fill in every "To be
-   measured" item below from them, and update ADR-0006 and the section 3.8 budget.
+8. Commit both JSON reports under `docs/spikes/kaggle-gpu/`, answer each question below
+   from them under its "Measured on" heading, and update ADR-0006 and the section 3.8
+   budget. FG-301 did this for the 2026-11-16 session.
 
 If the GPU kernel fails in its first 10 minutes, stop, read the log and reproduce on CPU
 before pushing again (plan section 5.3). The report says which stage failed and why.

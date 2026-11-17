@@ -1,0 +1,48 @@
+{
+  "run_id": "2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41-preflight",
+  "kind": "eval",
+  "git_sha": "c8f4b419f1f2666984a48c49eeb7827fc0b7d1e4",
+  "config": {
+    "adapter": null,
+    "backend": "vllm",
+    "device": "cpu",
+    "execution": {
+      "gold_timeout_ms": 10000,
+      "max_rows": 100000,
+      "official_item_timeout_s": 10.0,
+      "timeout_ms": 2000
+    },
+    "generation": {
+      "max_new_tokens": 256,
+      "n": 1,
+      "seed": 0,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "limit": 5,
+    "max_prompt_tokens": 1536,
+    "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a",
+    "prompt_version": "p1",
+    "retry": 0,
+    "split": "val"
+  },
+  "config_hash": "111969ed8dbc25b867bda97507032cf68046e0b7ea8d0b436c7aacc7e9e27a2f",
+  "data_manifest_hash": "e10958d3b7a9490c15623285275d2840fbce551c32432fc62c0ad440cb06651e",
+  "model_ref": "Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a",
+  "adapter_ref": null,
+  "parent_run": null,
+  "platform": "kaggle",
+  "gpu": "Tesla T4",
+  "seed": 0,
+  "started_at": "2026-11-16T19:28:53.566108Z",
+  "ended_at": "2026-11-16T19:29:07.026320Z",
+  "gpu_hours": 0.003738947777777778,
+  "cost_usd": 0.0,
+  "outputs": {
+    "config": "config.yaml",
+    "sessions": "sessions.json",
+    "generations": "eval/val-generations.jsonl",
+    "scores": "eval/val-scores.jsonl"
+  },
+  "status": "finished"
+}

@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 import yaml
 
-from forge.data.spider import FAILING_GOLD_IDS, resolve_data_dir
+from forge.data.spider import FAILING_GOLD_IDS, load_checksums, resolve_data_dir
 from forge.data.splits import read_split_ids
 from forge.eval.config import HOSTS, EvalConfig, read_config_file
 from forge.eval.report import rebuild, write_run_report
@@ -218,6 +218,16 @@ def test_phase3_kaggle_eval_job_present() -> None:
         "kaggle",
     )
     assert _kaggle_rows(manifest.run_id) == ["kaggle"]
+    # FG-302's datasets, as the kernel mounted them: the code dataset's version the push
+    # named, holding the run's commit, and every verified Spider file.
+    pushed = json.loads((run.paths.root / "kernels.json").read_text(encoding="utf-8"))
+    owner, slug, _ = pushed["kernels"][0]["code"].split("/")
+    stages = status["stages"]
+    assert slug == "forge-code"
+    assert stages["code"]["result"]["folder"].endswith(f"/{owner}/forge-code")
+    assert stages["code"]["result"]["sha"] == manifest.git_sha
+    assert stages["data"]["result"]["folder"].endswith(f"/{owner}/forge-spider")
+    assert stages["data"]["result"]["files"] == len(load_checksums())
 
 
 @pytest.mark.phase(3)
@@ -244,14 +254,21 @@ I6_MODEL = "qwen2-5-coder-1-5b"
 HEADROOM = 0.75
 # FG-307's runs, each from one config, or for the chosen candidate from one of the
 # candidates' (docs/runbook.md, "Baselines").
-BASELINES = {
+# The candidates' runs on val, which choose the model and the prompt, ran first.
+VAL_BASELINES = {
     **{f"{name} val": [EVAL_CONFIGS / f"{name}-val.yaml"] for name in CANDIDATES},
     "chosen val p2": [EVAL_CONFIGS / f"{name}-val-p2.yaml" for name in CANDIDATES],
-    "reference val": [EVAL_CONFIGS / f"{REFERENCE}-val.yaml"],
     "I6 repeat": [EVAL_CONFIGS / f"{I6_MODEL}-val-100.yaml"],
+}
+BASELINES = {
+    **VAL_BASELINES,
+    "reference val": [EVAL_CONFIGS / f"{REFERENCE}-val.yaml"],
     "chosen dev": [EVAL_CONFIGS / f"{name}-dev.yaml" for name in CANDIDATES],
     "reference dev": [EVAL_CONFIGS / f"{REFERENCE}-dev.yaml"],
 }
+# The runs after the choice, in the order they ran. Each is checked once it is committed,
+# and the first one still missing skips the checks after it (docs/runs/pending.yaml).
+LATER_BASELINES = [name for name in BASELINES if name not in VAL_BASELINES]
 
 
 def _official_ex(run: StoredRun) -> float:
@@ -297,31 +314,142 @@ def test_p2_is_checked_against_the_chosen_model() -> None:
         assert_p2_ran_for_the_chosen_model({**runs, f"{chosen} val": run("org/chosen", 9)})
 
 
+def _adr(name: str) -> str:
+    return (ROOT / "docs" / "adr" / f"{name}.md").read_text(encoding="utf-8")
+
+
+def _adr_chosen_model() -> str:
+    chosen = re.search(r"\n- Chosen model: `([^`]+)`\n", _adr("0012-model-choice"))
+    assert chosen, "ADR-0012 names no chosen model"
+    return chosen.group(1)
+
+
 @pytest.mark.phase(3)
 def test_phase3_baseline_reports_present() -> None:
-    runs = gpu_story_runs("FG-307", BASELINES)
-    assert_p2_ran_for_the_chosen_model(runs)
-    # I6 on the T4: the first 100 val questions again agree with the whole run's.
-    i6 = compare_runs(runs["I6 repeat"], runs[f"{I6_MODEL} val"])
+    val = gpu_story_runs("FG-307", VAL_BASELINES)
+    # I6 on the T4: the first 100 val questions again agree with the whole run's, as
+    # ADR-0012 quotes.
+    i6 = compare_runs(val["I6 repeat"], val[f"{I6_MODEL} val"])
     assert i6.ok, i6.describe()
-    # Each dev run spent one look, logged with its reason (dev looks 1 and 2 of 6).
-    uses = read_uses(ROOT / "docs" / "dev-usage.md")
-    for name in ("chosen dev", "reference dev"):
-        run_id = runs[name].manifest.run_id
-        assert [reason for _, used, reason in uses if used == run_id] == ["baseline"], name
-    # The ADRs that wait on these runs are decided, and the chosen model is ADR-0012's.
+    assert " ".join(i6.describe().split(": ", 1)[1].split()) in " ".join(
+        _adr("0012-model-choice").split()
+    )
+    for run in val.values():
+        assert _kaggle_rows(run.manifest.run_id) == ["kaggle"], run.manifest.run_id
+    # The ADRs the val runs decide are accepted, and p2 ran for the model ADR-0012 chose,
+    # which left headroom.
     for adr in ("0012-model-choice", "0007-prompt-format"):
-        text = (ROOT / "docs" / "adr" / f"{adr}.md").read_text(encoding="utf-8")
-        assert "\n- Status: accepted" in text, adr
-    chosen = runs["chosen dev"].manifest.model_ref.split("@")[0]
-    adr = (ROOT / "docs" / "adr" / "0012-model-choice.md").read_text(encoding="utf-8")
-    assert f"\n- Chosen model: `{chosen}`\n" in adr
+        assert "\n- Status: accepted\n" in _adr(adr), adr
+    chosen = _adr_chosen_model()
+    assert val["chosen val p2"].manifest.model_ref.split("@")[0] == chosen
+    (chosen_val,) = [
+        val[f"{name} val"]
+        for name in CANDIDATES
+        if val[f"{name} val"].manifest.model_ref.split("@")[0] == chosen
+    ]
+    assert _official_ex(chosen_val) < HEADROOM
+
+    # The later runs, each once it is committed: the first still missing skips, naming
+    # itself, while FG-307 waits in pending.yaml.
+    runs = dict(val)
+    uses = read_uses(ROOT / "docs" / "dev-usage.md")
+    for name in LATER_BASELINES:
+        runs |= gpu_story_runs("FG-307", {name: BASELINES[name]})
+        manifest = runs[name].manifest
+        assert _kaggle_rows(manifest.run_id) == ["kaggle"], name
+        # Each dev run spent one look, logged with its reason (dev looks 1 and 2 of 6).
+        if manifest.config["split"] == "dev":
+            logged = [reason for _, used, reason in uses if used == manifest.run_id]
+            assert logged == ["baseline"], name
+        if name == "chosen dev":
+            assert manifest.model_ref.split("@")[0] == chosen
+            assert_p2_ran_for_the_chosen_model(runs)
+
+
+def _report_rates(report: str) -> tuple[str, str, list[str]]:
+    """A run report's model and prompt version, and the rates an ADR row quotes from it:
+    official EX, fast EX and valid SQL with their intervals, then official EX at each
+    hardness level, from easy to extra."""
+    model = re.search(r"\n\| Model \| `([^`@]+)@", report)
+    prompt = re.search(r"\n\| Prompt version \| `(\w+)` \|", report)
+    assert model and prompt
+    totals = {
+        name: re.search(rf"\n\| {name} \| [\d,]+ \| [\d,]+ \| ([^|]+) \|", report)
+        for name in ("official EX", "fast EX", "valid SQL")
+    }
+    levels = re.findall(
+        r"\n\| (?:easy|medium|hard|extra) \| [\d,]+ \| [^|]+ \| ([\d.]+%) \[", report
+    )
+    assert all(totals.values()) and len(levels) == 4
+    rates = [match.group(1).strip() for match in totals.values() if match]
+    return model.group(1), prompt.group(1), rates + levels
+
+
+@pytest.mark.phase(3)
+def test_baseline_adrs_quote_the_reports() -> None:
+    # Each row of ADR-0007's and ADR-0012's measured tables is its run's report, on val
+    # or on dev: the prompt or the model it names first, then every rate in report order,
+    # never typed by hand.
+    rows = 0
+    for name, names in (("0007-prompt-format", "prompt"), ("0012-model-choice", "model")):
+        measured = _adr(name).split("\n## Measured\n", 1)[1].split("\n## ", 1)[0]
+        for line in measured.splitlines():
+            link = re.search(r"\]\(\.\./runs/([^/)]+)/eval/((?:val|dev)-report\.md)\)", line)
+            if not line.startswith("| ") or link is None:
+                continue
+            report = (RUNS / link.group(1) / "eval" / link.group(2)).read_text(encoding="utf-8")
+            model, prompt, rates = _report_rates(report)
+            first, _, *quoted = (cell.strip() for cell in line.strip("|").split("|"))
+            assert first == (prompt if names == "prompt" else f"`{model}`"), line
+            assert quoted == rates[: len(quoted)], line
+            rows += 1
+    # p1 and p2 in ADR-0007; the candidates, the reference on val, and the chosen model and
+    # the reference on dev in ADR-0012.
+    assert rows == 8
+    # ADR-0012's I5 lines, each after a link to the report it is quoted from, are that
+    # report's own.
+    i5 = re.findall(
+        r"^- \[[^]]+\]\(\.\./runs/([^/)]+)/eval/(\w+-report\.md)\): (The checkers disagree .+)$",
+        _adr("0012-model-choice"),
+        flags=re.MULTILINE,
+    )
+    assert len(i5) == 6
+    for run_id, report_name, line in i5:
+        report = (RUNS / run_id / "eval" / report_name).read_text(encoding="utf-8")
+        assert f"\n{line}\n" in report, line
+    # ADR-0007 quotes the p1 and p2 compare report's lines as it wrote them.
+    p2 = RUNS / "2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41" / "eval"
+    compare = (p2 / "compare-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41.md").read_text(
+        encoding="utf-8"
+    )
+    quotes = re.findall(r"^> (.+)$", _adr("0007-prompt-format"), flags=re.MULTILINE)
+    assert quotes and all(quote in compare for quote in quotes)
+
+
+def assert_rebuilds(runs: Mapping[str, StoredRun]) -> None:
+    """Each run's report, chart and compare reports match their rebuild from its files."""
+    data = resolve_data_dir()
+    for name, run in runs.items():
+        report, chart, *compares = rebuild(run.manifest.run_id, runs_root=RUNS, data_dir=data)
+        assert (report.diff, report.skipped) == ((), None), name
+        # Rendered on the laptop, so a Mac compares the chart; elsewhere it says it didn't.
+        assert chart.diff == (), name
+        assert [check.diff for check in compares] == [()] * len(compares), name
 
 
 @pytest.mark.phase(3)
 @pytest.mark.requires_full_data
 def test_phase3_baseline_reports_rebuild() -> None:
-    data = resolve_data_dir()
-    for name, run in gpu_story_runs("FG-307", BASELINES).items():
-        checks = rebuild(run.manifest.run_id, runs_root=RUNS, data_dir=data)
-        assert [check.diff for check in checks] == [()], name
+    val = gpu_story_runs("FG-307", VAL_BASELINES)
+    assert_rebuilds(val)
+    # The p2 run holds its comparison with the chosen model's p1 run (ADR-0007).
+    p1 = next(
+        run
+        for name, run in val.items()
+        if name.endswith(" val")
+        and run.manifest.model_ref == val["chosen val p2"].manifest.model_ref
+    )
+    compare = val["chosen val p2"].paths.report.parent / f"compare-{p1.manifest.run_id}.md"
+    assert compare.is_file()
+    for name in LATER_BASELINES:
+        assert_rebuilds(gpu_story_runs("FG-307", {name: BASELINES[name]}))

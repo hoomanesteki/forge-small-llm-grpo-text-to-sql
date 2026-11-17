@@ -724,6 +724,32 @@ def test_secret_probe_never_writes_a_value(
 
 
 @pytest.mark.phase(3)
+def test_secret_probe_scrubs_a_token_across_its_cut(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The traceback keeps its last 1,200 characters. A message that ends 1,182 characters
+    # after a token puts the cut inside it, where the tail alone no longer looks like one.
+    canary = "hf_" + os.urandom(12).hex()
+
+    class UserSecretsClient:
+        def get_secret(self, label: str) -> str:
+            raise ConnectionError(f"{canary} {'y' * 1180}")
+
+    fake = types.ModuleType("kaggle_secrets")
+    fake.UserSecretsClient = UserSecretsClient  # type: ignore[attr-defined]
+    fake.__file__ = "kaggle_secrets.py"
+    monkeypatch.setitem(sys.modules, "kaggle_secrets", fake)
+    secret_probe = load_script(ROOT / "kaggle" / "spike" / "secret_probe.py", "secret_probe")
+    out = tmp_path / "secret-probe.json"
+    secret_probe.main(out)
+
+    written = out.read_text()
+    assert canary[-12:] not in written
+    tail = json.loads(written)["HF_TOKEN"]["trace_tail"]
+    assert len(tail) == 1200 and tail.endswith("y" * 1180 + "\n")
+
+
+@pytest.mark.phase(3)
 def test_env_stage_reports_off_kaggle_too(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(spike, "_internet", lambda: {"url": "offline in tests", "status": 0})
     info = spike.env_stage(Namespace())
@@ -1017,7 +1043,8 @@ def test_spike_doc_keeps_research_apart_from_measurements() -> None:
         assert "](https://" in research, f"{title}: research without a source"
         # Each measurement names the report field it comes from.
         assert re.search(r"`[a-z_-]+[.:]", measured), f"{title}: no report field named"
-    assert "Not measured yet" not in doc and "To be measured" not in doc
+    # Across a line break too, as the doc wraps its lines.
+    assert re.search(r"Not\s+measured\s+yet|To\s+be\s+measured", doc) is None
 
     # The reports it quotes are committed as the kernels wrote them, each in the README.
     reports = ROOT / "docs" / "spikes" / "kaggle-gpu"
@@ -1101,20 +1128,27 @@ def test_budget_rows_follow_the_measurements() -> None:
 
     # Spider's dev split is 1,034 questions (ADR-0004); only its size is used here.
     val, dev = len(read_split_ids("val")), 1034
-    # The reference's own config estimates: no run has loaded an 8B model on the T4.
+    # The reference's own config estimates, which the row keeps: the formula has no 8B rates.
     reference = 0.45 + 0.50
     candidates = 2 * evaluate(val, "1.7B") + evaluate(val, "4B")
+    # ADR-0012 chose Qwen2.5-Coder-1.5B-Instruct, which takes the 1.7B model's rates.
+    chosen = "1.7B"
+    assert "\n- Chosen model: `Qwen/Qwen2.5-Coder-1.5B-Instruct`\n" in (
+        ROOT / "docs" / "adr" / "0012-model-choice.md"
+    ).read_text(encoding="utf-8")
     expected = {
         "Baselines": candidates
-        + evaluate(val, "4B")
+        + evaluate(val, chosen)
         + evaluate(100, "1.7B")
-        + evaluate(dev, "4B")
+        + evaluate(dev, chosen)
         + reference,
-        "SFT checkpoint evals": 2 * evaluate(val, "4B"),
+        "SFT checkpoint evals": 2 * evaluate(val, chosen),
         "GRPO pilot": grpo(100, "1.7B", sessions=2),
-        "GRPO main": grpo(600, "4B", sessions=2),
-        "Checkpoint selection": 3 * evaluate(val, "4B") + 2 * evaluate(dev, "4B"),
-        "Hacking fix re-run": grpo(200, "4B") + evaluate(val, "4B"),
+        "GRPO main": grpo(600, chosen, sessions=2),
+        "Checkpoint selection": 3 * evaluate(val, chosen) + 2 * evaluate(dev, chosen),
+        "Hacking fix re-run": grpo(200, chosen) + evaluate(val, chosen),
+        # FG-603's configs B to E and FG-604's second seed of B, each with a val eval.
+        "Ablations": 5 * (grpo(300, "1.7B") + evaluate(val, "1.7B")),
     }
     rows = _budget_rows()
     for name, hours in expected.items():
