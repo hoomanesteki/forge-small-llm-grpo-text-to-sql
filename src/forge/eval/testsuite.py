@@ -3,10 +3,12 @@
 Reported accuracy comes from ``official_exec_match`` (ADR-0008). For each item it calls
 ``test_suite_eval.exec_eval.eval_exec_match`` directly, with ``plug_value``,
 ``keep_distinct`` and the progress bar off, the evaluator's recommended execution
-setting. It skips ``evaluation.evaluate()``, which first replaces every ``value`` in the
-prediction with ``1`` and so breaks columns named ``value`` (upstream issue #21). The
-evaluator compares on every ``.sqlite`` file in the database's folder: classical EX
-with Spider's own databases, test-suite EX once the distilled databases sit beside them.
+setting; ``keep_distinct=True`` is for checking where that setting parts from the fast
+comparator (``scripts/check_i5_distinct.py``), never for a reported number. It skips
+``evaluation.evaluate()``, which first replaces every ``value`` in the prediction with
+``1`` and so breaks columns named ``value`` (upstream issue #21). The evaluator compares
+on every ``.sqlite`` file in the database's folder: classical EX with Spider's own
+databases, test-suite EX once the distilled databases sit beside them.
 
 Around that call:
 
@@ -77,11 +79,13 @@ REFUSED: frozenset[ErrorKind] = frozenset({"empty_sql", "denied"})
 
 
 class MatchItem(NamedTuple):
-    """One prediction to score. ``pred_sql`` is ``None`` when the reply had no SQL."""
+    """One prediction to score. ``pred_sql`` is ``None`` when the reply had no SQL, and
+    ``keep_distinct`` is the evaluator's option of that name."""
 
     db_id: str
     pred_sql: str | None
     gold_sql: str
+    keep_distinct: bool = False
 
 
 class GoldQueryFailed(ValueError):
@@ -108,11 +112,13 @@ def official_exec_match(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     item_timeout_s: float = DEFAULT_ITEM_TIMEOUT_S,
     pool: SandboxPool | None = None,
+    keep_distinct: bool = False,
 ) -> list[bool]:
     """The official verdict for each ``(db_id, pred_sql, gold_sql)`` item, in order.
 
     Items run one at a time in a worker of ``pool``, or of a one-worker pool made for
-    this call; a pool passed in must be on the same data directory. An item still
+    this call; a pool passed in must be on the same data directory. ``keep_distinct``
+    leaves ``DISTINCT`` in both queries, where official EX removes it. An item still
     running after ``item_timeout_s`` is killed and counts as no match, and so does one
     whose worker dies. Raises ``OfficialEvalTimeout`` once all of them take longer than
     ``timeout_s`` (worker start-ups aside), killing the item then running. A missing
@@ -126,7 +132,7 @@ def official_exec_match(
     root = resolve_data_dir(data_dir).resolve()
     if pool is not None and pool.data_dir != root:
         raise ValueError(f"the pool runs on {pool.data_dir}, not on {root}")
-    jobs = [MatchItem(*item) for item in items]
+    jobs = [MatchItem(*item, keep_distinct=keep_distinct) for item in items]
     verdicts: list[bool] = []
     with ExitStack() as stack:
         if pool is None:
@@ -171,7 +177,10 @@ def _match(executor: SqliteExecutor, root: Path, item: MatchItem) -> bool:
     pred = strip_leading(item.pred_sql)
     try:
         # What eval_exec_match will run, built the way it builds it.
-        as_run: str = exec_eval.replace_cur_year(remove_distinct(exec_eval.postprocess(pred)))
+        as_run: str = exec_eval.postprocess(pred)
+        if not item.keep_distinct:
+            as_run = remove_distinct(as_run)
+        as_run = exec_eval.replace_cur_year(as_run)
     except SQLParseError:
         return False
     if as_run != pred and _refused(executor, item.db_id, as_run):
@@ -182,7 +191,7 @@ def _match(executor: SqliteExecutor, root: Path, item: MatchItem) -> bool:
             p_str=pred,
             g_str=item.gold_sql,
             plug_value=False,
-            keep_distinct=False,
+            keep_distinct=item.keep_distinct,
             progress_bar_for_each_datapoint=False,
         )
     except AssertionError as exc:
