@@ -210,7 +210,7 @@ def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> Non
     data_dir, runs_dir = Path(f"{log}.env").read_text(encoding="utf-8").splitlines()
     scratch = Path(runs_dir).parent
     # The base model's eval and report, then 3 steps of SFT and 2 of GRPO, each followed
-    # by an eval of its adapter.
+    # by an eval of its adapter, and GRPO's metrics drawn first.
     assert log.read_text(encoding="utf-8").splitlines() == [
         "pytest --phase 8 tests/smoke",
         f"forge eval run --backend hf --model {model} --split val --limit 20 "
@@ -222,6 +222,7 @@ def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> Non
         f"{Path(runs_dir) / sft_id / 'checkpoints' / 'final'} --split val --limit 10 "
         f"--run-id {sft_id}-eval --workers 2 --allow-dirty",
         f"forge train grpo --config configs/grpo/tiny-smoke.yaml --run-id {grpo_id} --allow-dirty",
+        f"forge runs plot {grpo_id} --store local",
         f"forge eval run --backend hf --model {model} --adapter "
         f"{Path(runs_dir) / grpo_id / 'checkpoints' / 'final'} --split val --limit 10 "
         f"--run-id {grpo_id}-eval --workers 2 --allow-dirty",

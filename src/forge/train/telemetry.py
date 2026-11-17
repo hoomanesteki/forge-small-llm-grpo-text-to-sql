@@ -1,5 +1,6 @@
 """What a GRPO run's metrics say about whether it is learning, while it trains and after
-(FG-506): the telemetry each step's line holds, and the alerts it sets off.
+(FG-506): the telemetry each step's line holds, the alerts it sets off, and the plots of
+``forge runs plot``.
 
 ``forge.train.callbacks.TelemetryCallback`` writes each step's line in ``metrics.jsonl``.
 TRL 1.18 logs these at every step, with ``logging_steps=1``:
@@ -41,7 +42,7 @@ the manifest's outputs name ``alerts``: ``RunManifest`` has no field for them, a
 contract stays as it is. The events follow from the metrics alone, so the training
 callback and anyone reading a run's metrics find the same ones.
 
-Nothing here imports transformers or torch, so reading a run's metrics needs no cpu
+Nothing here imports transformers or torch, so ``forge runs plot`` runs without the cpu
 extra.
 """
 
@@ -57,6 +58,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from forge.eval.run_files import RunCorrupt
+from forge.ops.hub import METRICS_FILE, RunStore
 
 if TYPE_CHECKING:
     from forge.train.backends import RewardFunc
@@ -73,6 +75,11 @@ RATE_SOURCES = {
     VALID_KEY: "rewards/validity_reward/mean",
     MATCH_KEY: "rewards/execution_reward/mean",
 }
+KL_KEY = "kl"
+LR_KEY = "learning_rate"
+# The in-training eval's fast EX (forge.eval.callbacks.EX_KEY), spelled out here since that
+# module imports transformers; a test keeps the two in step.
+VAL_EX_KEY = "val/ex_fast"
 
 ZERO_STD_LIMIT = 0.8
 ZERO_STD_STEPS = 20
@@ -432,6 +439,12 @@ def read_file_lines(path: Path) -> list[dict[str, Any]]:
     return jsonl_lines(path.read_bytes(), str(path)) if path.is_file() else []
 
 
+def read_metrics(store: RunStore, run_id: str) -> list[dict[str, Any]] | None:
+    """The lines of the run's ``metrics.jsonl`` in ``store``, or None when it has none."""
+    data = store.read_file(run_id, METRICS_FILE)
+    return None if data is None else jsonl_lines(data, f"{METRICS_FILE} of run {run_id}")
+
+
 def merged_steps(lines: Iterable[Mapping[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
     """Each step's metrics, in step order: the lines of a step merged, a later line's
     values over an earlier's. So the in-training eval's line joins its step's, and the
@@ -443,3 +456,264 @@ def merged_steps(lines: Iterable[Mapping[str, Any]]) -> list[tuple[int, dict[str
         if isinstance(step, int) and not isinstance(step, bool):
             steps.setdefault(step, {}).update(line)
     return sorted(steps.items())
+
+
+# The eval report chart's surface and ink (forge.eval.report), and three series hues
+# taken in this order, so a chart's series always get the same ones.
+_SURFACE = "#fcfcfb"
+_INK = "#0b0b0b"
+_INK_SECONDARY = "#52514e"
+_GRID = "#e1e0d9"
+_BASELINE = "#c3c2b7"
+_SERIES = ("#2a78d6", "#eb6834", "#1baf7a")
+_INCHES = (6.4, 3.6)
+_PANEL_INCHES = (4.8, 2.6)
+_HEADING_INCHES = 0.75  # above the panels, for the title and the line under it
+_DPI = 100
+_LINE_PT = 1.44  # 2 px at 100 dpi
+_MARKED = 20  # a series of this many points or fewer shows each one
+
+
+@dataclass(frozen=True)
+class _Chart:
+    stem: str  # the file is <stem>.png
+    title: str
+    series: tuple[tuple[str, str], ...]  # each line's key and label
+    percent: bool = False  # shares, drawn from 0 to 100%
+    from_zero: bool = False  # counts, drawn from 0
+
+
+CHARTS = (
+    _Chart(
+        "sql-rates",
+        "SQL rates",
+        (
+            (MATCH_KEY, "execution match, rollouts"),
+            (VALID_KEY, "valid SQL, rollouts"),
+            (VAL_EX_KEY, "fast EX on val, greedy"),
+        ),
+        percent=True,
+    ),
+    _Chart(
+        "zero-variance",
+        "Groups with zero reward variance",
+        ((ZERO_STD_KEY, "share of groups"),),
+        percent=True,
+    ),
+    _Chart(
+        "completion-length",
+        "Completion length, tokens",
+        ((MEAN_LENGTH_KEY, "mean"), (P95_LENGTH_KEY, "95th percentile")),
+        from_zero=True,
+    ),
+    _Chart("kl", "KL to the reference model", ((KL_KEY, "kl"),)),
+    _Chart("learning-rate", "Learning rate", ((LR_KEY, "learning rate"),)),
+    _Chart("loss", "Training loss", (("loss", "loss"),)),
+)
+
+
+def _points(
+    steps: Sequence[tuple[int, Mapping[str, Any]]], key: str
+) -> tuple[list[int], list[float]]:
+    xs, ys = [], []
+    for step, values in steps:
+        value = finite(values.get(key))
+        if value is not None:
+            xs.append(step)
+            ys.append(value)
+    return xs, ys
+
+
+def _limit(
+    chart: _Chart, steps: Sequence[tuple[int, Mapping[str, Any]]]
+) -> tuple[float, str] | None:
+    """The alert threshold a chart shows, and its label."""
+    if chart.stem == "zero-variance":
+        return ZERO_STD_LIMIT, f"alert above {ZERO_STD_LIMIT:.0%} for {ZERO_STD_STEPS} steps"
+    if chart.stem == "completion-length":
+        xs, ys = _points(steps, MEAN_LENGTH_KEY)
+        if ys:
+            return LENGTH_FACTOR * ys[0], f"alert above {LENGTH_FACTOR:g}x step {xs[0]}'s mean"
+    return None
+
+
+def _style(axes: Any, *, percent: bool) -> None:
+    from matplotlib.ticker import MaxNLocator, PercentFormatter
+
+    axes.set_facecolor(_SURFACE)
+    axes.grid(axis="y", color=_GRID, linewidth=0.8)
+    axes.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        axes.spines[side].set_visible(False)
+    axes.spines["bottom"].set_color(_BASELINE)
+    axes.tick_params(length=0, labelcolor=_INK_SECONDARY, labelsize=9)
+    axes.xaxis.set_major_locator(MaxNLocator(integer=True))
+    axes.set_xlabel("step", color=_INK_SECONDARY, fontsize=9)
+    if percent:
+        axes.yaxis.set_major_formatter(PercentFormatter(xmax=1, decimals=0))
+
+
+def _line(axes: Any, xs: list[int], ys: list[float], color: str, label: str) -> None:
+    marked = len(xs) <= _MARKED
+    axes.plot(
+        xs,
+        ys,
+        color=color,
+        linewidth=_LINE_PT,
+        label=label,
+        marker="o" if marked else None,
+        markersize=6,
+        markeredgecolor=_SURFACE,
+        markeredgewidth=1.4,
+        zorder=3,
+    )
+
+
+def _heading(figure: Any, title: str, subtitle: str, *, left: float, tall: float) -> None:
+    """A chart's title and the line under it, a fixed distance from the figure's top."""
+    figure.text(left, 1 - 0.12 / tall, title, color=_INK, fontsize=11, va="top")
+    figure.text(left, 1 - 0.36 / tall, subtitle, color=_INK_SECONDARY, fontsize=8, va="top")
+
+
+def _save(figure: Any, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, format="png", dpi=_DPI, facecolor=_SURFACE)
+    return path
+
+
+def _line_chart(
+    chart: _Chart, steps: Sequence[tuple[int, Mapping[str, Any]]], subtitle: str, path: Path
+) -> Path | None:
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    drawn = [(key, label, *_points(steps, key)) for key, label in chart.series]
+    drawn = [entry for entry in drawn if entry[2]]
+    if not drawn:
+        return None
+    figure = Figure(figsize=_INCHES, dpi=_DPI, facecolor=_SURFACE)
+    FigureCanvasAgg(figure)
+    axes = figure.add_axes((0.11, 0.16, 0.85, 0.62))
+    _style(axes, percent=chart.percent)
+    colors = dict(zip((key for key, _ in chart.series), _SERIES, strict=False))
+    for key, label, xs, ys in drawn:
+        _line(axes, xs, ys, colors[key], label)
+    limit = _limit(chart, steps)
+    if limit is not None:
+        value, label = limit
+        axes.axhline(value, color=_INK_SECONDARY, linewidth=1, linestyle=(0, (4, 3)), zorder=2)
+        axes.annotate(
+            label,
+            (1, value),
+            xycoords=("axes fraction", "data"),
+            xytext=(0, 4),
+            textcoords="offset points",
+            ha="right",
+            va="bottom",
+            color=_INK_SECONDARY,
+            fontsize=8,
+        )
+    if chart.percent:
+        top = max(max(ys) for *_, ys in drawn)
+        axes.set_ylim(0, max(1.0, top) * 1.05)
+    elif chart.from_zero:
+        axes.set_ylim(bottom=0)
+    if len(drawn) > 1:
+        legend = axes.legend(
+            loc="lower left",
+            bbox_to_anchor=(0, 1.0),
+            ncols=len(drawn),
+            frameon=False,
+            fontsize=8,
+            labelcolor=_INK_SECONDARY,
+            handlelength=1.6,
+        )
+        legend.set_zorder(4)
+    _heading(figure, chart.title, subtitle, left=0.11, tall=_INCHES[1])
+    return _save(figure, path)
+
+
+def _rewards_chart(
+    steps: Sequence[tuple[int, Mapping[str, Any]]], subtitle: str, path: Path
+) -> Path | None:
+    """Small multiples, one panel for each reward's mean and one for their weighted sum,
+    each on its own scale, with a band one standard deviation either side."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    means = [
+        key
+        for key in dict.fromkeys(k for _, values in steps for k in values)
+        if key.startswith("rewards/") and key.endswith("/mean")
+    ]
+    panels = [
+        (
+            key,
+            key.removeprefix("rewards/").removesuffix("/mean"),
+            key.removesuffix("/mean") + "/std",
+        )
+        for key in means
+    ]
+    panels.append((REWARD_KEY, "reward, weighted sum", "reward_std"))
+    panels = [panel for panel in panels if _points(steps, panel[0])[0]]
+    if not panels:
+        return None
+    columns = 2 if len(panels) > 1 else 1
+    rows = math.ceil(len(panels) / columns)
+    width, height = _PANEL_INCHES
+    tall = height * rows + _HEADING_INCHES
+    figure = Figure(figsize=(width * columns, tall), dpi=_DPI, facecolor=_SURFACE)
+    FigureCanvasAgg(figure)
+    grid = figure.add_gridspec(
+        rows,
+        columns,
+        left=0.08,
+        right=0.97,
+        bottom=0.45 / tall,
+        top=1 - _HEADING_INCHES / tall,
+        hspace=0.6,
+        wspace=0.22,
+    )
+    for index, (key, name, spread) in enumerate(panels):
+        axes = figure.add_subplot(grid[index // columns, index % columns])
+        _style(axes, percent=False)
+        xs, ys = _points(steps, key)
+        band = dict(zip(*_points(steps, spread), strict=True))
+        if all(x in band for x in xs):
+            axes.fill_between(
+                xs,
+                [y - band[x] for x, y in zip(xs, ys, strict=True)],
+                [y + band[x] for x, y in zip(xs, ys, strict=True)],
+                color=_SERIES[0],
+                alpha=0.16,
+                linewidth=0,
+                zorder=2,
+            )
+        _line(axes, xs, ys, _SERIES[0], name)
+        axes.set_title(name, loc="left", color=_INK, fontsize=9)
+    subtitle = f"{subtitle}; the band is one standard deviation either side"
+    _heading(figure, "Mean reward per step", subtitle, left=0.08, tall=tall)
+    return _save(figure, path)
+
+
+def plot_metrics(lines: Iterable[Mapping[str, Any]], out_dir: Path, *, title: str) -> list[Path]:
+    """Draw a run's metrics lines as PNGs in ``out_dir``: ``rewards.png`` and one for
+    each of ``CHARTS`` whose metrics the lines hold, with the alert thresholds; returns
+    the files written. ``title`` names the run under each chart's heading. Raises
+    ``ValueError`` when the lines hold none of them."""
+    import matplotlib.style
+
+    steps = merged_steps(lines)
+    written: list[Path] = []
+    # matplotlib's defaults rather than any matplotlibrc's, as the eval report's chart.
+    with matplotlib.style.context("default"):
+        rewards = _rewards_chart(steps, title, out_dir / "rewards.png")
+        if rewards is not None:
+            written.append(rewards)
+        for chart in CHARTS:
+            path = _line_chart(chart, steps, title, out_dir / f"{chart.stem}.png")
+            if path is not None:
+                written.append(path)
+    if not written:
+        raise ValueError(f"{title}: the metrics hold nothing to plot")
+    return written

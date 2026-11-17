@@ -1,5 +1,6 @@
-"""GRPO telemetry (FG-506): the alert rules on synthetic metric streams, the rollouts
-the reward functions record, and the telemetry callback driven by hand, event by event."""
+"""GRPO telemetry (FG-506): the alert rules on synthetic metric streams, the plots of a
+fixture run's metrics, the rollouts the reward functions record, the telemetry callback
+driven by hand, event by event, and ``forge runs plot`` on a local store."""
 
 from __future__ import annotations
 
@@ -14,9 +15,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import matplotlib.image
 import pytest
 from transformers import TrainerControl, TrainerState
+from typer.testing import CliRunner
 
+from forge import cli
+from forge.core.types import RunManifest
+from forge.eval.callbacks import EX_KEY
 from forge.eval.run_files import RunCorrupt
 from forge.ops.hub import LocalRunStore, StoreUnavailable
 from forge.train.callbacks import TelemetryCallback, training_callbacks
@@ -25,6 +31,7 @@ from forge.train.rewards import Rewards
 from forge.train.telemetry import (
     LENGTH_FACTOR,
     RATE_SOURCES,
+    VAL_EX_KEY,
     VALID_DROP,
     ZERO_STD_LIMIT,
     ZERO_STD_STEPS,
@@ -33,12 +40,14 @@ from forge.train.telemetry import (
     jsonl_lines,
     merged_steps,
     percentile,
+    plot_metrics,
     read_file_lines,
     step_metrics,
 )
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "telemetry" / "grpo-metrics.jsonl"
 RUN = "2026-11-20-qwen3-1p7b-grpo-abc1234"
+PNG = b"\x89PNG\r\n\x1a\n"
 
 
 def _stream(monitor: AlertMonitor, key: str, values: Sequence[float], start: int = 1) -> list[Any]:
@@ -109,6 +118,39 @@ def test_alerts_trigger() -> None:
     assert [e.step for e in AlertMonitor().replay(lines, up_to=14)] == [10]
     # A healthy run sets none off.
     assert AlertMonitor().replay(read_file_lines(FIXTURE)) == []
+
+
+@pytest.mark.phase(5)
+def test_plots_render(tmp_path: Path) -> None:
+    lines = read_file_lines(FIXTURE)
+    written = plot_metrics(lines, tmp_path / "plots", title="run fixture, grpo, finished")
+    names = [path.name for path in written]
+    # The fixture run had beta 0, so TRL logged no KL, and no chart of it is drawn.
+    assert names == [
+        "rewards.png",
+        "sql-rates.png",
+        "zero-variance.png",
+        "completion-length.png",
+        "learning-rate.png",
+        "loss.png",
+    ]
+    sizes = {}
+    for path in written:
+        assert path.read_bytes().startswith(PNG)
+        image = matplotlib.image.imread(path)
+        sizes[path.name] = image.shape[:2]
+        # Something was drawn: not every pixel is the chart's surface.
+        assert image.reshape(-1, image.shape[-1]).std(axis=0).max() > 0.05, path.name
+    assert sizes["sql-rates.png"] == (360, 640)
+    # Five panels, the four rewards and their sum, two to a row.
+    assert sizes["rewards.png"] == (855, 960)
+
+    # Only what is there: a run that logged nothing but its learning rate gets that alone.
+    sparse = [{"step": 1, "learning_rate": 1e-5}, {"step": 2, "learning_rate": 5e-6}]
+    (only,) = plot_metrics(sparse, tmp_path / "sparse", title="run sparse")
+    assert only.name == "learning-rate.png"
+    with pytest.raises(ValueError, match="run empty: the metrics hold nothing to plot"):
+        plot_metrics([{"step": 1, "epoch": 1.0}], tmp_path / "empty", title="run empty")
 
 
 class FakeRewards:
@@ -248,6 +290,7 @@ def test_telemetry_names_match_their_sources() -> None:
     names = {reward.__name__ for reward in Rewards({}, None, RewardsConfig()).functions}  # type: ignore[arg-type]
     for source in RATE_SOURCES.values():
         assert source.split("/")[1] in names
+    assert VAL_EX_KEY == EX_KEY
 
 
 def _log(callback: TelemetryCallback, state: TrainerState, step: int, **logs: Any) -> None:
@@ -386,3 +429,44 @@ def test_metrics_lines_merge_by_step() -> None:
     with pytest.raises(RunCorrupt, match=r"line 1 of metrics\.jsonl is not a JSON object"):
         jsonl_lines(b"[1]\n", "metrics.jsonl")
     assert math.isnan(jsonl_lines(b'{"step": 1, "loss": NaN}\n', "m")[0]["loss"])
+
+
+def _manifest(status: str = "running") -> RunManifest:
+    return RunManifest(
+        run_id=RUN,
+        kind="grpo",
+        git_sha="a" * 40,
+        config={"grpo": {"max_steps": 600}},
+        config_hash="1" * 64,
+        data_manifest_hash="2" * 64,
+        model_ref="Qwen/Qwen3-1.7B",
+        platform="kaggle",
+        gpu="Tesla T4",
+        seed=42,
+        started_at=datetime(2026, 11, 20, 9, 0, tzinfo=UTC),
+        status=status,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.phase(5)
+def test_runs_plot_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
+    store = LocalRunStore(tmp_path / "runs")
+    store.put_manifest(_manifest("finished"))
+    runner = CliRunner()
+
+    missing = runner.invoke(cli.app, ["runs", "plot", RUN, "--store", "local"])
+    assert missing.exit_code == 1
+    assert f"error: run {RUN} in {store} has no metrics.jsonl yet" in missing.output
+
+    store.put_file(RUN, FIXTURE, "metrics.jsonl")
+    plotted = runner.invoke(cli.app, ["runs", "plot", RUN, "--store", "local"])
+    assert plotted.exit_code == 0, plotted.output
+    plots = tmp_path / "runs" / RUN / "plots"
+    assert plotted.output.splitlines()[0] == str(plots / "rewards.png")
+    assert (plots / "zero-variance.png").read_bytes().startswith(PNG)
+    out = tmp_path / "docs-runs"
+    elsewhere = runner.invoke(cli.app, ["runs", "plot", RUN, "--store", "local", "--out", str(out)])
+    assert elsewhere.exit_code == 0 and (out / "sql-rates.png").is_file()
+    unknown = runner.invoke(cli.app, ["runs", "plot", "2026-11-20-none", "--store", "local"])
+    assert unknown.exit_code == 1 and "error: no run 2026-11-20-none" in unknown.output

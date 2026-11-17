@@ -1593,6 +1593,39 @@ def runs_promote(
     typer.echo(f"best: {promoted.checkpoint}, now checkpoints/best in {copies}")
 
 
+@runs_app.command("plot")
+def runs_plot(
+    run_id: RunArgument,
+    store: StoreOption = "hub",
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out", file_okay=False, help="The folder for the PNGs; runs/<run_id>/plots/."
+        ),
+    ] = None,
+) -> None:
+    """Draw the run's metrics.jsonl as PNGs: each reward's mean, the SQL rates, the share
+    of groups with zero reward variance, completion length, KL, learning rate and loss,
+    those the run logged, with the alert thresholds (FG-506)."""
+    from forge.ops.hub import open_store
+    from forge.ops.paths import runs_dir
+    from forge.train.telemetry import plot_metrics, read_metrics
+
+    try:
+        where = open_store(store)
+        manifest = where.get_manifest(run_id)
+        lines = read_metrics(where, run_id)
+        if lines is None:
+            raise FileNotFoundError(f"run {run_id} in {where} has no metrics.jsonl yet")
+        title = f"run {run_id}, {manifest.kind}, {manifest.status}"
+        paths = plot_metrics(lines, out or runs_dir() / run_id / "plots", title=title)
+    except _runs_errors() as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    for path in paths:
+        typer.echo(str(path))
+
+
 train_app = typer.Typer(help="Train LoRA adapters on the train split.", no_args_is_help=True)
 app.add_typer(train_app, name="train")
 

@@ -5,8 +5,9 @@
 # sft` trains a LoRA adapter for 3 steps (configs/sft/tiny-smoke.yaml), and `forge eval
 # run --adapter` evaluates it on 10 val questions. Last, `forge train grpo` trains 2 GRPO
 # steps (configs/grpo/tiny-smoke.yaml), its rewards scored on the fixture databases and
-# its in-training eval on val, and `forge eval run --adapter` evaluates that adapter on
-# 10 val questions too. All of it goes in a scratch folder removed at the end.
+# its in-training eval on val, `forge runs plot` draws its metrics, and `forge eval run
+# --adapter` evaluates that adapter on 10 val questions too. All of it goes in a scratch
+# folder removed at the end.
 #
 # When every step passes on a clean tree it writes .smoke-ok-<commit sha> at the repo root,
 # which `forge kaggle run` requires before it pushes a GPU job (FG-303). The marker vouches
@@ -69,6 +70,9 @@ uv run forge eval run --backend hf --model "$model" --adapter "$adapter" --split
 
 step "forge train grpo --config configs/grpo/tiny-smoke.yaml"
 uv run forge train grpo --config configs/grpo/tiny-smoke.yaml --run-id "$grpo_id" --allow-dirty
+
+step "forge runs plot $grpo_id --store local"
+uv run forge runs plot "$grpo_id" --store local
 
 adapter="$FORGE_RUNS_DIR/$grpo_id/checkpoints/final"
 step "forge eval run --adapter $adapter --split val --limit 10"
