@@ -364,8 +364,8 @@ def test_entry_runs_an_sft_job_end_to_end(
         assert (run_dir / rel / "adapter_model.safetensors").is_file(), rel
     lines = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert [line["step"] for line in lines if "loss" in line] == [1, 2, 3]
-    # A training run writes no sessions.json, so its one session is the kernel's, added
-    # with the run's status and spanning the whole kernel, as an eval job's is.
+    # The run's one session, which the job began, stretched to the whole kernel, as an eval
+    # job's is.
     (session,) = read_sessions(run_dir) or []
     assert (session.status, status["session"]) == ("finished", 1)
     assert session.started_at == datetime.fromisoformat(status["started_at"])
@@ -379,6 +379,69 @@ def test_entry_runs_an_sft_job_end_to_end(
     # The rows were built in the temp folder, which the output leaves out.
     assert sorted(p.name for p in work.iterdir()) == ["preflight", "runs"]
     assert len(list((kernel_env / "temp" / "sft").iterdir())) == 1
+
+
+@pytest.mark.phase(4)
+def test_an_sft_job_stopped_after_its_step_is_resumed_by_a_second_kernel(
+    tmp_path: Path, spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The Kaggle SFT pilot's rehearsal (FG-496), with the tiny model on the CPU: the first
+    # kernel's session stops after step 2 (ops.stop_after_step), saving its checkpoint as
+    # the time guard does, and the kernel exits cleanly. A second kernel, pushed with
+    # --resume, mounts the first one's output, restores the run and trains it to its end.
+    smoke = load_train_config(ROOT / "configs" / "sft" / "tiny-smoke.yaml")
+    assert smoke.sft is not None
+    config = smoke.model_copy(
+        update={
+            "sft": smoke.sft.model_copy(update={"max_steps": 4}),
+            "ops": OpsConfig(checkpoint_every=100, stop_after_step=2),
+        }
+    )
+    options = {"config": config.model_dump(mode="json")}
+
+    def kernel(name: str, *extra: str) -> tuple[Path, dict[str, Any]]:
+        """Run the job in a kernel folder of its own; its run's folder and status.json."""
+        root = kernel_folder(tmp_path / name, monkeypatch)
+        build_inputs(root, spider_mini)
+        if "--resume" in extra:
+            mount_output(tmp_path / "first", root)
+        job = argv(root, "--timeout-s", "3600", *extra, options=options)
+        job[job.index("eval")] = "sft"
+        assert script.main(job, run=lambda command: None) == 0
+        run_dir = root / "working" / "runs" / "run-1"
+        return run_dir, json.loads((run_dir / "status.json").read_text())
+
+    first, status = kernel("first")
+    assert (status["status"], status["stage"], status["error"]) == (
+        "stopped_time_guard",
+        "upload",
+        None,
+    )
+    stopped = RunManifest.model_validate_json((first / "manifest.json").read_text())
+    assert stopped.status == "stopped_time_guard" and "adapter" not in stopped.outputs
+    assert (first / "checkpoints" / "step-000002" / "trainer_state.json").is_file()
+    # The preflight trains its two steps to its end: the stop is the job's alone.
+    preflight = tmp_path / "first" / "working" / "preflight" / "run-1-preflight"
+    checked = RunManifest.model_validate_json((preflight / "manifest.json").read_text())
+    assert checked.status == "finished"
+
+    second, status = kernel("second", "--resume")
+
+    assert (status["status"], status["error"], status["session"]) == ("finished", None, 2)
+    mounted = tmp_path / "second" / "input" / "notebooks" / OWNER / "forge-run-1"
+    assert status["stages"]["restore"]["result"]["from"] == str(mounted / "runs" / "run-1")
+    run = RunManifest.model_validate_json((second / "manifest.json").read_text())
+    assert (run.status, run.outputs["adapter"]) == ("finished", "checkpoints/final")
+    assert (run.started_at, run.config_hash) == (stopped.started_at, stopped.config_hash)
+    assert (second / "checkpoints" / "final" / "adapter_model.safetensors").is_file()
+    lines = [json.loads(line) for line in (second / "metrics.jsonl").read_text().splitlines()]
+    assert [line["step"] for line in lines if "loss" in line] == [1, 2, 3, 4]
+    # Two sessions, each the span of its kernel, which the ledger gives a row each.
+    sessions = read_sessions(second) or []
+    assert [s.status for s in sessions] == ["stopped_time_guard", "finished"]
+    assert sessions[1].started_at == datetime.fromisoformat(status["started_at"])
+    assert sessions[1].ended_at == datetime.fromisoformat(status["ended_at"])
+    assert sessions[0] == (read_sessions(first) or [])[0]
 
 
 @pytest.mark.phase(4)

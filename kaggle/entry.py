@@ -42,7 +42,10 @@ the script can be tested on a laptop with fakes. The stages, in order (``STAGES`
   start), as ``stopped_time_guard``, and its run is uploaded and resumed like any other.
   An SFT job's time guard (``TimeGuardCallback``) counts its config's
   ``ops.time_guard_minutes`` from the job's start, or only up to that deadline, less the
-  share it keeps back, when that comes first. An eval job whose adapter is a training run's
+  share it keeps back, when that comes first, and it stops after ``ops.stop_after_step``
+  too, as the session that trains it; its preflight never stops there. A resumed SFT job
+  carries its run on from the latest checkpoint the restore stage brought back
+  (``forge.train.sft.run_sft``). An eval job whose adapter is a training run's
   checkpoint, ``runs/<run_id>/checkpoints/<name>`` as on a laptop, copies that folder's
   adapter files to the same path under the work folder first, from the training run's
   kernel output, which ``forge kaggle run`` mounts under the input folder, since a kernel
@@ -505,9 +508,10 @@ def _fetch_from_store(kernel: Kernel, run_id: str, rel: str, target: Path) -> No
 
 
 def sft_job(kernel: Kernel, preflight: bool) -> str:
-    """``forge train sft`` with the job's config, the run's platform the kernel's host; a
-    preflight trains ``PREFLIGHT_STEPS`` steps of it, in a run of its own. With the push's
-    timeout, the job's time guard stops it in time for the upload (``_guard_minutes``)."""
+    """``forge train sft`` with the job's config, the run's platform the kernel's host, and
+    on a resume ``forge train sft --resume``; a preflight trains ``PREFLIGHT_STEPS`` steps
+    of it, in a run of its own, to its end. With the push's timeout, the job's time guard
+    stops it in time for the upload (``_guard_minutes``)."""
     from forge.train.config import parse_train_config
     from forge.train.sft import run_sft
 
@@ -517,7 +521,9 @@ def sft_job(kernel: Kernel, preflight: bool) -> str:
     run_id, runs_root = kernel.args.run_id, kernel.work / "runs"
     if preflight:
         steps = config.sft.model_copy(update={"max_steps": PREFLIGHT_STEPS})
-        config = config.model_copy(update={"sft": steps})
+        # The preflight checks the path, which a stop the job rehearses would cut short.
+        ops = config.ops.model_copy(update={"stop_after_step": None})
+        config = config.model_copy(update={"sft": steps, "ops": ops})
         run_id, runs_root = f"{run_id}-preflight", kernel.work / "preflight"
     elif kernel.args.timeout_s is not None:
         minutes = min(config.ops.time_guard_minutes, _guard_minutes(kernel))
@@ -528,6 +534,7 @@ def sft_job(kernel: Kernel, preflight: bool) -> str:
     run = run_sft(
         config,
         run_id=run_id,
+        resume=kernel.args.resume and not preflight,
         runs_root=runs_root,
         sft_root=Path(kernel.args.temp_dir) / "sft",
         host=kernel.args.host,

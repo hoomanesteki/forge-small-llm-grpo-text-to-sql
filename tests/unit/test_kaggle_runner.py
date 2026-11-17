@@ -751,7 +751,7 @@ def test_an_eval_job_mounts_the_output_of_the_kernel_that_trained_its_adapter(
     run, unversioned = "2026-11-20-qwen3-4b-sft-abc1234", "2026-11-21-qwen3-4b-sft-abc1234"
     _train(run)
     # kaggle 2.2.5's line when the server sends no version: Kaggle then mounts the kernel's
-    # latest output, its only one, since an SFT run is never resumed.
+    # latest output, its only one, since each attempt at a run is a kernel of its own.
     url = f"https://www.kaggle.com/code/{OWNER}/forge-{unversioned}"
     fake.push_output = f"Kernel version successfully pushed.  Please check progress at {url}\n"
     _train(unversioned)
@@ -918,6 +918,48 @@ def test_an_eval_job_of_best_pushes_the_checkpoint_best_json_names(
 
 
 @pytest.mark.phase(4)
+def test_an_sft_run_resumes_from_its_last_kernels_output(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The SFT pilot's second session (FG-496): the same run, config and commit, in a kernel
+    # of its own that mounts the first one's output, where the run's checkpoint is.
+    fake = _use(FakeKaggle(_git(repo, "rev-parse", "HEAD")), monkeypatch)
+    config, other = repo.parent / "pilot.yaml", repo.parent / "other.yaml"
+    text = "run: {kind: sft, model_ref: org/m}\nsft: {}\nops: {est_gpu_hours: 1, %s}\n"
+    config.write_text(text % "stop_after_step: 50", encoding="utf-8")
+    other.write_text(text % "stop_after_step: 60", encoding="utf-8")
+    run = "2026-11-20-pilot-abc1234"
+
+    def push(path: Path, *extra: str) -> Any:
+        return _run("--job", "sft", "--config", str(path), "--run-id", run, "--yes", *extra)
+
+    assert push(config).exit_code == 0
+    assert "--resume to carry it on" in push(config).stderr
+    result = push(config, "--resume")
+
+    assert result.exit_code == 0, result.output
+    meta = json.loads(fake.pushed[1]["kernel-metadata.json"])
+    assert (meta["id"], meta["kernel_sources"]) == (
+        f"{OWNER}/forge-{run}-2",
+        [f"{OWNER}/forge-{run}/1"],
+    )
+    first = script.parse_args(_baked_argv(fake.pushed[0]["entry.py"]))
+    args = script.parse_args(_baked_argv(fake.pushed[1]["entry.py"]))
+    assert (args.job, args.run_id, args.resume, first.resume) == ("sft", run, True, False)
+    # The run's options as its first push made them, so the kernel trains the same run, and
+    # the same timeout, which its guard counts to.
+    assert args.options == first.options and args.timeout_s == first.timeout_s == 5400
+    assert args.options["config"]["ops"]["stop_after_step"] == 50
+    refused = push(other, "--resume")
+    assert refused.exit_code == 1 and "was pushed with other options" in refused.stderr
+    # The run's checkpoints are now in the second kernel's output, which holds the whole run.
+    final = f"runs/{run}/checkpoints/final"
+    source = adapter_kernel_sources(final, repo / "runs")
+    assert source.kernel == f"{OWNER}/forge-{run}-2/1"
+    assert len(fake.pushed) == 2
+
+
+@pytest.mark.phase(4)
 def test_sft_job_refuses_what_a_kernel_cant_train(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -932,7 +974,6 @@ def test_sft_job_refuses_what_a_kernel_cant_train(
         (repo.parent / f"{name}.yaml").write_text(text, encoding="utf-8")
     refused = [
         ((main, "--reason", "baseline"), "an SFT job trains on the train split only"),
-        ((main, "--resume"), "an SFT run can't be resumed yet"),
         ((str(ROOT / "configs/sft/tiny-smoke.yaml"),), "trains on cpu, and a kernel on its GPU"),
         ((str(ROOT / "configs/sft/pilot-qwen25coder05b-mps.yaml"),), "trains on mps, and a"),
         ((str(repo.parent / "grpo.yaml"),), "trains a grpo run, and --job sft an sft one"),

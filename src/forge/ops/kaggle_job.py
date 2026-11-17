@@ -57,8 +57,10 @@ the files it copies against the digest this machine's copy of the run records.
 An ``sft`` job takes a training config (``configs/sft/*.yaml``) whose device may be
 CUDA, and trains it as ``forge train sft`` does, its run's platform the kernel's host. Its
 options carry the whole config as it was checked here, defaults filled in, so the kernel
-trains what was checked. It reads train only, so it takes no ``--reason``, and an SFT run
-can't be resumed yet. Its preflight trains a few steps of the same config.
+trains what was checked. It reads train only, so it takes no ``--reason``. A
+``--resume`` carries the run on from its latest checkpoint, which the last attempt's
+kernel output holds, as ``forge train sft --resume`` does on a laptop. Its preflight
+trains a few steps of the same config.
 
 The ``spike`` job pushes FG-301's throughput script instead of the entry script. It runs
 without Forge, so it mounts no dataset and has no preflight.
@@ -469,8 +471,6 @@ def plan_job(
     elif job == "sft":
         if reason is not None:
             raise JobRefused("an SFT job trains on the train split only, so it takes no --reason")
-        if resume:
-            raise JobRefused("an SFT run can't be resumed yet; pass --run-id to start a new one")
         train = load_train_config(config)
         if train.run.kind != "sft":
             raise JobRefused(f"{config} trains a {train.run.kind} run, and --job sft an sft one")
