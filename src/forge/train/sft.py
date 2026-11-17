@@ -23,7 +23,7 @@ One run, in order (plan FG-403; the starting values are ADR-0010's):
    The ops section changes no weight, so it stays out, as an eval run's does.
 5. Training, with the callbacks every job has (``forge.train.callbacks``): a checkpoint
    in the run every ``ops.checkpoint_every`` steps, the time guard, counted from when the
-   run starts, and the trainer's logs in ``metrics.jsonl``. The checkpoint at each share
+   session starts, and the trainer's logs in ``metrics.jsonl``. The checkpoint at each share
    of the run ``ops.keep_checkpoints_at`` names is kept from retention, and the manifest's
    outputs name it ``kept_at_<share>``, such as ``kept_at_0.5``. The callbacks' run store
    is ``runs_root`` itself, so a push is a copy into the run's folder that never fails on
@@ -35,16 +35,26 @@ One run, in order (plan FG-403; the starting values are ADR-0010's):
 6. The adapter in ``checkpoints/final``, and the manifest ``finished``, its outputs
    holding the digest of each checkpoint the run keeps (``forge.ops.adapters``), which an
    eval run of that checkpoint records too. When the time
-   guard stopped training, its checkpoint is the run's last, there is no ``final``, and
-   the manifest says ``stopped_time_guard``. A run that fails says ``failed``, with the
-   traceback in ``error.txt``.
+   guard stopped training, at its deadline or at ``ops.stop_after_step``, its checkpoint
+   is the run's last, there is no ``final``, and the manifest says
+   ``stopped_time_guard``. A run that fails says ``failed``, with the traceback in
+   ``error.txt``.
+
+``resume`` carries on the run ``run_id`` names, one that hasn't finished, from its latest
+checkpoint, which holds the optimizer, scheduler, RNG state and step count beside the
+adapter, so the steps go on where they stopped (``TrainBackend.sft(resume_from=...)``). The
+run must be an SFT run made at the same commit, on the same data and to the same config
+hash: the same rows, settings and trainer. ``metrics.jsonl`` keeps its lines up to that
+checkpoint's step, so a session killed past its last checkpoint leaves no step twice. Each
+attempt is a session in the run's ``sessions.json`` (``forge.ops.sessions``), and the
+manifest's GPU hours add up its sessions, leaving out the time between them.
 
 The run's folder is ``runs/<run_id>/`` (``FORGE_RUNS_DIR``), in plan section 3.9's layout:
-``manifest.json``, ``config.yaml``, ``metrics.jsonl``, ``checkpoints/step-NNNNNN/`` and
-``checkpoints/final/``. The trainer has no eval set, since training reads train only, so
-no run writes ``checkpoints/best/``: that is the checkpoint val picks once each is
-evaluated, which ``promote_best`` copies there (``forge runs promote``, FG-404). An SFT run
-can't be resumed yet, so a run id names one run.
+``manifest.json``, ``config.yaml``, ``sessions.json``, ``metrics.jsonl``,
+``checkpoints/step-NNNNNN/`` and ``checkpoints/final/``. The trainer has no eval set, since
+training reads train only, so no run writes ``checkpoints/best/``: that is the checkpoint
+val picks once each is evaluated, which ``promote_best`` copies there (``forge runs
+promote``, FG-404).
 """
 
 from __future__ import annotations
@@ -58,6 +68,7 @@ import time
 import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -70,7 +81,7 @@ from forge.data.prompts import ChatTokenizer, chat_token_counter
 from forge.data.spider import resolve_data_dir
 from forge.eval.config import EvalConfig, Host, check_run_id
 from forge.eval.metrics import summarize
-from forge.eval.run_files import ADAPTER_DIGEST, read_run, write_atomic
+from forge.eval.run_files import ADAPTER_DIGEST, RunConflict, read_run, write_atomic
 from forge.ops.adapters import (
     ADAPTER_FILES,
     adapter_sha256,
@@ -90,6 +101,7 @@ from forge.ops.hub import (
 )
 from forge.ops.manifest import EndStatus, Platform, accelerator, build_manifest, close, code_sha
 from forge.ops.paths import runs_dir
+from forge.ops.sessions import SESSIONS_FILE, begin, end
 from forge.ops.timeguard import Clock
 from forge.train.backends import TrainBackend, select_backend
 from forge.train.config import SftConfig, TrainConfig
@@ -102,12 +114,16 @@ ERROR_FILE = "error.txt"
 # The files a training run's manifest lists in its outputs, when they exist.
 OUTPUTS: Mapping[str, str] = {
     "config": CONFIG_FILE,
+    "sessions": SESSIONS_FILE,
     "metrics": METRICS_FILE,
     "adapter": FINAL,
     "error": ERROR_FILE,
 }
 # The manifest's name for a checkpoint ops.keep_checkpoints_at keeps.
 KEPT_OUTPUT = "kept_at_{share:g}"
+# What a trainer's checkpoint holds its step count in: transformers' TRAINER_STATE_NAME,
+# without importing transformers here, before a backend may patch it.
+TRAINER_STATE_FILE = "trainer_state.json"
 # What promote_best's scores are; it writes them in PROMOTION_FILE.
 PROMOTION_METRIC = "official EX on val"
 # Settings an eval run's config may hold that change no score.
@@ -128,6 +144,7 @@ class SftRun:
     sft_data: Path  # the saved rows it trained on
     adapter: Path | None  # checkpoints/final; None when the time guard stopped the run
     stopped_at: int | None  # the step the time guard stopped after
+    resumed_from: str | None  # the checkpoint this session went on from, in the run
 
 
 def platform_for(device: str) -> Platform:
@@ -175,6 +192,7 @@ def run_sft(
     config: TrainConfig,
     *,
     run_id: str | None = None,
+    resume: bool = False,
     allow_dirty: bool = False,
     data_dir: Path | None = None,
     runs_root: Path | None = None,
@@ -184,17 +202,21 @@ def run_sft(
     env: Mapping[str, str] | None = None,
     clock: Clock = time.monotonic,
 ) -> SftRun:
-    """Train the SFT run ``config`` describes, as the module docstring says.
+    """Train, or with ``resume`` carry on, the SFT run ``config`` describes, as the module
+    docstring says.
 
     ``backend`` replaces the one the config names, such as a stand-in in a test.
     ``sft_root`` is where the rows' folder goes (``data/sft`` by default), ``host`` the
     kernel's machine a job runs on, ``env`` where the callbacks look for a W&B key, and
-    ``clock`` the time guard's clock. Raises
-    ``DirtyTreeError`` on uncommitted changes unless ``allow_dirty``, ``RunExists`` for a
-    run id already used, and ``ValueError`` for a config or a device no SFT run can take.
+    ``clock`` the time guard's clock. Raises ``DirtyTreeError`` on uncommitted changes
+    unless ``allow_dirty``, ``RunExists`` for a new run's id already used, ``RunNotFound``
+    for a resume of no run, ``RunConflict`` for one this config can't carry on, and
+    ``ValueError`` for a config or a device no SFT run can take.
     """
     if config.sft is None:
         raise ValueError(f"run.kind is {config.run.kind}, and forge train sft trains sft runs")
+    if resume and run_id is None:
+        raise ValueError("name the run to resume: its run id")
     root = resolve_data_dir(data_dir).resolve()
     runs_root = runs_dir() if runs_root is None else runs_root
     # Asked before a model loads, so uncommitted changes cost no time, and only here: the
@@ -203,8 +225,16 @@ def run_sft(
     run_id = run_id or make_run_id("sft", config.run.model_ref, sha)
     check_run_id(run_id)
     run_dir = runs_root / run_id
-    if run_dir.exists():
-        raise RunExists(f"run {run_id} is in {run_dir} already; pass a new --run-id")
+    store = LocalRunStore(runs_root)
+    previous: RunManifest | None = None
+    resumed_from: tuple[str, int] | None = None  # the checkpoint and its step
+    if resume:
+        # All but the config hash, which needs the rows, before a model loads.
+        previous = store.get_manifest(run_id)
+        _check_resumable(previous, git_sha=sha)
+        resumed_from = _resume_point(store, run_id)
+    elif run_dir.exists():
+        raise RunExists(f"run {run_id} is in {run_dir} already; pass --resume or a new --run-id")
     if backend is None:
         backend = select_backend(
             config.run.backend, device=config.run.device, max_seq_length=config.max_seq_length
@@ -214,7 +244,6 @@ def run_sft(
     # so nothing may import transformers before it.
     from forge.train.callbacks import CheckpointCallback, TimeGuardCallback, training_callbacks
 
-    store = LocalRunStore(runs_root)
     # Made now, so the time guard counts the model's loading too.
     callbacks = training_callbacks(
         config.ops, store, run_id, metrics_path=run_dir / METRICS_FILE, env=env, clock=clock
@@ -229,7 +258,7 @@ def run_sft(
     )
     folder, meta = _build_rows(config, tokenizer, root, sft_root)
     fit = fit_rows(open_rows(folder, meta), tokenizer, config.sft, seed=config.run.seed)
-    manifest = build_manifest(
+    fresh = build_manifest(
         "sft",
         manifest_config(config, meta, fit, backend),
         model_ref=config.run.model_ref,
@@ -240,13 +269,22 @@ def run_sft(
         data_dir=root,
         git_sha=sha,
     )
-    try:
-        # Not exist_ok: of two processes given one run id, the second stops here.
-        run_dir.mkdir(parents=True)
-    except FileExistsError as exc:
-        raise RunExists(f"run {run_id} was started in {run_dir} meanwhile") from exc
-    manifest = _start(run_dir, manifest, store)
-    log.info("sft %s: %d rows from %s, on %s", run_id, len(fit.rows), folder, platform)
+    if previous is not None:
+        _check_resumable(
+            previous,
+            config_hash=fresh.config_hash,
+            data_manifest_hash=fresh.data_manifest_hash,
+            platform=fresh.platform,
+        )
+    manifest = _start(run_dir, fresh, previous, store, resumed_from)
+    log.info(
+        "sft %s: %d rows from %s, on %s%s",
+        run_id,
+        len(fit.rows),
+        folder,
+        platform,
+        "" if resumed_from is None else f", from {resumed_from[0]}",
+    )
     adapter: Path | None = None
     try:
         with tempfile.TemporaryDirectory(prefix=f"forge-sft-{run_id}-") as work:
@@ -258,6 +296,7 @@ def run_sft(
                 callbacks,
                 output_dir=work,
                 seed=config.run.seed,
+                resume_from=None if resumed_from is None else run_dir / resumed_from[0],
             )
             if guard.stopped_at is None:
                 adapter = Path(shutil.copytree(trained, run_dir / FINAL))
@@ -267,7 +306,48 @@ def run_sft(
         raise
     status: EndStatus = "finished" if guard.stopped_at is None else "stopped_time_guard"
     final = _end(run_dir, manifest, status, store, checkpoints.kept)
-    return SftRun(final, run_dir, folder, adapter, guard.stopped_at)
+    went_on = None if resumed_from is None else resumed_from[0]
+    return SftRun(final, run_dir, folder, adapter, guard.stopped_at, went_on)
+
+
+def _check_resumable(previous: RunManifest, **session: str) -> None:
+    """Raise ``RunConflict`` unless the stored run ``previous`` is an unfinished SFT run
+    whose manifest has the fields ``session`` names as this session has them, such as
+    ``git_sha`` or ``config_hash``."""
+    run = previous.run_id
+    if previous.kind != "sft":
+        raise RunConflict(f"run {run} is of kind {previous.kind}; forge train sft resumes sft runs")
+    if previous.status == "finished":
+        raise RunConflict(f"run {run} has finished; pass a new --run-id to train again")
+    for field, now in session.items():
+        before = getattr(previous, field)
+        if before != now:
+            what = field.replace("_", " ").replace("git sha", "commit")
+            raise RunConflict(
+                f"run {run} was made with {what} {before}, and this session has {now}; resume "
+                "it as it was made, or pass a new --run-id"
+            )
+
+
+def _resume_point(store: LocalRunStore, run_id: str) -> tuple[str, int]:
+    """The run's latest checkpoint and the step its trainer state says it saved, the one
+    training goes on after. Raises ``RunConflict`` when there is no such checkpoint."""
+    latest = store.latest_checkpoint(run_id)
+    if latest is None:
+        raise RunConflict(f"run {run_id} kept no checkpoint to resume from; pass a new --run-id")
+    state = store.read_file(run_id, f"{latest}/{TRAINER_STATE_FILE}")
+    if state is None:
+        raise RunConflict(
+            f"run {run_id}'s latest checkpoint, {latest}, holds no {TRAINER_STATE_FILE}, so "
+            "training can't go on from it: it is an adapter alone; pass a new --run-id"
+        )
+    step = json.loads(state)["global_step"]
+    if step != checkpoint_step(latest):
+        raise RunConflict(
+            f"run {run_id}'s {latest} holds the trainer's state at step {step}; the folder "
+            "holds some other step's checkpoint, so pass a new --run-id"
+        )
+    return latest, step
 
 
 def open_rows(folder: Path, meta: SftMeta) -> Dataset:
@@ -602,12 +682,47 @@ def _outputs(run_dir: Path, kept: Mapping[float, int] | None = None) -> dict[str
     return {**found, **checkpoint_digests(run_dir)}
 
 
-def _start(run_dir: Path, manifest: RunManifest, store: LocalRunStore) -> RunManifest:
-    """Write the config and the running manifest, which the time guard reads back."""
+def _start(
+    run_dir: Path,
+    fresh: RunManifest,
+    previous: RunManifest | None,
+    store: LocalRunStore,
+    resumed_from: tuple[str, int] | None,
+) -> RunManifest:
+    """Write the config and the running manifest, which the time guard reads back:
+    ``fresh``, or the resumed run's, which keeps its first start. Then begin a session,
+    and on a resume drop the metrics lines past the step of the checkpoint ``resumed_from``
+    names."""
+    if previous is None:
+        try:
+            # Not exist_ok: of two processes given one run id, the second stops here.
+            run_dir.mkdir(parents=True)
+        except FileExistsError as exc:
+            raise RunExists(f"run {fresh.run_id} was started in {run_dir} meanwhile") from exc
+        manifest = fresh
+    else:
+        manifest = previous.model_copy(update={"status": "running", "ended_at": None})
+    if resumed_from is not None:
+        _keep_metrics_to(run_dir / METRICS_FILE, resumed_from[1])
     write_atomic(run_dir / CONFIG_FILE, yaml.safe_dump(manifest.config, sort_keys=False).encode())
+    begin(run_dir, fresh.started_at, resumes=previous)
     manifest = manifest.model_copy(update={"outputs": _outputs(run_dir)})
     store.put_manifest(manifest)
     return manifest
+
+
+def _keep_metrics_to(path: Path, step: int) -> None:
+    """Keep the lines of the metrics file ``path`` up to ``step``: the steps after it are
+    trained again from its checkpoint, and log again."""
+    if not path.is_file():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    # A line without its newline was cut short by a kill mid-write, past any checkpoint.
+    whole = lines if not lines or lines[-1].endswith("\n") else lines[:-1]
+    kept = [line for line in whole if json.loads(line)["step"] <= step]
+    if len(kept) < len(lines):
+        log.info("sft: %s drops %d lines past step %d", path, len(lines) - len(kept), step)
+        write_atomic(path, "".join(kept).encode())
 
 
 def _end(
@@ -619,9 +734,15 @@ def _end(
     *,
     error: BaseException | None = None,
 ) -> RunManifest:
-    """Write the run's final manifest, with the traceback beside it when it failed."""
-    if error is not None:
+    """End the session and write the run's manifest as it ended, its GPU hours its
+    sessions', with the traceback beside it when it failed; an earlier session's
+    traceback goes once one doesn't fail."""
+    if error is None:
+        (run_dir / ERROR_FILE).unlink(missing_ok=True)
+    else:
         write_atomic(run_dir / ERROR_FILE, "".join(traceback.format_exception(error)).encode())
-    final = close(manifest, status).model_copy(update={"outputs": _outputs(run_dir, kept)})
+    now = datetime.now(UTC)
+    final = close(manifest, status, now=now, sessions=end(run_dir, now, status))
+    final = final.model_copy(update={"outputs": _outputs(run_dir, kept)})
     store.put_manifest(final)
     return final

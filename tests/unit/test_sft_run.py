@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -25,9 +26,11 @@ from forge import cli
 from forge.core.types import RunManifest
 from forge.data.manifest import data_manifest_hash
 from forge.data.splits import load_train
+from forge.eval.run_files import RunConflict
 from forge.ops.adapters import adapter_sha256, digest_output
-from forge.ops.hub import FINAL, LocalRunStore
+from forge.ops.hub import FINAL, LocalRunStore, RunNotFound
 from forge.ops.manifest import config_hash
+from forge.ops.sessions import read_sessions
 from forge.train import sft
 from forge.train.backends import ADAPTER_DIR, Precision
 from forge.train.config import LoraConfig, SftConfig, TrainConfig, parse_train_config
@@ -50,8 +53,10 @@ class Clock:
 
 class FakeBackend:
     """A ``TrainBackend`` that trains nothing: ``sft`` drives the callbacks through
-    ``steps`` steps as a trainer does, saving where they ask, and writes a stand-in
-    adapter. Each step takes ``step_s`` on ``clock``; step ``fail_at`` raises."""
+    ``steps`` steps as a trainer does, saving where they ask with the trainer's state
+    beside the adapter, and writes a stand-in adapter. Given a checkpoint to resume from,
+    it starts after the step that state names. Each step takes ``step_s`` on ``clock``;
+    step ``fail_at`` raises."""
 
     name = "fake"
     precision = Precision("float32", use_cpu=True)
@@ -72,6 +77,7 @@ class FakeBackend:
         self.step_s = step_s
         self.loaded: list[tuple[str, LoraConfig, bool, int]] = []
         self.rows: list[dict[str, Any]] = []
+        self.resumed: list[Path | None] = []
 
     def load(
         self, model_ref: str, lora: LoraConfig, *, load_in_4bit: bool, seed: int
@@ -89,11 +95,16 @@ class FakeBackend:
         *,
         output_dir: str | Path,
         seed: int,
+        resume_from: str | Path | None = None,
     ) -> str:
         self.rows = dataset.to_list()
+        self.resumed.append(None if resume_from is None else Path(resume_from))
         out = Path(output_dir)
         args: Any = SimpleNamespace(output_dir=str(out))
         state, control = TrainerState(max_steps=self.steps), TrainerControl()
+        if resume_from is not None:
+            saved = json.loads((Path(resume_from) / "trainer_state.json").read_text())
+            state.global_step = saved["global_step"]
         for callback in callbacks:
             callback.on_train_begin(args, state, control)
         while state.global_step < self.steps and not control.should_training_stop:
@@ -111,6 +122,9 @@ class FakeBackend:
                 saved.mkdir(parents=True)
                 (saved / "adapter_config.json").write_text('{"r": 16}')
                 (saved / "adapter_model.safetensors").write_text(f"step {state.global_step}")
+                (saved / "trainer_state.json").write_text(
+                    json.dumps({"global_step": state.global_step})
+                )
                 for callback in callbacks:
                     callback.on_save(args, state, control)
                 control.should_save = False
@@ -177,12 +191,17 @@ def test_sft_run_writes_its_adapter_and_manifest(spider_mini: Path, tmp_path: Pa
     half = "checkpoints/step-000002"
     assert manifest.outputs == {
         "config": "config.yaml",
+        "sessions": "sessions.json",
         "metrics": "metrics.jsonl",
         "adapter": "checkpoints/final",
         digest_output(FINAL): adapter_sha256(run.adapter),
         digest_output(half): adapter_sha256(root / half),
     }
     assert manifest.outputs[digest_output(FINAL)] != manifest.outputs[digest_output(half)]
+    # One session, which its hours are, as a resumed run's are its sessions'.
+    (session,) = read_sessions(root) or []
+    assert (session.started_at, session.ended_at) == (manifest.started_at, manifest.ended_at)
+    assert session.status == "finished"
 
     # The data hash: the rows' own, the name of the folder they were saved to, beside the
     # Spider files' in data_manifest_hash.
@@ -410,6 +429,7 @@ def test_failed_training_leaves_a_failed_run(spider_mini: Path, tmp_path: Path) 
     saved = "checkpoints/step-000002"
     assert manifest.outputs == {
         "config": "config.yaml",
+        "sessions": "sessions.json",
         "metrics": "metrics.jsonl",
         "error": "error.txt",
         digest_output(saved): adapter_sha256(root / saved),
@@ -439,6 +459,128 @@ def test_time_guard_stop_keeps_its_checkpoint_and_no_final(
 
 
 @pytest.mark.phase(4)
+def test_a_stopped_run_resumes_from_its_checkpoint_to_its_end(
+    spider_mini: Path, tmp_path: Path
+) -> None:
+    # The session that trains step 2 stops after it, as at the time guard: a pilot's
+    # rehearsal of a session's end (FG-496), on a kernel's host so its hours count.
+    config = _config(sft={"max_steps": 4}, ops={"checkpoint_every": 2, "stop_after_step": 2})
+    first = FakeBackend(steps=4)
+    stopped = _train(tmp_path, first, config, host="kaggle")
+    assert (stopped.manifest.status, stopped.stopped_at, stopped.adapter) == (
+        "stopped_time_guard",
+        2,
+        None,
+    )
+    assert first.resumed == [None] and stopped.resumed_from is None
+    checkpoint = stopped.root / "checkpoints" / "step-000002"
+    assert json.loads((checkpoint / "trainer_state.json").read_text()) == {"global_step": 2}
+
+    second = FakeBackend(steps=4)
+    resumed = _train(tmp_path, second, config, host="kaggle", resume=True)
+
+    # It went on from that checkpoint past the step that stopped the first session, to the
+    # run's end, as the same run: its first start, config hash and data.
+    assert second.resumed == [checkpoint] and resumed.resumed_from == "checkpoints/step-000002"
+    assert (resumed.manifest.status, resumed.stopped_at) == ("finished", None)
+    assert resumed.adapter is not None
+    assert (resumed.adapter / "adapter_model.safetensors").read_text() == "4 steps"
+    assert resumed.manifest.started_at == stopped.manifest.started_at
+    assert resumed.manifest.config_hash == stopped.manifest.config_hash
+    assert resumed.manifest == _stored(tmp_path)
+    lines = (resumed.root / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["step"] for line in lines] == [1, 2, 3, 4]
+    # Each session in the run's sessions, and its hours theirs, not the gap between them.
+    sessions = read_sessions(resumed.root) or []
+    assert [s.status for s in sessions] == ["stopped_time_guard", "finished"]
+    assert sessions[0].started_at == stopped.manifest.started_at
+    assert sessions[1].ended_at == resumed.manifest.ended_at
+    spans = [(s.ended_at - s.started_at).total_seconds() / 3600 for s in sessions if s.ended_at]
+    assert resumed.manifest.gpu_hours == pytest.approx(sum(spans))
+
+
+@pytest.mark.phase(4)
+def test_a_resume_after_a_failure_trains_again_what_its_checkpoint_lacks(
+    spider_mini: Path, tmp_path: Path
+) -> None:
+    config = _config(sft={"max_steps": 4}, ops={"checkpoint_every": 2})
+    with pytest.raises(RuntimeError, match="the loss is NaN at step 3"):
+        _train(tmp_path, FakeBackend(steps=4, fail_at=3), config)
+    root = tmp_path / "runs" / RUN
+    # A kill past the checkpoint: a line for step 3, and one cut short as it was written.
+    with (root / "metrics.jsonl").open("a", encoding="utf-8") as metrics:
+        metrics.write(json.dumps({"step": 3, "loss": 0.3}) + "\n" + '{"step": 3, "lo')
+
+    resumed = _train(tmp_path, FakeBackend(steps=4), config, resume=True)
+
+    assert resumed.resumed_from == "checkpoints/step-000002"
+    assert resumed.manifest.status == "finished"
+    # Step 3 is trained again from step 2's checkpoint, and logged once.
+    lines = (root / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["step"] for line in lines] == [1, 2, 3, 4]
+    # The earlier session's traceback no longer describes the run.
+    assert not (root / "error.txt").exists() and "error" not in resumed.manifest.outputs
+    assert [s.status for s in read_sessions(root) or []] == ["failed", "finished"]
+
+
+@pytest.mark.phase(4)
+def test_a_resume_is_refused_unless_it_carries_on_the_same_run(
+    spider_mini: Path, tmp_path: Path
+) -> None:
+    config = _config(sft={"max_steps": 4}, ops={"checkpoint_every": 2, "stop_after_step": 2})
+    backend = FakeBackend(steps=4)
+
+    def resume(run_config: TrainConfig = config, **options: Any) -> sft.SftRun:
+        return _train(tmp_path, backend, run_config, resume=True, **options)
+
+    with pytest.raises(ValueError, match="name the run to resume: its run id"):
+        resume(run_id=None)
+    with pytest.raises(RunNotFound, match=f"no run {RUN}"):
+        resume()
+    stopped = _train(tmp_path, FakeBackend(steps=4), config)
+    store = LocalRunStore(tmp_path / "runs")
+    root = tmp_path / "runs" / RUN
+    state = root / "checkpoints" / "step-000002" / "trainer_state.json"
+    for change, message in (
+        (
+            lambda: _restore(store, stopped.manifest, kind="eval"),
+            "is of kind eval; forge train sft",
+        ),
+        (lambda: _restore(store, stopped.manifest, status="finished"), "has finished"),
+        (
+            lambda: _restore(store, stopped.manifest, git_sha="f" * 40),
+            f"was made with commit {'f' * 40}",
+        ),
+        (lambda: state.write_text('{"global_step": 3}'), "holds the trainer's state at step 3"),
+        (state.unlink, "holds no trainer_state.json, so training can't go on from it"),
+        (lambda: shutil.rmtree(root / "checkpoints"), "kept no checkpoint to resume from"),
+    ):
+        change()
+        with pytest.raises(RunConflict, match=message):
+            resume()
+        _restore(store, stopped.manifest)
+    # None of those loaded a model, and a new run can't take a run id already used.
+    assert backend.loaded == []
+    with pytest.raises(RunExists, match="pass --resume or a new --run-id"):
+        _train(tmp_path, backend, config)
+    assert backend.loaded == []
+
+    # Another config is refused once the rows give its hash, before the folder changes.
+    again = _train(tmp_path, FakeBackend(steps=4), config, run_id="2026-11-15-tiny-sft-def5678")
+    other = _config(sft={"max_steps": 4, "learning_rate": 1e-4})
+    before = sorted(path.name for path in again.root.iterdir())
+    with pytest.raises(RunConflict, match="was made with config hash"):
+        resume(other, run_id=again.manifest.run_id)
+    assert len(backend.loaded) == 1 and backend.resumed == []
+    assert sorted(path.name for path in again.root.iterdir()) == before
+
+
+def _restore(store: LocalRunStore, manifest: RunManifest, **changes: Any) -> None:
+    """Store ``manifest`` again, with ``changes``."""
+    store.put_manifest(manifest.model_copy(update=changes))
+
+
+@pytest.mark.phase(4)
 def test_sft_run_keeps_its_checkpoint_half_way(spider_mini: Path, tmp_path: Path) -> None:
     # FG-404's main run: the checkpoint at 50% and the final adapter, both for val to score.
     config = _config(
@@ -453,6 +595,7 @@ def test_sft_run_keeps_its_checkpoint_half_way(spider_mini: Path, tmp_path: Path
     kept = ["final", "step-000003", "step-000004", "step-000006"]
     assert run.manifest.outputs == {
         "config": "config.yaml",
+        "sessions": "sessions.json",
         "metrics": "metrics.jsonl",
         "adapter": "checkpoints/final",
         "kept_at_0.5": "checkpoints/step-000003",
@@ -528,6 +671,43 @@ def test_train_sft_command(
     assert misspelt.exit_code == 1
     assert "sft.max_step: Extra inputs are not permitted" in misspelt.stderr
     assert chosen == [("trl", "cpu")]
+
+
+@pytest.mark.phase(4)
+def test_train_sft_command_resumes_a_stopped_run(
+    spider_mini: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(sft, "select_backend", lambda *args, **kwargs: FakeBackend(steps=4))
+    config = tmp_path / "sft.yaml"
+    config.write_text(
+        f"run: {{kind: sft, model_ref: '{MODEL}', backend: trl, device: cpu}}\n"
+        "sft: {max_steps: 4}\nops: {checkpoint_every: 2, stop_after_step: 2}\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    args = ["train", "sft", "--config", str(config), "--sft-dir", str(tmp_path / "sft")]
+    root = tmp_path / "runs" / RUN
+
+    stopped = runner.invoke(cli.app, [*args, "--run-id", RUN, "--allow-dirty"])
+    assert stopped.exit_code == 0, stopped.output
+    assert stopped.stdout.splitlines()[-1] == (
+        "stopped by the time guard after step 2, so there is no final adapter; its "
+        f"checkpoint is {root / 'checkpoints' / 'step-000002'}"
+    )
+    unnamed = runner.invoke(cli.app, [*args, "--resume", "--allow-dirty"])
+    assert unnamed.exit_code == 1
+    assert unnamed.stderr == "error: name the run to resume: its run id\n"
+
+    resumed = runner.invoke(cli.app, [*args, "--run-id", RUN, "--resume", "--allow-dirty"])
+
+    assert resumed.exit_code == 0, resumed.output
+    lines = resumed.stdout.splitlines()
+    assert lines[:2] == [f"run {RUN}: {root}", f"resumed from {root / 'checkpoints/step-000002'}"]
+    assert lines[-1] == f"adapter {root / 'checkpoints' / 'final'}"
+    done = runner.invoke(cli.app, [*args, "--run-id", RUN, "--resume", "--allow-dirty"])
+    assert done.exit_code == 1
+    assert f"error: run {RUN} has finished; pass a new --run-id" in done.stderr
 
 
 @pytest.mark.phase(4)

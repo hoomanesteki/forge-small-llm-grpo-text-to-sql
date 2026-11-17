@@ -1587,15 +1587,25 @@ def train_sft(
             "--allow-dirty", help="Run on uncommitted changes; the manifest's SHA says -dirty."
         ),
     ] = False,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume",
+            help="Carry on the run --run-id names from its latest checkpoint, with the same "
+            "config at the same commit.",
+        ),
+    ] = False,
 ) -> None:
     """Fine-tune a LoRA adapter on the train split's gold queries, as the config says.
 
     It trains on the rows forge data build-sft builds for the config's model and prompt
     version, kept in <sft-dir>/<hash>/. Files go to runs/<run_id>/ (FORGE_RUNS_DIR):
-    manifest.json, config.yaml, metrics.jsonl, checkpoints/step-NNNNNN/ every
-    ops.checkpoint_every steps, and the adapter in checkpoints/final/, which forge eval run
-    --adapter loads. Exits 1 if the run can't start.
+    manifest.json, config.yaml, sessions.json, metrics.jsonl, checkpoints/step-NNNNNN/
+    every ops.checkpoint_every steps, and the adapter in checkpoints/final/, which forge
+    eval run --adapter loads. A run the time guard stopped goes on with --resume. Exits 1
+    if the run can't start.
     """
+    from forge.eval.run_files import RunConflict
     from forge.ops.hub import checkpoint_dir
     from forge.ops.manifest import DirtyTreeError, GitError
     from forge.ops.paths import RepoRootNotFound
@@ -1607,10 +1617,13 @@ def train_sft(
         from forge.train.sft import run_sft
 
         config = load_train_config(config_file)
-        run = run_sft(config, run_id=run_id, allow_dirty=allow_dirty, sft_root=sft_dir)
-    # OSError covers missing data, a model that can't be found and a run id already used;
-    # ValueError a config no SFT run takes, a device with no platform, and SplitLeak;
-    # ImportError the cpu extra not installed.
+        run = run_sft(
+            config, run_id=run_id, resume=resume, allow_dirty=allow_dirty, sft_root=sft_dir
+        )
+    # OSError covers missing data, a model that can't be found, a run id already used and
+    # a resume of no run; ValueError a config no SFT run takes, a device with no platform,
+    # and SplitLeak; RunConflict a run this one can't resume; ImportError the cpu extra
+    # not installed.
     except (
         BackendUnavailable,
         DirtyTreeError,
@@ -1618,6 +1631,7 @@ def train_sft(
         ImportError,
         OSError,
         RepoRootNotFound,
+        RunConflict,
         ValueError,
     ) as exc:
         typer.echo(_error_line(exc), err=True)
@@ -1626,6 +1640,8 @@ def train_sft(
     trainer = manifest.config["trainer"]
     sft_data = manifest.config["sft_data"]
     typer.echo(f"run {manifest.run_id}: {run.root}")
+    if run.resumed_from is not None:
+        typer.echo(f"resumed from {run.root / run.resumed_from}")
     typer.echo(f"sft data {run.sft_data}: {sft_data['rows']} rows, hash {sft_data['hash']}")
     typer.echo(
         f"trained on {sft_data['trained']} rows; {sft_data['over_max_length']} were over "

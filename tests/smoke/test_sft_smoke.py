@@ -26,7 +26,7 @@ from forge.eval.run_files import ADAPTER_DIGEST
 from forge.ops.adapters import adapter_sha256, digest_output
 from forge.ops.manifest import config_hash
 from forge.train.config import LORA_TARGETS, OpsConfig, load_train_config
-from forge.train.sft import run_sft
+from forge.train.sft import SftRun, run_sft
 from forge.train.sft_data import META_FILE, read_meta
 from tests.report_trace import read_stored
 
@@ -145,3 +145,56 @@ def test_sft_keeps_the_checkpoint_half_way(
     )
     assert (kept / "adapter_config.json").is_file() and half.keys() == final.keys()
     assert any(not torch.equal(half[name], final[name]) for name in half)
+
+
+@pytest.mark.phase(4)
+def test_sft_resumed_in_a_second_session_ends_as_one_session_does(
+    spider_mini: Path, tiny_model_ref: str, tmp_path: Path
+) -> None:
+    # The Kaggle pilot's rehearsal (FG-496): its first session stops after a set step, as
+    # the time guard does, and a second session resumes from that checkpoint. The trainer
+    # takes the optimizer, scheduler, RNG state and step count back from it and skips the
+    # batches it trained, so the two sessions end with the adapter one session trains.
+    loaded = load_train_config(SMOKE_CONFIG)
+    assert loaded.sft is not None
+    steps = loaded.sft.model_copy(update={"max_steps": 4})
+
+    def train(run_id: str, *, resume: bool = False, **ops: int) -> SftRun:
+        config = loaded.model_copy(
+            update={"sft": steps, "ops": OpsConfig(checkpoint_every=100, **ops)}
+        )
+        return run_sft(
+            config,
+            run_id=run_id,
+            resume=resume,
+            allow_dirty=True,
+            runs_root=tmp_path / "runs",
+            sft_root=tmp_path / "sft",
+            env={},
+        )
+
+    whole = train("sft-whole")
+    stopped = train("sft-split", stop_after_step=2)
+    assert (stopped.manifest.status, stopped.stopped_at) == ("stopped_time_guard", 2)
+    assert sorted(p.name for p in (stopped.root / "checkpoints").iterdir()) == ["step-000002"]
+    resumed = train("sft-split", resume=True, stop_after_step=2)
+
+    assert resumed.resumed_from == "checkpoints/step-000002"
+    assert (resumed.manifest.status, resumed.stopped_at) == ("finished", None)
+    assert resumed.manifest.config_hash == whole.manifest.config_hash
+    assert resumed.adapter is not None and whole.adapter is not None
+    split, one = (
+        load_file(adapter / "adapter_model.safetensors")
+        for adapter in (resumed.adapter, whole.adapter)
+    )
+    assert split.keys() == one.keys()
+    assert all(torch.equal(split[name], one[name]) for name in one)
+    # Each step's loss once, the same as in one session.
+    losses = []
+    for run in (resumed, whole):
+        lines = (run.root / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        losses.append(
+            [(line["step"], line["loss"]) for line in map(json.loads, lines) if "loss" in line]
+        )
+    assert [step for step, _ in losses[0]] == [1, 2, 3, 4]
+    assert losses[0] == losses[1]

@@ -90,3 +90,9 @@ have no place for.
   stage in `docs/spikes/kaggle-gpu/spike-report.json`), and the kernel installs
   `kaggle/requirements-train-gpu.txt` (FG-398), which adds none. So `auto` picks
   `TrlBackend` on the T4.
+- 2026-11-17, resuming an SFT run (FG-496). `sft` takes one more keyword, `resume_from`,
+  optional: a checkpoint folder the trainer resumes from, its optimizer, scheduler, RNG
+  state and step count beside the adapter, so an SFT run carries on in a later session
+  (`forge train sft --resume`, `forge kaggle run --resume`), as FG-404's Kaggle pilot
+  rehearses. A caller that leaves it out gets what it got before, and `forge.train.sft`
+  passes the run's latest checkpoint. Plan section 3.5 still shows `sft` without it.

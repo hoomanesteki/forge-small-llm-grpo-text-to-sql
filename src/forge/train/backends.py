@@ -5,7 +5,10 @@
 the model with LoRA on the config's target modules, the rest of it frozen, and its
 tokenizer; ``sft`` and ``grpo`` train it and return the folder they saved the adapter in.
 Where the trainer writes and the run's seed are keywords, and ``load`` takes the seed too:
-LoRA draws its first weights there, before any trainer seeds.
+LoRA draws its first weights there, before any trainer seeds. ``sft`` takes a checkpoint to
+resume from, a trainer's saved folder with its optimizer, scheduler, RNG state and step
+count beside the adapter, so a run carries on across sessions (ADR-0017's note of
+2026-11-17).
 
 - ``TrlBackend``: transformers, PEFT LoRA and TRL's trainers, generating with
   transformers rather than vLLM, at the precision ``precision_for`` picks for its
@@ -90,6 +93,7 @@ class TrainBackend(Protocol):
         *,
         output_dir: str | Path,
         seed: int,
+        resume_from: str | Path | None = None,
     ) -> str: ...  # the adapter's folder
 
     def grpo(
@@ -312,11 +316,12 @@ class _TrlTrainers:
         *,
         output_dir: str | Path,
         seed: int,
+        resume_from: str | Path | None = None,
     ) -> str:
         trainer = self.sft_trainer(
             model, tok, dataset, cfg, callbacks, output_dir=output_dir, seed=seed
         )
-        return _train_and_save(trainer, output_dir)
+        return _train_and_save(trainer, output_dir, resume_from)
 
     def grpo(
         self,
@@ -351,8 +356,12 @@ class _TrlTrainers:
         """What a backend changes on a trainer once it is built."""
 
 
-def _train_and_save(trainer: Any, output_dir: str | Path) -> str:
-    trainer.train()
+def _train_and_save(
+    trainer: Any, output_dir: str | Path, resume_from: str | Path | None = None
+) -> str:
+    # The trainer reads the adapter, optimizer, scheduler, scaler, RNG and step count back
+    # from the folder, and skips the batches those steps took.
+    trainer.train(resume_from_checkpoint=None if resume_from is None else str(resume_from))
     adapter = Path(output_dir) / ADAPTER_DIR
     # A PEFT model saves its adapter alone, and the trainer the tokenizer beside it.
     trainer.save_model(str(adapter))
