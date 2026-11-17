@@ -44,8 +44,8 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | ID | Title | Pts | Status | PR | Run ids | Notes |
 |---|---|---|---|---|---|---|
 | FG-301 | Spike: Kaggle, Unsloth and vLLM on a T4 | 3 | done (2026-11-16) |  | 2026-11-16-throughput-spike-c8f4b41 | Built on CPU: the kernel metadata template and `check_kernel_metadata`, the self-contained spike `kaggle/spike/throughput.py` (env, secrets, downloads, installs, vLLM fp16 and GRPO benches, session-limit probe) and its bundler, the pins in `kaggle/requirements-gpu.txt`, ADR-0005. Ran on Kaggle on 2026-11-16: the GPU spike from c8f4b41 (kernel `forge-throughput-spike` version 2, 0.59 GPU h in the ledger), the session-limit probe (a CPU kernel pushed with `-t 900`) and a secret probe (`kaggle/spike/secret_probe.py`, a CPU version 3 of the spike's kernel); their reports are in `docs/spikes/kaggle-gpu/`, and every question of `docs/spikes/kaggle-gpu.md` is answered from them, field by field: a T4 x2 session on Python 3.13.16 and torch 2.11.0+cu130, vLLM 0.33.0 generating in fp16 but with no bitsandbytes, GRPO in 4-bit on the lock's TRL with the 4B at 4.94 GB peak, Unsloth faster but on trl 0.22.2, no Kaggle Secret in a pushed run, and a session killed at its timeout keeping its output. ADR-0006 accepted (TRL with transformers generation), ADR-0005 and ADR-0012 note what they waited on, and section 3.8's budget is worked out from the numbers (`test_budget_rows_follow_the_measurements`) |
-| FG-302 | Code and data packaging as Kaggle datasets | 3 | done (2026-11-16) |  |  | Built and tested with the CLI mocked: `KaggleClient` runs kaggle as argument lists, `forge kaggle publish-code` (wheel at a clean HEAD, pinned `requirements-gpu.txt`, `GIT_SHA`; `version -m <sha> -r zip`, or `create` the first time) and `publish-data` (the 170 verified Spider files and `spider.sha256` as `<owner>/forge-spider`, CC BY-SA 4.0 attribution and citation, uploaded once). Both private, never `-u`. Published for real on 2026-11-16: `forge kaggle publish-data` created the private `hoomanesteki/forge-spider` from the 170 Spider files as five uploads (the databases as `database.zip`) plus `spider.sha256`, in 2 min 53 s, and the private `hoomanesteki/forge-code` version 1 holds c8f4b41's wheel, `requirements-gpu.txt` and `GIT_SHA` (`kaggle datasets files`); both outputs are in the PR, and the 50-question eval job mounted both. No `publish-wheels`: FG-301 measured the install (pip 392 s in a kernel, uv 96 s) and left a wheel dataset undecided |
-| FG-303 | Kaggle job runner CLI | 5 | done (2026-11-16) |  | 2026-11-16-smoke-kaggle-50-val-c8f4b41 | Built and tested with the kaggle CLI mocked: `forge kaggle run` (smoke marker and clean tree, config checked as the kernel will, code dataset pinned by version with HEAD's `GIT_SHA` or published, ledger and `kaggle quota` budget with `--allow-over-budget` in the eval run's config, confirm, T4 push with a timeout of the estimate and half again, `runs/<run_id>/kernels.json`, `--resume`, `--job spike`, `--emit-notebook`), `status`, `logs`, `wait` and `output`; `kaggle/entry.py` (env, code, install, data, secrets, preflight, job, upload; `status.json` always); `ops` section in eval configs; `code_sha` from `FORGE_CODE_SHA` outside a checkout; Python 3.13 in CI. The real job ran on 2026-11-16 from c8f4b41: the 50-question eval (`configs/eval/smoke-kaggle-50-val.yaml`), pushed with `--run-id` since the default id's 57-character kernel title is over Kaggle's 50 (FG-398 fixes that), finished in a 0.18 h session, came back with `forge runs pull --store kaggle` and is in `docs/runs/` with its ledger row; its kernel-written report matches its rebuild on the laptop with the full data (`test_phase3_kaggle_eval_job_present`, `test_phase3_kaggle_eval_job_rebuilds`). Push, wait and output are in the PR |
+| FG-302 | Code and data packaging as Kaggle datasets | 3 | done (2026-11-16) |  |  | Built and tested with the CLI mocked: `KaggleClient` runs kaggle as argument lists, `forge kaggle publish-code` (wheel at a clean HEAD, pinned `requirements-gpu.txt`, `GIT_SHA`; `version -m <sha> -r zip`, or `create` the first time) and `publish-data` (the 170 verified Spider files and `spider.sha256` as `<owner>/forge-spider`, CC BY-SA 4.0 attribution and citation, uploaded once). Both private, never `-u`. Published for real on 2026-11-16: `forge kaggle publish-data` created the private `hoomanesteki/forge-spider` from the 170 Spider files as five uploads (the databases as `database.zip`) plus `spider.sha256`, in 2 min 53 s, and the private `hoomanesteki/forge-code` version 1 holds c8f4b41's wheel, `requirements-gpu.txt` and `GIT_SHA` (`kaggle datasets files`); both outputs go in the description of the PR that lands FG-301's completion, not yet opened, and the 50-question eval job mounted both. No `publish-wheels`: FG-301 measured the install (pip 392 s in a kernel, uv 96 s) and left a wheel dataset undecided |
+| FG-303 | Kaggle job runner CLI | 5 | done (2026-11-16) |  | 2026-11-16-smoke-kaggle-50-val-c8f4b41 | Built and tested with the kaggle CLI mocked: `forge kaggle run` (smoke marker and clean tree, config checked as the kernel will, code dataset pinned by version with HEAD's `GIT_SHA` or published, ledger and `kaggle quota` budget with `--allow-over-budget` in the eval run's config, confirm, T4 push with a timeout of the estimate and half again, `runs/<run_id>/kernels.json`, `--resume`, `--job spike`, `--emit-notebook`), `status`, `logs`, `wait` and `output`; `kaggle/entry.py` (env, code, install, data, secrets, preflight, job, upload; `status.json` always); `ops` section in eval configs; `code_sha` from `FORGE_CODE_SHA` outside a checkout; Python 3.13 in CI. The real job ran on 2026-11-16 from c8f4b41: the 50-question eval (`configs/eval/smoke-kaggle-50-val.yaml`), pushed with `--run-id` since the default id's 57-character kernel title is over Kaggle's 50 (FG-398 fixes that), finished in a 0.18 h session, came back with `forge runs pull --store kaggle` and is in `docs/runs/` with its ledger row; its kernel-written report matches its rebuild on the laptop with the full data (`test_phase3_kaggle_eval_job_present`, `test_phase3_kaggle_eval_job_rebuilds`). Push, wait and output go in that PR too |
 | FG-304 | Hub run store and resume | 5 | done |  |  | `forge.ops.hub`: `RunStore` (plan 3.5's methods plus `put_folder`, `runs` and `prune_checkpoints`), `LocalRunStore` and `HubRunStore` on the private model repo through huggingface_hub 2.4 (`upload_file`, `upload_folder`, `list_repo_files`, `hf_hub_download`, `snapshot_download`, `delete_files`), each call tried 3 more times, 2, 4 and 8 s apart, on network errors; `latest_checkpoint` by step number; retention keeps the latest 2 `step-NNNNNN` and `best/`; `forge runs list|show|pull|push`, `pull --store kaggle` being `forge kaggle output`; `forge eval run --store hub` fetches an earlier attempt to resume and stores the run when it ends; the kernel's upload stage goes through the store. Tested with the Hub client faked. First real use on 2026-11-16, from the laptop, since a kernel gets no `HF_TOKEN` (FG-301): `forge runs push 2026-11-16-smoke-kaggle-50-val-c8f4b41` uploaded FG-303's pulled kernel run to `hoomanesteki/forge-runs` (`docs/runbook.md`, Run store) |
 | FG-305 | Time guard and automatic ledger rows | 3 | done |  |  | `forge.ops.timeguard.Deadline` times steps on a monotonic clock and stops before one that might pass the deadline; `TimeGuardCallback` saves, stops, pushes `checkpoints/step-NNNNNN`, marks the stored manifest `stopped_time_guard` and prunes (tiny model on CPU, fake clock); `run_eval(deadline=)` stops between batches and resumes; manifests name their GPU (CUDA name, Apple chip) and count wall-clock GPU hours; `forge runs pull` adds one ledger row a run id under the append's lock; I7 on `docs/runs`, `runs/` and the ledger |
 | FG-306 | vLLM inference backend | 3 | done |  |  | `forge.infer.vllm_backend.VllmBackend`: fp16 (`dtype="half"`), `max_model_len` 2048, 85% of GPU memory, LoRA (rank up to 64) only with an adapter, by one `LoRARequest` (a folder, or a Hub snapshot at its revision), 4-bit bitsandbytes allowed and nothing else; Qwen3 templates through `LLM.chat` with thinking off, others through `render_chat` as token ids; `sampling_kwargs` maps `GenParams` with a seed per example id; vLLM imported only when a backend is made. `forge eval run --backend vllm` in kernel jobs only; the runner's `model_backend` builds hf and vllm, and the kernel loads one model for its preflight and job. `kaggle/requirements-gpu.txt` is now vllm 0.33.0, torch 2.14.0, transformers 5.20.2 and the lock's trl, peft and the rest (the spike's `trl-vllm` stack). Tested with vLLM faked; FG-307 proves it on a T4 |
@@ -839,7 +839,9 @@ Work discovered along the way that is not a plan story.
   the last one, so `eval_deadline` keeps a tenth of the time back for them: official EX
   grows with the run, as the estimate and so the timeout do. Kaggle's timeout may count
   from before the script starts, which the tenth covers too. FG-301's measurements show
-  whether a tenth is enough (FG-392).
+  whether a tenth is enough (FG-392). They don't: each of the nine kernel eval jobs
+  committed finished without reaching its guard, as its manifest says, so a tenth is still
+  untested on Kaggle (FG-307).
 - `status.json` and `sessions.json` keep whole seconds, so two attempts started within one
   second (only in tests) looked like one; the entry script now tells the session its job
   began from those the restore brought back by counting them (FG-392).
@@ -902,10 +904,10 @@ Work discovered along the way that is not a plan story.
   vLLM 0.33.0 has no bitsandbytes, so no second push was made (FG-301).
 - `check_config` still takes `quantization` for any vllm model, though FG-306's block keeps
   4-bit loading for reference models above 4B; the manifest records it, so such a run is
-  visible (G3-03, left as it was by FG-396).
+  visible (left as it was by FG-396).
 - A run pulled from the Hub before `forge kaggle wait` or `output` logs its last session
   up to the upload only, and `append_once` then keeps that shorter row; the runbook says
-  to wait first (G3-10, left as it was by FG-396).
+  to wait first (left as it was by FG-396).
 - Kaggle refuses a kernel title over 50 characters with a bare `400 Client Error: Bad
   Request` from `SaveKernel`, and a kernel's title is `Forge <run_id>`, so a run id over 44
   characters can't be pushed: the default id of `Qwen/Qwen2.5-Coder-1.5B-Instruct`, and the
@@ -930,7 +932,8 @@ Work discovered along the way that is not a plan story.
 - `test_phase3_baseline_reports_rebuild` expects one check from each run's rebuild
   (`[()]`), but `rebuild` returns the report's and the chart's, so it fails once FG-307's
   runs land; it should check the report's diff and accept a chart that is compared equal or
-  skipped, as `test_phase3_kaggle_eval_job_rebuilds` does (FG-303).
+  skipped, as `test_phase3_kaggle_eval_job_rebuilds` does (FG-303). Fixed in `4029ca5`: it
+  checks each run with `assert_rebuilds`, and it passes with FG-307's runs (FG-307).
 - Plan sections 3.12 and 3.13 still give Python 3.11 or 3.12 and Unsloth for GPU training,
   against the measured Python 3.13.16 image and ADR-0006's TRL stack; they change at Gate 3
   (FG-301). Gate 3 changed them on 2026-11-17 (`docs/gates/phase-3.md`).
@@ -942,7 +945,10 @@ Work discovered along the way that is not a plan story.
   section 3.8's formula gives the 4B candidate, and nothing measured backs them: no run has
   downloaded, loaded or timed the AWQ checkpoint on a T4. Its kernel's timeout is 1.5 times
   the estimate, so a slow load or slow AWQ kernels would stop its job at the time guard, to
-  be resumed. Its own run should redo both estimates (FG-398).
+  be resumed. Its own run should redo both estimates (FG-398). Both of its runs loaded the
+  checkpoint on a T4 on 2026-11-17 and took 0.21 h on val and 0.25 h on dev by their ledger
+  rows. The estimates were kept on purpose: section 3.8's eval formula has no rates for an
+  8B model, so both reference configs keep the estimates set before the runs (FG-307).
 - `kaggle kernels status` for a kernel Kaggle doesn't have is a 404 or, as kaggle 2.2.5
   turns a 403 into it, "Cannot access kernel ... (Permission 'kernels.get' was denied)";
   which of them the live API answers for a private slug that holds nothing is not measured,
@@ -953,6 +959,14 @@ Work discovered along the way that is not a plan story.
   `docs/dev-usage.md`, and Forge has no command to log a look by hand (FG-398).
 - A failed push of the spike is not checked against Kaggle: its one kernel gets a new
   version each push, and `kaggle kernels status` names no version (FG-398).
+- The check after a failed push trusts that the attempt's kernel is new
+  (`JobPlan.new_kernel`). If its slug already exists on Kaggle, from the same run id pushed
+  in another checkout or from two run ids that make one slug, a failed push is recorded as
+  made, and a dev job's look is logged. Its review left this open at Gate 3 (FG-398).
+- `find_kernel` reads kaggle 2.2.5's "Permission 'kernels.get' was denied", which the CLI
+  prints for a 401 as well as a 403, as "no such kernel", so an authentication failure on
+  that call reads as a push that never started. Its review left this open at Gate 3
+  (FG-398).
 - Phase 4: the training configs (from FG-402 on, plan section 3.10's `model_ref` and
   `prompt_version`) must name `Qwen/Qwen2.5-Coder-1.5B-Instruct` at the commit
   `configs/models.yaml` pins, with prompt `p2` (ADR-0012, ADR-0007). That is Phase 4's own
