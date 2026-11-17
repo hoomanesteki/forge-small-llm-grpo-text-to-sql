@@ -37,6 +37,8 @@ accounts the GPU plan needs were pending. Its report names the platform in its h
 | [2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8](2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/) | The same model, LoRA-trained on train rows (FG-491) | `configs/sft/pilot-qwen25coder05b-mps.yaml`: the subset its `subset_rows` sets of the train rows that fit in 1,536 tokens, bf16 on MPS | [metrics.jsonl](2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/metrics.jsonl) |
 | [2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/) | The same model with that run's adapter | `configs/eval/pilot-qwen25coder05b-val.yaml` with `--adapter runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final`, the first pilot's settings | [val-report.md](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/val-report.md), and against the first pilot [compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md](2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8/eval/compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md) |
 | [2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde](2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde/) | The same model with the SFT pilot's adapter, on train questions (FG-591) | `configs/eval/pilot-qwen25coder05b-val.yaml` with `--split train --limit 3000 --adapter runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final`: GRPO's filter eval | [train-report.md](2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde/eval/train-report.md), and the rows it picked for GRPO, [grpo/2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde/](grpo/2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde/) |
+| [2026-11-17-qwen2-5-coder-0-5b-instruct-grpo-e924b73](2026-11-17-qwen2-5-coder-0-5b-instruct-grpo-e924b73/) | The same model, GRPO-trained from the SFT pilot's adapter on the filter's rows (FG-591) | `configs/grpo/pilot-qwen25coder05b-mps.yaml` with `--grpo-dir docs/runs/grpo`: 2 prompts a step with 4 replies each, bf16 on MPS | [metrics.jsonl](2026-11-17-qwen2-5-coder-0-5b-instruct-grpo-e924b73/metrics.jsonl) and [plots/](2026-11-17-qwen2-5-coder-0-5b-instruct-grpo-e924b73/plots/) |
+| [2026-11-17-qwen2-5-coder-0-5b-instruct-eval-e924b73](2026-11-17-qwen2-5-coder-0-5b-instruct-eval-e924b73/) | The same model with that run's checkpoint with the best in-training val EX | `configs/eval/pilot-qwen25coder05b-val.yaml` with `--adapter runs/2026-11-17-qwen2-5-coder-0-5b-instruct-grpo-e924b73/checkpoints/step-000250`, the first pilot's settings | [val-report.md](2026-11-17-qwen2-5-coder-0-5b-instruct-eval-e924b73/eval/val-report.md), against the SFT pilot [compare-2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8.md](2026-11-17-qwen2-5-coder-0-5b-instruct-eval-e924b73/eval/compare-2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8.md) and against the first pilot [compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md](2026-11-17-qwen2-5-coder-0-5b-instruct-eval-e924b73/eval/compare-2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7.md) |
 
 [docs/notes/sft.md](../notes/sft.md) reads that comparison, by hardness and by error class,
 citing no number it doesn't hold (FG-405).
@@ -57,6 +59,16 @@ ones GRPO may train on, so it measures no held-out skill; it is there to pick ro
 `summary.json`, what was kept and left out by hardness, with the hash of both, which the
 GRPO run's manifest records under `grpo_data`. `forge train grpo --grpo-dir docs/runs/grpo`
 reads them from there, so the rows a run trained on are in the commit it was made from.
+
+The GRPO run is committed without its weights as the SFT run is, with what GRPO adds:
+`sessions.json`; `metrics.jsonl`, a line a step, with fast EX on the same 200 val questions
+at each checkpoint (`val/ex_fast`); `alerts.jsonl`; `samples/`, the latest 12 prompts with
+all their replies and rewards every 50 steps; and the PNGs `forge runs plot` drew in
+`plots/`. Its checkpoints, one every 50 steps, stay in `runs/<run_id>/checkpoints/`, each
+named in the manifest's outputs by the digest of its files, which the val run of the one
+with the best in-training val EX records too (`adapter_sha256`).
+[docs/notes/grpo-run-log.md](../notes/grpo-run-log.md) reads the run and that val run's
+comparisons.
 
 Both FG-491 runs were made at db0d8d8, where `make smoke` fails: one assertion in
 `tests/smoke/test_sft_smoke.py` still expected the manifest's `sft_data` as it was before
@@ -104,6 +116,29 @@ FORGE_DATA_DIR=data/spider uv run forge report compare 2026-11-15-qwen2-5-coder-
 uv run forge ledger record <sft_run_id> && uv run forge ledger record <eval_run_id>
 ```
 
+Then the GRPO pilot, with the same watermarks: the filter eval and its rows, from the commit
+before the GRPO config named them (a27afde), then the run, its plots, the val run of its
+checkpoint with the best `val/ex_fast` and that run's report and comparisons, from the
+config's commit (e924b73):
+
+```bash
+export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.45 PYTORCH_MPS_LOW_WATERMARK_RATIO=0.35
+FORGE_DATA_DIR=data/spider uv run forge eval run --config configs/eval/pilot-qwen25coder05b-val.yaml \
+  --split train --limit 3000 --adapter runs/<sft_run_id>/checkpoints/final
+FORGE_DATA_DIR=data/spider uv run forge report run <filter_run_id>
+FORGE_DATA_DIR=data/spider uv run forge data build-grpo --filter-from <filter_run_id> --out docs/runs/grpo
+FORGE_DATA_DIR=data/spider uv run forge train grpo --config configs/grpo/pilot-qwen25coder05b-mps.yaml \
+  --grpo-dir docs/runs/grpo
+uv run forge runs plot <grpo_run_id> --store local
+FORGE_DATA_DIR=data/spider uv run forge eval run --config configs/eval/pilot-qwen25coder05b-val.yaml \
+  --adapter runs/<grpo_run_id>/<checkpoint>
+FORGE_DATA_DIR=data/spider uv run forge report run <eval_run_id>
+FORGE_DATA_DIR=data/spider uv run forge report compare 2026-11-16-qwen2-5-coder-0-5b-instruct-eval-db0d8d8 <eval_run_id>
+FORGE_DATA_DIR=data/spider uv run forge report compare 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7 <eval_run_id>
+uv run forge ledger record <filter_run_id>
+uv run forge ledger record <grpo_run_id> && uv run forge ledger record <eval_run_id>
+```
+
 Training again on MPS need not give the same weights bit for bit, so a second adapter's
 scores can differ a little from these.
 
@@ -112,7 +147,8 @@ scores can differ a little from these.
 [pending.yaml](pending.yaml) lists the runs a story needs that can't happen yet, what blocks
 each one, since when, and what it will fill in. FG-301's Kaggle spike, FG-307's baselines and
 FG-404's SFT runs are there until the Kaggle account exists, and FG-491's push of the SFT
-pilot, adapter and all, until the Hugging Face run store does. FG-405's comparison of the
+pilot, adapter and all, until the Hugging Face run store does, with FG-591's push of the GRPO
+pilot and its checkpoints. FG-405's comparison of the
 main model with and without SFT waits there on FG-307's and FG-404's runs. `tests/integration/test_artifacts.py`
 finds a GPU story's runs here by the configs they were made from, and skips its checks on
 them only while the story has an entry in pending.yaml; once it has none, a missing run fails.

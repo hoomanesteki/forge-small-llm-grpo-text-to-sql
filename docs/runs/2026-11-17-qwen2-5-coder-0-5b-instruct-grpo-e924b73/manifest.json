@@ -1,0 +1,134 @@
+{
+  "run_id": "2026-11-17-qwen2-5-coder-0-5b-instruct-grpo-e924b73",
+  "kind": "grpo",
+  "git_sha": "e924b73e2f96908016b56db6134ed7fef4b87cb9",
+  "config": {
+    "data": {
+      "prompt_version": "p1",
+      "split": "train"
+    },
+    "grpo": {
+      "beta": "library_default",
+      "curriculum": {
+        "hardness": [
+          "easy",
+          "medium"
+        ],
+        "share": 0.4
+      },
+      "eval_every": 50,
+      "eval_examples": 200,
+      "filter_from": "2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde",
+      "gpu_memory_utilization": 0.5,
+      "gradient_accumulation_steps": 8,
+      "init_adapter": "runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final",
+      "learning_rate": 5e-6,
+      "logging_steps": 1,
+      "max_completion_length": 128,
+      "max_prompt_length": 1536,
+      "max_steps": 350,
+      "num_generations": 4,
+      "per_device_train_batch_size": 1,
+      "temperature": 1.0
+    },
+    "grpo_data": {
+      "duplicates": 25,
+      "failing_gold": 3,
+      "filter": {
+        "eval_run": "2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde",
+        "hash": "6d7a36a64c2c21bbdf243e9d6b44e181dd6c4aa35211f3ba30c7ba6c38a4e640",
+        "kept": 1698,
+        "left_out": 4297
+      },
+      "hash": "5f73496b625a9d83811bc0635e7a57a199f93ee277b433a9f68cd3dafdeccb6d",
+      "hidden_gold_tables": 23,
+      "over_limit": 0,
+      "rowless": 1744,
+      "rows": 1695,
+      "train": 7787
+    },
+    "init_adapter_sha256": "e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562",
+    "lora": {
+      "alpha": 32,
+      "dropout": 0.0,
+      "r": 16,
+      "target": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj"
+      ]
+    },
+    "rewards": {
+      "execution": 1.0,
+      "format": 0.05,
+      "guards": {
+        "comment_payload": -0.2,
+        "constant_query": -0.5,
+        "multiple_statements": -0.5,
+        "non_select": -1.0
+      },
+      "validity": 0.1
+    },
+    "run": {
+      "backend": "trl",
+      "device": "mps",
+      "kind": "grpo",
+      "load_in_4bit": false,
+      "model_ref": "Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25",
+      "seed": 42
+    },
+    "trainer": {
+      "backend": "trl",
+      "device": "mps",
+      "dtype": "bfloat16"
+    },
+    "trl": {
+      "beta": 0.0,
+      "epsilon": 0.2,
+      "loss_type": "dapo",
+      "scale_rewards": "group",
+      "top_k": 0,
+      "top_p": 1.0,
+      "version": "1.18.0"
+    }
+  },
+  "config_hash": "04e3df959dba2b925b852ae41301c2311ed1ff10d7b2ccbdcd9e29e753a50814",
+  "data_manifest_hash": "e10958d3b7a9490c15623285275d2840fbce551c32432fc62c0ad440cb06651e",
+  "model_ref": "Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25",
+  "adapter_ref": "runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final",
+  "parent_run": "2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8",
+  "platform": "local-mps",
+  "gpu": "Apple M4",
+  "seed": 42,
+  "started_at": "2026-11-17T08:53:50.602675Z",
+  "ended_at": "2026-11-17T11:16:33.513208Z",
+  "gpu_hours": 2.3785862591666667,
+  "cost_usd": 0.0,
+  "outputs": {
+    "config": "config.yaml",
+    "metrics": "metrics.jsonl",
+    "adapter": "checkpoints/final",
+    "kept_at_0.143": "checkpoints/step-000050",
+    "kept_at_0.286": "checkpoints/step-000100",
+    "kept_at_0.429": "checkpoints/step-000150",
+    "kept_at_0.572": "checkpoints/step-000200",
+    "kept_at_0.715": "checkpoints/step-000250",
+    "kept_at_0.858": "checkpoints/step-000300",
+    "adapter_sha256:checkpoints/final": "5fd6b1198d2675c11159755a3b72912b434993372e1c67e26df0c8c26769d5e0",
+    "adapter_sha256:checkpoints/step-000050": "69911daa4cefd43988ccb5e72d7da1f4fa31a13efb9cc968878be8fa28ebc832",
+    "adapter_sha256:checkpoints/step-000100": "dd10c054ee04998fdae81da3203797fcc8ce40688dc2c980eb53543649760427",
+    "adapter_sha256:checkpoints/step-000150": "8bbe56c033a2ca5ce4722c9647cb56700e2a3ebadefa4c56fe2015fbe8141c2b",
+    "adapter_sha256:checkpoints/step-000200": "cc4b9dde5778f73c09926c014207c9412047c2c91ff97d1af82081f1015dfa9c",
+    "adapter_sha256:checkpoints/step-000250": "f34303b061dc9adeb1b7a1719a469cb65373021431200488fc64196a29f3e95c",
+    "adapter_sha256:checkpoints/step-000300": "11cb656e1cba7d6cbc01db4340c487a41fb907ff680fdd0625f08a9332b4cbb4",
+    "adapter_sha256:checkpoints/step-000350": "5fd6b1198d2675c11159755a3b72912b434993372e1c67e26df0c8c26769d5e0",
+    "sessions": "sessions.json",
+    "alerts": "alerts.jsonl",
+    "samples": "samples"
+  },
+  "status": "finished"
+}

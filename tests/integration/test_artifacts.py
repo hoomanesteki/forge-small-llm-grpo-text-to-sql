@@ -38,9 +38,19 @@ from forge.eval.runner import run_eval
 from forge.infer.base import FakeBackend
 from forge.ops.adapters import checkpoint_ref, digest_output
 from forge.ops.dev_usage import read_uses
-from forge.ops.hub import BEST, FINAL, LocalRunStore
+from forge.ops.hub import (
+    ALERTS_FILE,
+    BEST,
+    FINAL,
+    METRICS_FILE,
+    SAMPLES_DIR,
+    LocalRunStore,
+    checkpoint_dir,
+)
 from forge.ops.ledger import LedgerRow, append_once, read_rows, run_hours
 from forge.ops.manifest import config_hash
+from forge.ops.sessions import SESSIONS_FILE
+from forge.train.callbacks import SAMPLE_PROMPTS, kept_steps
 from forge.train.config import load_train_config
 from forge.train.curriculum import (
     KEEP_SOLVED,
@@ -52,10 +62,19 @@ from forge.train.curriculum import (
     GrpoFilter,
     filter_hash,
     lowest_hashes,
+    read_filter,
     round_share,
 )
-from forge.train.sft import PROMOTION_FILE, checkpoint_scores, fit_rows, promote_best
+from forge.train.grpo import grpo_rows
+from forge.train.sft import (
+    KEPT_OUTPUT,
+    PROMOTION_FILE,
+    checkpoint_scores,
+    fit_rows,
+    promote_best,
+)
 from forge.train.sft_data import build_sft_dataset
+from forge.train.telemetry import VAL_EX_KEY, plot_metrics
 from tests.fakes import sft_run_folder
 from tests.report_trace import GENERATED, NUMBER, untraced
 
@@ -1113,3 +1132,239 @@ def test_grpo_pilot_filter_eval_is_committed_whole() -> None:
     ]
     assert (summary.total.scored, summary.total.kept) == (len(stored.scores), len(kept))
     assert f"(grpo/{GRPO_FILTER_EVAL}/" in (RUNS / "README.md").read_text(encoding="utf-8")
+
+
+# The GRPO run from the SFT pilot's adapter on the filter's rows, committed without its
+# weights, and the val run of its checkpoint with the best in-training val EX, made with
+# FG-291's config.
+GRPO_PILOT_RUN = "2026-11-17-qwen2-5-coder-0-5b-instruct-grpo-e924b73"
+GRPO_PILOT_EVAL = "2026-11-17-qwen2-5-coder-0-5b-instruct-eval-e924b73"
+GRPO_NOTES = ROOT / "docs" / "notes" / "grpo-run-log.md"
+
+
+def _metrics_lines(run_dir: Path) -> list[dict[str, Any]]:
+    text = (run_dir / METRICS_FILE).read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines()]
+
+
+def best_checkpoint(lines: Sequence[Mapping[str, Any]], max_steps: int) -> str:
+    """The checkpoint whose in-training val EX is the highest, the latest of a tie, as a
+    path in its run: ``checkpoints/final`` for the run's last step."""
+    scores = [(line[VAL_EX_KEY], line["step"]) for line in lines if VAL_EX_KEY in line]
+    _, step = max(scores)
+    return FINAL if step == max_steps else checkpoint_dir(step)
+
+
+@pytest.mark.phase(5)
+def test_grpo_pilot_run_is_committed_without_weights(tmp_path: Path) -> None:
+    root = RUNS / GRPO_PILOT_RUN
+    manifest = LocalRunStore(RUNS).get_manifest(GRPO_PILOT_RUN)
+    assert (manifest.kind, manifest.status) == ("grpo", "finished")
+    _made_from_its_commit(manifest)
+
+    # The committed config, with the model pinned in configs/models.yaml, on the train split,
+    # and a config hash over everything the manifest records.
+    config = load_train_config(GRPO_PILOT_CONFIG)
+    grpo = config.grpo
+    assert grpo is not None
+    sections = {"run", "data", "lora", "grpo", "rewards"}
+    assert {name: manifest.config[name] for name in sections} == config.model_dump(
+        mode="json", include=sections
+    )
+    assert manifest.config["data"]["split"] == "train"
+    assert manifest.config["trainer"] == {"backend": "trl", "device": "mps", "dtype": "bfloat16"}
+    assert manifest.config_hash == config_hash(manifest.config)
+    assert yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")) == manifest.config
+    # From the SFT pilot's adapter, the files its filter eval scored, after that eval ended.
+    assert (manifest.adapter_ref, manifest.parent_run) == (SFT_PILOT_ADAPTER, SFT_PILOT_RUN)
+    scored = read_run(RUNS / GRPO_FILTER_EVAL).manifest
+    assert manifest.config["init_adapter_sha256"] == scored.outputs[ADAPTER_DIGEST]
+    assert scored.ended_at is not None and scored.ended_at <= manifest.started_at
+    # On the rows the filter picked, as committed, whose hash the manifest records.
+    picked = grpo_filter_rows()
+    data = manifest.config["grpo_data"]
+    assert {name: data["filter"][name] for name in ("eval_run", "hash", "kept")} == {
+        "eval_run": GRPO_FILTER_EVAL,
+        "hash": picked.summary.hash,
+        "kept": len(picked.rows),
+    }
+    assert 0 < data["rows"] <= len(picked.rows)
+    sessions = json.loads((root / SESSIONS_FILE).read_text(encoding="utf-8"))
+    assert [session["status"] for session in sessions] == ["finished"]
+
+    # Its files, and not its weights: each checkpoint, one every 50 steps, stays in runs/
+    # where it was trained, named in the outputs by its digest, and those before the last
+    # by the share of the run that kept them.
+    every = config.ops.checkpoint_every
+    steps = range(every, grpo.max_steps + 1, every)
+    kept = [checkpoint_dir(step) for step in steps]
+    shares = kept_steps(config.ops.keep_checkpoints_at, grpo.max_steps)
+    named = {KEPT_OUTPUT.format(share=share): checkpoint_dir(s) for share, s in shares.items()}
+    assert sorted(named.values()) == kept[:-1]
+    assert {name: manifest.outputs.get(name) for name in named} == named
+    digests = [digest_output(rel) for rel in [*kept, FINAL]]
+    telemetry = {"sessions": SESSIONS_FILE, "alerts": ALERTS_FILE, "samples": SAMPLES_DIR}
+    files = {"config": "config.yaml", "metrics": METRICS_FILE, **telemetry}
+    assert set(manifest.outputs) == {*files, "adapter", *named, *digests}
+    assert {name: manifest.outputs[name] for name in files} == files
+    assert manifest.outputs[digest_output(FINAL)] == manifest.outputs[digest_output(kept[-1])]
+    listed = ["manifest.json", "plots", *files.values()]
+    assert sorted(path.name for path in root.iterdir()) == sorted(listed)
+    assert not [path for path in root.rglob("*") if "checkpoint" in path.name]
+
+    # A line every step, each reward's mean a number; fast EX on the same val questions at
+    # every checkpoint; then the trainer's summary.
+    lines = _metrics_lines(root)
+    logged = [line for line in lines if "reward" in line]
+    assert [line["step"] for line in logged] == list(range(1, grpo.max_steps + 1))
+    names = ("execution_reward", "validity_reward", "format_reward", "guard_penalty")
+    assert all(math.isfinite(line[f"rewards/{name}/mean"]) for line in logged for name in names)
+    evals = [line for line in lines if VAL_EX_KEY in line]
+    assert [line["step"] for line in evals] == list(steps)
+    assert all(line["val/questions"] == grpo.eval_examples for line in evals)
+    assert lines[-1]["step"] == grpo.max_steps and "train_runtime" in lines[-1]
+
+    # A sample dump every 50 steps: the latest 12 prompts, each with its 4 completions and
+    # their rewards, all of them rows the filter kept.
+    dumps = sorted((root / SAMPLES_DIR).iterdir())
+    assert [path.name for path in dumps] == [f"step-{step:06d}.jsonl" for step in steps]
+    for path in dumps:
+        prompts = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        assert len(prompts) == SAMPLE_PROMPTS, path.name
+        assert all(len(line["completions"]) == grpo.num_generations for line in prompts)
+        assert {line["example_id"] for line in prompts} <= picked.ids, path.name
+
+    # The plots forge runs plot draws from these metrics, each of them.
+    drawn = plot_metrics(lines, tmp_path, title=GRPO_PILOT_RUN)
+    assert sorted(path.name for path in (root / "plots").iterdir()) == sorted(
+        path.name for path in drawn
+    )
+
+
+@pytest.mark.phase(5)
+@pytest.mark.requires_full_data
+def test_grpo_pilot_trained_on_the_rows_it_names() -> None:
+    manifest = LocalRunStore(RUNS).get_manifest(GRPO_PILOT_RUN)
+    config = load_train_config(GRPO_PILOT_CONFIG)
+    data = resolve_data_dir()
+    assert manifest.data_manifest_hash == data_manifest_hash(data)
+    # The committed rows, checked against their hash and this data's, are the filter's.
+    picked = read_filter(GRPO_FILTER_EVAL, root=GRPO_ROWS, data_dir=data)
+    assert picked.summary.hash == manifest.config["grpo_data"]["filter"]["hash"]
+    # The rows forge train grpo builds from them with the model's tokenizer, hashing and
+    # counted as recorded.
+    tokenizer = load_tokenizer(manifest.model_ref)
+    rows, meta = grpo_rows(config, tokenizer, data_dir=data, grpo_root=GRPO_ROWS)
+    assert meta == manifest.config["grpo_data"]
+    # Train questions only: none from val's databases, which its adapter is scored on.
+    trained = set(rows["example_id"])
+    assert trained <= picked.ids
+    assert trained <= {example.id for example in load_train()}
+    assert not trained & {example_id for example_id, _ in read_split_ids("val")}
+
+
+@pytest.mark.phase(5)
+def test_grpo_pilot_adapter_run_is_committed_whole() -> None:
+    stored = read_run(RUNS / GRPO_PILOT_EVAL)
+    manifest = stored.manifest
+    _made_from_its_commit(manifest)
+    assert manifest.config["device"] == "mps"
+
+    # The checkpoint with the best in-training val EX, the latest of a tie, on the files
+    # the GRPO run saved there.
+    trained = LocalRunStore(RUNS).get_manifest(GRPO_PILOT_RUN)
+    config = load_train_config(GRPO_PILOT_CONFIG)
+    assert config.grpo is not None
+    best = best_checkpoint(_metrics_lines(RUNS / GRPO_PILOT_RUN), config.grpo.max_steps)
+    adapter = f"runs/{GRPO_PILOT_RUN}/{best}"
+    assert manifest.outputs[ADAPTER_DIGEST] == trained.outputs[digest_output(best)]
+    assert trained.ended_at is not None and trained.ended_at <= manifest.started_at
+    # The FG-291 pilot's settings, from its config, with that adapter: the base, SFT and
+    # GRPO val runs differ in the adapter alone.
+    eval_config = replace(EvalConfig(**read_config_file(PILOT_CONFIG)), adapter=adapter)
+    assert manifest.config == eval_config.manifest_config()
+    base = read_run(RUNS / PILOT_RUN).manifest
+    assert manifest.config == {**base.config, "adapter": adapter}
+    assert (manifest.model_ref, manifest.adapter_ref) == (base.model_ref, adapter)
+
+    # Every val question but the known failing golds, once each: val only, never dev.
+    val = {example_id for example_id, _ in read_split_ids("val")} - FAILING_GOLD_IDS
+    assert sorted(score.example_id for score in stored.scores) == sorted(val)
+    report = stored.paths.report.read_text(encoding="utf-8")
+    assert "\n| Platform | `local-mps` |\n" in report
+    assert f"\n| Git commit | `{manifest.git_sha}` |\n" in report
+    assert f"\n| Adapter | `{adapter}` |\n" in report
+    assert stored.paths.chart.is_file()
+    # Its comparisons with the base and SFT pilots, beside its report.
+    folder = stored.paths.report.parent
+    assert sorted(path.name for path in folder.glob(f"{COMPARE_PREFIX}*.md")) == [
+        f"{COMPARE_PREFIX}{PILOT_RUN}.md",
+        f"{COMPARE_PREFIX}{SFT_PILOT_EVAL}.md",
+    ]
+
+
+@pytest.mark.phase(5)
+@pytest.mark.requires_full_data
+def test_grpo_pilot_reports_rebuild_and_trace_to_their_files() -> None:
+    data = resolve_data_dir()
+    compared = [f"{COMPARE_PREFIX}{PILOT_RUN}.md", f"{COMPARE_PREFIX}{SFT_PILOT_EVAL}.md"]
+    wanted = {
+        GRPO_FILTER_EVAL: ["train-report.md", "train-hardness.png"],
+        GRPO_PILOT_EVAL: ["val-report.md", "val-hardness.png", *compared],
+    }
+    skipped = []
+    for run_id, names in wanted.items():
+        checks = rebuild(run_id, runs_root=RUNS, data_dir=data)
+        assert [check.path.name for check in checks] == names
+        report, chart, *comparisons = checks
+        for check in (report, *comparisons):
+            assert (check.diff, check.skipped) == ((), None), check.path.name
+        text = report.path.read_text(encoding="utf-8")
+        assert untraced(text, RUNS / run_id, data_dir=data) == []
+        # The chart where this machine draws as the one that drew it did, as for FG-291's.
+        if chart.skipped is not None:
+            skipped.append(f"{chart.path.name}: {chart.skipped}")
+        else:
+            assert chart.diff == ()
+    if skipped:
+        pytest.skip(f"the GRPO pilot's charts weren't compared: {'; '.join(skipped)}")
+
+
+# What the notes quote of the training run's files: keys and their values on one JSON line.
+_JSON_QUOTE = re.compile(r'`("[^"`\n]+": [^`\n]+)`')
+
+
+@pytest.mark.phase(5)
+def test_grpo_notes_cite_only_report_numbers() -> None:
+    text = GRPO_NOTES.read_text(encoding="utf-8")
+    folder = RUNS / GRPO_PILOT_EVAL / "eval"
+    comparisons = [folder / f"{COMPARE_PREFIX}{run}.md" for run in (SFT_PILOT_EVAL, PILOT_RUN)]
+    # The notes read the GRPO adapter's comparisons with the SFT and base pilots.
+    linked = [(GRPO_NOTES.parent / target).resolve() for target in _COMPARISON_LINK.findall(text)]
+    assert sorted(set(linked)) == sorted(comparisons), linked
+    lists = bullet_lists(text, GRPO_NOTES.parent)
+    assert sorted(lists) == sorted(comparisons), lists
+    assert all(3 <= size <= 5 for sizes in lists.values() for size in sizes), lists
+    # Every number comes from the comparison its block reads, as for the SFT notes: in a
+    # bullet, from the row or section the bullet names before it, in the report's order.
+    # Before the first comparison no number stands outside a quote or a name.
+    problems = []
+    for reading, block in reading_blocks(text, GRPO_NOTES.parent):
+        report = reading.read_text(encoding="utf-8") if reading is not None else ""
+        lead, bullets = _bullets(block)
+        problems += [f"{n} is not in {reading}" for n in sorted(_numbers(lead) - _numbers(report))]
+        for bullet in bullets:
+            problems += miscited(bullet, report)
+    assert problems == []
+    # What they quote of the training run is on one line of its committed metrics or alerts,
+    # each key with that value, and what they quote of the config is in the file.
+    run = RUNS / GRPO_PILOT_RUN
+    alerts = (run / ALERTS_FILE).read_text(encoding="utf-8").splitlines()
+    held = [*_metrics_lines(run), *map(json.loads, alerts)]
+    quotes = [json.loads("{" + quote + "}") for quote in _JSON_QUOTE.findall(text)]
+    assert quotes
+    unheld = [q for q in quotes if not any(q.items() <= line.items() for line in held)]
+    assert unheld == []
+    config = GRPO_PILOT_CONFIG.read_text(encoding="utf-8")
+    settings = re.findall(r"`([a-z_]+: [^`\n]+)`", text)
+    assert settings and [quote for quote in settings if quote not in config] == []

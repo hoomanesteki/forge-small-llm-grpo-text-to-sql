@@ -1,0 +1,79 @@
+data:
+  prompt_version: p1
+  split: train
+grpo:
+  beta: library_default
+  curriculum:
+    hardness:
+    - easy
+    - medium
+    share: 0.4
+  eval_every: 50
+  eval_examples: 200
+  filter_from: 2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde
+  gpu_memory_utilization: 0.5
+  gradient_accumulation_steps: 8
+  init_adapter: runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final
+  learning_rate: 5.0e-06
+  logging_steps: 1
+  max_completion_length: 128
+  max_prompt_length: 1536
+  max_steps: 350
+  num_generations: 4
+  per_device_train_batch_size: 1
+  temperature: 1.0
+grpo_data:
+  duplicates: 25
+  failing_gold: 3
+  filter:
+    eval_run: 2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde
+    hash: 6d7a36a64c2c21bbdf243e9d6b44e181dd6c4aa35211f3ba30c7ba6c38a4e640
+    kept: 1698
+    left_out: 4297
+  hash: 5f73496b625a9d83811bc0635e7a57a199f93ee277b433a9f68cd3dafdeccb6d
+  hidden_gold_tables: 23
+  over_limit: 0
+  rowless: 1744
+  rows: 1695
+  train: 7787
+init_adapter_sha256: e84967ce9d31e90d9f8dba217fa4b79e56e91d64fdf2919bfbd5b6be60739562
+lora:
+  alpha: 32
+  dropout: 0.0
+  r: 16
+  target:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+rewards:
+  execution: 1.0
+  format: 0.05
+  guards:
+    comment_payload: -0.2
+    constant_query: -0.5
+    multiple_statements: -0.5
+    non_select: -1.0
+  validity: 0.1
+run:
+  backend: trl
+  device: mps
+  kind: grpo
+  load_in_4bit: false
+  model_ref: Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25
+  seed: 42
+trainer:
+  backend: trl
+  device: mps
+  dtype: bfloat16
+trl:
+  beta: 0.0
+  epsilon: 0.2
+  loss_type: dapo
+  scale_rewards: group
+  top_k: 0
+  top_p: 1.0
+  version: 1.18.0

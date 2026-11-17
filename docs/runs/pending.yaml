@@ -194,6 +194,18 @@ pending:
     how: docs/runbook.md, "Run store", forge runs push with the SFT pilot's run id (docs/runs/README.md)
     fills:
       - the run store's copy of the SFT pilot run, its adapter in checkpoints/final with it, which only the laptop that trained it holds until then
+  - story: FG-591
+    run: grpo-pilot-to-run-store
+    platform: local-mps
+    accelerator: none (an upload of a finished run)
+    est_gpu_hours: 0
+    status: blocked
+    since: 2026-11-17
+    blocked_on:
+      - the run store FG-491's push waits on; Phase 5 makes no Hub upload
+    how: docs/runbook.md, "Run store", forge runs push with the GRPO pilot's run id (docs/runs/README.md)
+    fills:
+      - the run store's copy of the GRPO pilot run with its checkpoints, which only the laptop that trained it holds until then
   - story: FG-404
     run: sft-pilot
     platform: kaggle

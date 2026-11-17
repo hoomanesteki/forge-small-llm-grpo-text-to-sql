@@ -74,7 +74,7 @@ One table per phase. Status is one of: todo, in progress, done, blocked.
 | FG-506 | Training telemetry and alerts | 3 | done |  |  | `forge.train.telemetry`: `RolloutRecorder` wraps a GRPO run's reward functions, names kept as TRL logs them, and records each batch's prompts, completions, token counts and component rewards; `TelemetryCallback` (GRPO's `MetricsCallback`, from `training_callbacks(..., rollouts=)`) puts `sql/valid_rate`, `sql/execution_match_rate`, `completions/p95_length` and, when TRL logs none, `frac_reward_zero_std` in each step's line beside TRL's reward means and spreads, `frac_reward_zero_std`, lengths, `kl` when beta isn't 0 and the learning rate; every 50 steps `samples/step-NNNNNN.jsonl` keeps the latest 12 prompts with all their completions and rewards; `AlertMonitor` fires and clears `zero_variance` (over 0.8 for 20 steps), `length_growth` (mean length over twice the first logged step's) and `valid_drop` (more than 20 points below the peak), in the log and in `alerts.jsonl`, which the manifest's outputs name `alerts` (`RunManifest` unchanged) and each session rebuilds from the metrics up to its first step; `forge runs plot <run_id>` draws PNGs on Agg (`runs/<run_id>/plots/`, `--out`) and `make smoke` plots its GRPO run; `forge runs watch <run_id>` reads the store every `--every` minutes (10) and prints new alerts and the latest step until the run stops running. Neither command needs the cpu extra |
 | FG-507 | GRPO runs on Kaggle | 5 | todo |  |  |  |
 | FG-508 | Checkpoint selection and dev evaluation | 3 | todo |  |  |  |
-| FG-591 | Local GRPO pilot on Apple silicon | 3 | in progress |  |  |  |
+| FG-591 | Local GRPO pilot on Apple silicon | 3 | done |  | 2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde, 2026-11-17-qwen2-5-coder-0-5b-instruct-grpo-e924b73, 2026-11-17-qwen2-5-coder-0-5b-instruct-eval-e924b73 | The FG-491 adapter's greedy eval of the first 3,000 train questions is the filter eval; `forge data build-grpo --out docs/runs/grpo` kept 1,698 rows beside the runs, which `forge train grpo --grpo-dir docs/runs/grpo` read, and 1,695 trained (3 repeat an earlier question); `configs/grpo/pilot-qwen25coder05b-mps.yaml` trains them on `mps` in bf16 from that adapter at ADR-0011's learning rate and rewards, 4 replies of at most 128 tokens to 2 prompts a step, one reply a micro-batch, for 350 steps that its 10-step probe put at about 2.2 h (the ledger has 2.38 h), with a checkpoint and fast EX on 200 val questions every 50 steps, all kept; the config records the probes and the two memory failures that set the batch; `checkpoints/step-000250`, the latest of the best in-training val EX, scored on all of val with FG-291's config, with its report and `forge report compare` against the base and SFT pilots; the filter eval and val run whole, the GRPO run without weights (sessions, metrics, alerts, samples, plots), each with a ledger row from its manifest; `docs/notes/grpo-run-log.md` reads the run and the comparisons, its numbers checked against the reports and quoted from the run's files; val only (ADR-0016). Pending: the run store copy of the run and its checkpoints (`docs/runs/pending.yaml`) |
 
 ## Phase 6: Integrity and ablations (v0.6.0)
 
@@ -1199,3 +1199,28 @@ Work discovered along the way that is not a plan story.
   metrics, `alerts.jsonl` and `samples/` to reach it with each checkpoint (FG-506).
 - The plan's alerts go in `alerts.jsonl` beside the metrics, named `alerts` in the manifest's
   outputs, since `RunManifest` has no `alerts` field and the contract stays (FG-506).
+- On MPS with the 0.45 high watermark (5.33 GiB), the backward pass of TRL 1.18's chunked
+  log-probabilities ran out of memory for GRPO on the pilot's prompts of up to 1,536 tokens:
+  at step 8 of a probe with 4 completions a micro-batch, and at step 24 of the run's first
+  start, at a23607a, with 2 (5.08 GiB held, 328 MiB asked for). With 1 a micro-batch the run
+  took all 350 steps. TRL still generates a step's 8 replies at once, so the micro-batch sets
+  only the backward pass. The failed start's folder was removed; the config records it
+  (FG-591).
+- The laptop's pace moves from one hour to the next: the probe with 2 a micro-batch took
+  31.6 s a step and 193 s for the in-training eval, the probe with 1 took 20.2 s and 115 s,
+  and the run's own times are in its `metrics.jsonl` and manifest (FG-591).
+- At 8 replies a step the pilot's `valid_drop` and `length_growth` alerts fire on noise: they
+  fired and cleared dozens of times each in `alerts.jsonl`. `valid_drop` compares one step's
+  rate with the best single step, which moves by an eighth a reply, and `length_growth` each
+  step with step 1's mean alone, which was short. FG-507's 24 replies a step make both
+  steadier; reading them over a window of steps would fix them for any batch (FG-591).
+- The first 3,000 train questions are all train_spider, so the filter left none out as
+  rowless or for slow gold. `forge data build-grpo --seed` defaults to 0, not the run's 42,
+  and that seed drew the 30% of solved questions kept; `summary.json` records it. Three kept
+  rows repeat an earlier question of their database, so `grpo_rows` drops them as duplicates
+  and the run trains 1,695 of the 1,698 (FG-591).
+- The in-training eval's 200 questions are part of the val split the chosen checkpoint is then
+  scored on, so choosing by them and reporting full val is a little optimistic for the pilot.
+  FG-508 chooses on val and reports on dev, which avoids it. No command picks a GRPO
+  checkpoint by its in-training EX yet: the pilot took it from `metrics.jsonl`, as
+  `best_checkpoint` in `tests/integration/test_artifacts.py` does (FG-591).

@@ -1,0 +1,172 @@
+{"step": 2, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 25.0 points below its peak of 88% at step 1"}
+{"step": 8, "rule": "length_growth", "state": "fired", "message": "mean completion length 70 tokens, over 2 times step 1's 28"}
+{"step": 10, "rule": "length_growth", "state": "cleared", "message": "mean completion length 17 tokens, within 2 times step 1's 28"}
+{"step": 15, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 16, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 18, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 19, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 21, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 22, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 28, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 29, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 32, "rule": "length_growth", "state": "fired", "message": "mean completion length 63 tokens, over 2 times step 1's 28"}
+{"step": 33, "rule": "length_growth", "state": "cleared", "message": "mean completion length 26 tokens, within 2 times step 1's 28"}
+{"step": 33, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 35, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 37, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 38, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 41, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 42, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 47, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 48, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 50, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 51, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 56, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 57, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 60, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 61, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 70, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 72, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 73, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 74, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 75, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 76, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 77, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 78, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 80, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 84, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 86, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 87, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 88, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 90, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 93, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 94, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 25%, 75.0 points below its peak of 100% at step 15"}
+{"step": 96, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 97, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 98, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 100, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 102, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 103, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 106, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 107, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 108, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 109, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 112, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 114, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 119, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 123, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 125, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 126, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 127, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 128, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 130, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 131, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 134, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 135, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 138, "rule": "length_growth", "state": "fired", "message": "mean completion length 58 tokens, over 2 times step 1's 28"}
+{"step": 139, "rule": "length_growth", "state": "cleared", "message": "mean completion length 34 tokens, within 2 times step 1's 28"}
+{"step": 140, "rule": "length_growth", "state": "fired", "message": "mean completion length 67 tokens, over 2 times step 1's 28"}
+{"step": 141, "rule": "length_growth", "state": "cleared", "message": "mean completion length 36 tokens, within 2 times step 1's 28"}
+{"step": 142, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 143, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 145, "rule": "length_growth", "state": "fired", "message": "mean completion length 72 tokens, over 2 times step 1's 28"}
+{"step": 146, "rule": "length_growth", "state": "cleared", "message": "mean completion length 35 tokens, within 2 times step 1's 28"}
+{"step": 146, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 147, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 148, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 149, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 12%, 87.5 points below its peak of 100% at step 15"}
+{"step": 152, "rule": "length_growth", "state": "fired", "message": "mean completion length 77 tokens, over 2 times step 1's 28"}
+{"step": 153, "rule": "length_growth", "state": "cleared", "message": "mean completion length 20 tokens, within 2 times step 1's 28"}
+{"step": 156, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 157, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 158, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 159, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 160, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 161, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 169, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 170, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 172, "rule": "length_growth", "state": "fired", "message": "mean completion length 60 tokens, over 2 times step 1's 28"}
+{"step": 174, "rule": "length_growth", "state": "cleared", "message": "mean completion length 14 tokens, within 2 times step 1's 28"}
+{"step": 174, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 175, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 25%, 75.0 points below its peak of 100% at step 15"}
+{"step": 179, "rule": "length_growth", "state": "fired", "message": "mean completion length 58 tokens, over 2 times step 1's 28"}
+{"step": 180, "rule": "length_growth", "state": "cleared", "message": "mean completion length 31 tokens, within 2 times step 1's 28"}
+{"step": 182, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 183, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 12%, 87.5 points below its peak of 100% at step 15"}
+{"step": 188, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 191, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 199, "rule": "length_growth", "state": "fired", "message": "mean completion length 62 tokens, over 2 times step 1's 28"}
+{"step": 200, "rule": "length_growth", "state": "cleared", "message": "mean completion length 48 tokens, within 2 times step 1's 28"}
+{"step": 204, "rule": "length_growth", "state": "fired", "message": "mean completion length 58 tokens, over 2 times step 1's 28"}
+{"step": 205, "rule": "length_growth", "state": "cleared", "message": "mean completion length 28 tokens, within 2 times step 1's 28"}
+{"step": 209, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 211, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 217, "rule": "length_growth", "state": "fired", "message": "mean completion length 64 tokens, over 2 times step 1's 28"}
+{"step": 218, "rule": "length_growth", "state": "cleared", "message": "mean completion length 34 tokens, within 2 times step 1's 28"}
+{"step": 221, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 222, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 224, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 225, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 229, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 230, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 233, "rule": "length_growth", "state": "fired", "message": "mean completion length 68 tokens, over 2 times step 1's 28"}
+{"step": 234, "rule": "length_growth", "state": "cleared", "message": "mean completion length 40 tokens, within 2 times step 1's 28"}
+{"step": 235, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 237, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 0%, 100.0 points below its peak of 100% at step 15"}
+{"step": 238, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 239, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 240, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 241, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 242, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 243, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 245, "rule": "length_growth", "state": "fired", "message": "mean completion length 64 tokens, over 2 times step 1's 28"}
+{"step": 246, "rule": "length_growth", "state": "cleared", "message": "mean completion length 24 tokens, within 2 times step 1's 28"}
+{"step": 246, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 247, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 249, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 251, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 25%, 75.0 points below its peak of 100% at step 15"}
+{"step": 252, "rule": "length_growth", "state": "fired", "message": "mean completion length 58 tokens, over 2 times step 1's 28"}
+{"step": 253, "rule": "length_growth", "state": "cleared", "message": "mean completion length 48 tokens, within 2 times step 1's 28"}
+{"step": 255, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 256, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 0%, 100.0 points below its peak of 100% at step 15"}
+{"step": 259, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 261, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 263, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 264, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 268, "rule": "length_growth", "state": "fired", "message": "mean completion length 91 tokens, over 2 times step 1's 28"}
+{"step": 269, "rule": "length_growth", "state": "cleared", "message": "mean completion length 42 tokens, within 2 times step 1's 28"}
+{"step": 270, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 271, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 275, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 276, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 277, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 280, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 287, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 288, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 289, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 290, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 291, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 294, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 301, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 302, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 0%, 100.0 points below its peak of 100% at step 15"}
+{"step": 307, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 308, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 312, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 315, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 318, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 322, "rule": "length_growth", "state": "fired", "message": "mean completion length 70 tokens, over 2 times step 1's 28"}
+{"step": 322, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 25%, 75.0 points below its peak of 100% at step 15"}
+{"step": 323, "rule": "length_growth", "state": "cleared", "message": "mean completion length 33 tokens, within 2 times step 1's 28"}
+{"step": 324, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 325, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 50%, 50.0 points below its peak of 100% at step 15"}
+{"step": 327, "rule": "length_growth", "state": "fired", "message": "mean completion length 57 tokens, over 2 times step 1's 28"}
+{"step": 328, "rule": "length_growth", "state": "cleared", "message": "mean completion length 32 tokens, within 2 times step 1's 28"}
+{"step": 336, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 337, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 340, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 341, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 75%, 25.0 points below its peak of 100% at step 15"}
+{"step": 342, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
+{"step": 343, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 38%, 62.5 points below its peak of 100% at step 15"}
+{"step": 346, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 100%, 0.0 points below its peak of 100% at step 15"}
+{"step": 347, "rule": "valid_drop", "state": "fired", "message": "valid-SQL rate 62%, 37.5 points below its peak of 100% at step 15"}
+{"step": 349, "rule": "valid_drop", "state": "cleared", "message": "valid-SQL rate 88%, 12.5 points below its peak of 100% at step 15"}
