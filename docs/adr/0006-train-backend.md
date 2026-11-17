@@ -89,8 +89,8 @@ ValidationError: 1 validation error for ModelConfig
 - The CPU smoke and the T4 job share one backend, one TRL version and one set of configs.
 - Training and evaluation need two package lists, which the code dataset holds side by
   side (FG-398).
-- Plan sections 3.12 and 3.13 still name Unsloth for GPU training; they change to match
-  this record at Gate 3.
+- Plan sections 3.12 and 3.13 named Unsloth for GPU training until Gate 3, which changed
+  them to match this record on 2026-11-17.
 
 ## Revisit if
 
