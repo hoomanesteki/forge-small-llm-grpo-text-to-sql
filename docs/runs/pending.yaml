@@ -6,46 +6,6 @@
 # an entry here.
 pending:
   - story: FG-307
-    run: baseline-val-p1
-    platform: kaggle
-    accelerator: NvidiaTeslaT4
-    configs:
-      - configs/eval/qwen3-1-7b-val.yaml
-      - configs/eval/qwen3-4b-val.yaml
-      - configs/eval/qwen2-5-coder-1-5b-val.yaml
-    est_gpu_hours: 0.95
-    status: blocked
-    since: 2026-11-15
-    blocked_on:
-      - the run itself, now that the Kaggle account, its token and both datasets exist
-        (since 2026-11-16, when FG-307 began pushing its baselines); it comes back in
-        FG-307's own change
-    how: docs/runbook.md, "Baselines", step 1
-    fills:
-      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
-      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
-      - docs/adr/0012-model-choice.md, the measured table
-  - story: FG-307
-    run: chosen-val-p2
-    platform: kaggle
-    accelerator: NvidiaTeslaT4
-    pick: the candidate ADR-0012's rule chooses from the val runs
-    configs:
-      - configs/eval/qwen3-1-7b-val-p2.yaml
-      - configs/eval/qwen3-4b-val-p2.yaml
-      - configs/eval/qwen2-5-coder-1-5b-val-p2.yaml
-    est_gpu_hours: 0.35
-    status: blocked
-    since: 2026-11-15
-    blocked_on:
-      - the val runs above, from which ADR-0012's rule picks the candidate (FG-301's GRPO
-        memory check, which the rule also needs, passed for all three on 2026-11-16)
-    how: docs/runbook.md, "Baselines", step 2
-    fills:
-      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
-      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
-      - docs/adr/0007-prompt-format.md, the p1 and p2 table, accepted
-  - story: FG-307
     run: reference-val
     platform: kaggle
     accelerator: NvidiaTeslaT4
@@ -53,54 +13,35 @@ pending:
       - configs/eval/qwen3-8b-val.yaml
     est_gpu_hours: 0.45
     status: blocked
-    since: 2026-11-15
+    since: 2026-11-17
     blocked_on:
-      - the run itself, now that the reference is the AWQ checkpoint Qwen/Qwen3-8B-AWQ
-        (FG-398), since vLLM 0.33.0 has no bitsandbytes (FG-301); this run is the first
-        to try AWQ on a T4, so it may still fail at the load
+      - the operator pushing it from FG-307's pushed commit, whose reference configs use p2
+        (ADR-0007); it is the first run to load the AWQ checkpoint Qwen/Qwen3-8B-AWQ on a
+        T4 (FG-398), since vLLM 0.33.0 has no bitsandbytes (FG-301), so it may still fail
+        at the load
     how: docs/runbook.md, "Baselines", step 3
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
       - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
-  - story: FG-307
-    run: i6-repeat
-    platform: kaggle
-    accelerator: NvidiaTeslaT4
-    configs:
-      - configs/eval/qwen2-5-coder-1-5b-val-100.yaml
-    est_gpu_hours: 0.15
-    status: blocked
-    since: 2026-11-15
-    blocked_on:
-      - the run itself, now that the Kaggle account, its token and both datasets exist
-        (since 2026-11-16, when FG-307 began pushing its baselines); it comes back in
-        FG-307's own change
-    how: docs/runbook.md, "Baselines", step 4
-    fills:
-      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
-      - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
-      - the I6 check in test_phase3_baseline_reports_present
+      - docs/adr/0012-model-choice.md, the reference's val EX in its Measured section
   - story: FG-307
     run: chosen-dev
     platform: kaggle
     accelerator: NvidiaTeslaT4
-    pick: the candidate ADR-0012's rule chooses from the val runs
     configs:
-      - configs/eval/qwen3-1-7b-dev.yaml
-      - configs/eval/qwen3-4b-dev.yaml
       - configs/eval/qwen2-5-coder-1-5b-dev.yaml
-    est_gpu_hours: 0.4
+    est_gpu_hours: 0.35
     status: blocked
-    since: 2026-11-15
+    since: 2026-11-17
     blocked_on:
-      - the val runs above, from which ADR-0012's rule picks the candidate (FG-301's GRPO
-        memory check, which the rule also needs, passed for all three on 2026-11-16)
+      - the operator pushing it from FG-307's pushed commit, whose config runs the model
+        ADR-0012 chose, Qwen/Qwen2.5-Coder-1.5B-Instruct, with p2 (ADR-0007)
     how: docs/runbook.md, "Baselines", step 5
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
       - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
       - docs/dev-usage.md, dev look 1
-      - docs/adr/0012-model-choice.md, accepted
+      - docs/adr/0012-model-choice.md, the chosen model's dev EX in its Measured section
   - story: FG-307
     run: reference-dev
     platform: kaggle
@@ -109,12 +50,14 @@ pending:
       - configs/eval/qwen3-8b-dev.yaml
     est_gpu_hours: 0.5
     status: blocked
-    since: 2026-11-15
+    since: 2026-11-17
     blocked_on:
-      - the reference's val run above, the first to try the AWQ checkpoint on a T4
-        (FG-398); this push spends a dev look, so it waits until that run has loaded it
+      - the operator pushing it from FG-307's pushed commit, with p2 (ADR-0007), once the
+        reference's val run above has loaded the AWQ checkpoint on a T4 (FG-398), since
+        this push spends a dev look
     how: docs/runbook.md, "Baselines", step 5
     fills:
       - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
       - docs/compute-ledger.md, one kaggle row a run (forge runs pull)
       - docs/dev-usage.md, dev look 2
+      - docs/adr/0012-model-choice.md, the reference's dev EX in its Measured section
