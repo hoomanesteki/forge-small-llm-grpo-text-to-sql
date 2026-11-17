@@ -1104,17 +1104,24 @@ def test_budget_rows_follow_the_measurements() -> None:
     # The reference's own config estimates: no run has loaded an 8B model on the T4.
     reference = 0.45 + 0.50
     candidates = 2 * evaluate(val, "1.7B") + evaluate(val, "4B")
+    # ADR-0012 chose Qwen2.5-Coder-1.5B-Instruct, which takes the 1.7B model's rates.
+    chosen = "1.7B"
+    assert "\n- Chosen model: `Qwen/Qwen2.5-Coder-1.5B-Instruct`\n" in (
+        ROOT / "docs" / "adr" / "0012-model-choice.md"
+    ).read_text(encoding="utf-8")
     expected = {
         "Baselines": candidates
-        + evaluate(val, "4B")
+        + evaluate(val, chosen)
         + evaluate(100, "1.7B")
-        + evaluate(dev, "4B")
+        + evaluate(dev, chosen)
         + reference,
-        "SFT checkpoint evals": 2 * evaluate(val, "4B"),
+        "SFT checkpoint evals": 2 * evaluate(val, chosen),
         "GRPO pilot": grpo(100, "1.7B", sessions=2),
-        "GRPO main": grpo(600, "4B", sessions=2),
-        "Checkpoint selection": 3 * evaluate(val, "4B") + 2 * evaluate(dev, "4B"),
-        "Hacking fix re-run": grpo(200, "4B") + evaluate(val, "4B"),
+        "GRPO main": grpo(600, chosen, sessions=2),
+        "Checkpoint selection": 3 * evaluate(val, chosen) + 2 * evaluate(dev, chosen),
+        "Hacking fix re-run": grpo(200, chosen) + evaluate(val, chosen),
+        # FG-603's configs B to E and FG-604's second seed of B, each with a val eval.
+        "Ablations": 5 * (grpo(300, "1.7B") + evaluate(val, "1.7B")),
     }
     rows = _budget_rows()
     for name, hours in expected.items():

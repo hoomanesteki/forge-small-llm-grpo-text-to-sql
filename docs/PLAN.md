@@ -410,22 +410,22 @@ user:   Database schema:
 | Modal (Could, FG-606) | $30/month free credits on the Starter plan (check whether a card is needed, and set a spend limit) | Billing beyond the credits | Optional single boost run |
 | Weights & Biases (optional) | Free personal tier | - | Live training charts. Fallback: JSONL metrics in the run store |
 
-**GPU hour budget** (worked out on 2026-11-16 from FG-301's measurements, as the note under the table says; a row with no measured basis is still an estimate)
+**GPU hour budget** (worked out on 2026-11-16 from FG-301's measurements, and on 2026-11-17 for the model ADR-0012 chose, as the note under the table says; a row with no measured basis is still an estimate)
 
 | Job | Model | Est. GPU h | Story |
 |---|---|---|---|
 | Throughput spike (measured: its ledger row) | 1.7B and 4B | 0.59 | FG-301 |
-| Baselines: 3 candidates on val, the chosen one with p2, the I6 repeat, the chosen model on dev, and a larger reference model on val and dev | up to 8B in 4-bit | 3.80 | FG-307 |
+| Baselines: 3 candidates on val, the chosen one with p2, the I6 repeat, the chosen model on dev, and a larger reference model on val and dev | up to 8B in 4-bit | 3.60 | FG-307 |
 | SFT pilot (estimate) | 1.7B | 1 | FG-404 |
-| SFT main (estimate) | chosen (about 4B) | 2.5 | FG-404 |
-| SFT checkpoint evals: 2 on val | chosen | 1.10 | FG-404 |
+| SFT main (estimate) | chosen (1.5B) | 2.5 | FG-404 |
+| SFT checkpoint evals: 2 on val | chosen | 0.90 | FG-404 |
 | GRPO pilot (100 steps, stopped at 40 minutes and resumed) | 1.7B | 1.30 | FG-507 |
-| GRPO main (about 600 steps, 2 sessions with resume) | chosen | 8.75 | FG-507 |
-| Checkpoint selection: 3 on val, then SFT and GRPO on dev | chosen | 2.75 | FG-508 |
-| Hacking fix re-run: about 200 steps, then a val eval | chosen | 3.55 | FG-602 |
-| Ablations, 3 runs, plus a second seed (estimate) | 1.7B | 8 | FG-603, FG-604 |
+| GRPO main (about 600 steps, 2 sessions with resume) | chosen | 5.15 | FG-507 |
+| Checkpoint selection: 3 on val, then SFT and GRPO on dev | chosen | 2.25 | FG-508 |
+| Hacking fix re-run: about 200 steps, then a val eval | chosen | 2.25 | FG-602 |
+| Ablations: B to E and a second seed of B, 300 steps and a val eval each | 1.7B | 15.25 | FG-603, FG-604 |
 | Reserve (estimate) | - | 6 | - |
-| **Total** | | **39.34 h** (2 Kaggle weeks of 30 h) | |
+| **Total** | | **40.79 h** (2 Kaggle weeks of 30 h) | |
 
 How the rows are worked out. The measured inputs come from FG-301's report (`docs/spikes/kaggle-gpu/spike-report.json`) and the `status.json` of FG-303's 50-question kernel job (`docs/runs/2026-11-16-smoke-kaggle-50-val-c8f4b41/`):
 
@@ -434,11 +434,12 @@ How the rows are worked out. The measured inputs come from FG-301's report (`doc
 
 Each job is rounded up to the next 0.05 h, and a row is the sum of its jobs:
 
-- GRPO: steps × the median step for the model's size × 1.5, since Spider prompts are longer than the bench's 259-token prompts and real rewards execute SQL, plus 0.25 h a session for install, download and load. Pilot: 100 × 18.426 s × 1.5 + 2 × 0.25 h = 1.27 h, so 1.30. Main: 600 × 32.924 s × 1.5 + 2 × 0.25 h = 8.73 h, so 8.75. Hacking fix: 200 × 32.924 s × 1.5 + 0.25 h = 2.99 h, so 3.00, and 0.55 for its val eval.
-- An eval of N questions: (468.7 s + download + load + N × 256 tokens ÷ tokens a second) × 1.5, the same margin. That is 0.45 h at 1.7B's rates and 0.55 h at 4B's, on val (872 questions) as on dev (1,034), and 0.30 h for 100 val questions at 1.7B's. Qwen2.5-Coder-1.5B takes 1.7B's rates, and the chosen model 4B's, the larger candidate's. Without the 1.5 the formula gives 627 s for the 50-question job at 1.7B's rates; that job's session lasted 657 s (its ledger row, 0.18 h).
-- Baselines: 0.45 + 0.55 + 0.45 for the candidates on val, 0.55 for p2, 0.30 for the I6 repeat and 0.55 for the chosen model on dev, plus the reference's configs, 0.45 on val and 0.50 on dev, which stay estimates: no run has loaded an 8B model on the T4 (vLLM 0.33.0 has no bitsandbytes, so since FG-398 the reference is the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`, whose download, load and tokens a second no run has measured).
-- SFT checkpoint evals: 2 × 0.55. Checkpoint selection: 3 × 0.55 on val and 2 × 0.55 on dev, without the retry turns. vLLM with a LoRA adapter wasn't benched, so these may run slower.
-- Still estimates: SFT, since no SFT has run on the T4; the ablations, whose configs Phase 6 fixes (at the GRPO formula a 300-step 1.7B run is 2.60 h before its eval, so 8 h holds three); and the reserve. FG-507's 0.5 h filter eval has no row, as before, and checkpoint pushes and in-training evals aren't in the formula; the reserve covers them.
+- GRPO: steps × the median step for the model's size × 1.5, since Spider prompts are longer than the bench's 259-token prompts and real rewards execute SQL, plus 0.25 h a session for install, download and load. Pilot: 100 × 18.426 s × 1.5 + 2 × 0.25 h = 1.27 h, so 1.30. Main: 600 × 18.426 s × 1.5 + 2 × 0.25 h = 5.11 h, so 5.15. Hacking fix: 200 × 18.426 s × 1.5 + 0.25 h = 1.79 h, so 1.80, and 0.45 for its val eval. An ablation: 300 × 18.426 s × 1.5 + 0.25 h = 2.55 h, so 2.60, and 0.45 for its val eval.
+- An eval of N questions: (468.7 s + download + load + N × 256 tokens ÷ tokens a second) × 1.5, the same margin. That is 0.45 h at 1.7B's rates and 0.55 h at 4B's, on val (872 questions) as on dev (1,034), and 0.30 h for 100 val questions at 1.7B's. Qwen2.5-Coder-1.5B takes 1.7B's rates, the nearest size measured, and so does the chosen model, which is that one (ADR-0012). Without the 1.5 the formula gives 627 s for the 50-question job at 1.7B's rates; that job's session lasted 657 s (its ledger row, 0.18 h).
+- Baselines: 0.45 + 0.55 + 0.45 for the candidates on val, 0.45 for p2, 0.30 for the I6 repeat and 0.45 for the chosen model on dev, plus the reference's configs, 0.45 on val and 0.50 on dev, which stay estimates: no run has loaded an 8B model on the T4 (vLLM 0.33.0 has no bitsandbytes, so since FG-398 the reference is the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`, whose download, load and tokens a second no run has measured).
+- SFT checkpoint evals: 2 × 0.45. Checkpoint selection: 3 × 0.45 on val and 2 × 0.45 on dev, without the retry turns. vLLM with a LoRA adapter wasn't benched, so these may run slower.
+- Ablations: FG-603's configs B to E, 300 steps and a full val eval each, and FG-604's second seed of B, so 5 × (2.60 + 0.45). Phase 6 fixes their configs. E's 4 generations would shorten its steps, which nothing has measured, so the formula counts it at 6, and A's re-evaluation, if it is needed, comes out of the reserve. The total stays within the 45 h that Phase gate 3 allows, so no ablation is cut (section 10.2).
+- Still estimates: SFT, since no SFT has run on the T4 (SFT main keeps the 2.5 h it was given for a 4B model); and the reserve. FG-507's 0.5 h filter eval has no row, as before, and checkpoint pushes and in-training evals aren't in the formula; the reserve covers them.
 
 **Session rules**
 
