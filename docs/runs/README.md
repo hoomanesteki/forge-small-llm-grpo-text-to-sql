@@ -168,12 +168,13 @@ FG-404's runs alone, since FG-307's p2 run of the chosen model, its base, is her
 push of the SFT pilot, adapter and all, waits only
 for the operator to run it, with the digest above. A kernel pushed with the CLI gets no
 `HF_TOKEN`, so a kernel job's results come back as its kernel output (`forge kaggle
-output`). `tests/integration/test_artifacts.py` finds a GPU story's runs here by the configs
-they were made from, and skips its checks on them only while the story has an entry in
-pending.yaml; once it has none, a missing run fails. A Kaggle SFT run is committed as
-FG-491's is, without its checkpoints, which the run store keeps, and with the `best.json`
-that `forge runs promote` writes: which checkpoint is `checkpoints/best`, and the val runs
-whose scores chose it (docs/runbook.md, "SFT runs").
+output`), and an eval job's checkpoint adapter comes from the output of the kernel that
+trained it, which its kernel mounts. `tests/integration/test_artifacts.py` finds a GPU
+story's runs here by the configs they were made from, and skips its checks on them only
+while the story has an entry in pending.yaml; once it has none, a missing run fails. A
+Kaggle SFT run is committed as FG-491's is, without its checkpoints, which the run store
+keeps, and with the `best.json` that `forge runs promote` writes: which checkpoint is
+`checkpoints/best`, and the val runs whose scores chose it (docs/runbook.md, "SFT runs").
 Each of those val runs is its base model's full val config with the checkpoint's files
 alone added, so FG-405's comparison of the best one with FG-307's run of that config
 measures the adapter alone; the test checks it does, and fails once FG-405 is off

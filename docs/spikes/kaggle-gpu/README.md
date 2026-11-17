@@ -16,3 +16,13 @@ never a value.
 
 The kernels' logs stay out of git (`*.log` is ignored): the GPU spike's is 540 KB, mostly
 install and download progress. The spike doc quotes the lines it needs from it.
+
+## FG-495's mount probe
+
+Where Kaggle puts a kernel's sources, which an eval job's checkpoint adapter comes from: a
+kernel source's whole output at `/kaggle/input/notebooks/<owner>/<slug>/`, a dataset at
+`/kaggle/input/datasets/<owner>/<slug>/`.
+
+| File | What it is | Kernel and version | Code | Fetched with |
+|---|---|---|---|---|
+| `mount-probe.json` | Every folder under `/kaggle/input` to 7 levels down, and up to 40 files in each, with their sizes, in a kernel with an earlier kernel and the code dataset as its sources | a free CPU kernel run on 2026-11-16, its sources `hoomanesteki/forge-2026-11-16-smoke-kaggle-50-val-c8f4b41` and `hoomanesteki/forge-code`, as the file names them | [probe.py](probe.py), which writes it to `/kaggle/working` | the kernel's output |

@@ -92,3 +92,21 @@ of the spike doc). The decision stands.
 Kaggle changes its quota, accelerators or policy (Google Cloud plans to retire the T4 on
 2027-08-01), pushed runs become able to read Secrets, or a job killed at the 12-hour limit
 turns out to lose what it wrote, which FG-301 measured only for a push's timeout.
+
+## Notes
+
+- 2026-11-16, adapters between kernels (FG-495). The first live runs showed that a kernel
+  pushed with the CLI can't read Kaggle Secrets: `KAGGLE_USER_SECRETS_TOKEN` is set, but the
+  secrets service answers HTTP 400 for `HF_TOKEN` as for a label that doesn't exist, so the
+  editor's binding doesn't survive `kaggle kernels push`. Decision 3's path 2 applies, and it
+  carries adapters between kernels too: a kernel that needs a training run's checkpoint,
+  such as an eval job's adapter or the SFT adapter a GRPO job starts from, mounts the output
+  of the kernel that trained the run as a kernel source, at the version its `kernels.json`
+  records (`forge.ops.kaggle_job.adapter_kernel_sources`), and copies the checkpoint's
+  adapter files from `/kaggle/input/notebooks/<owner>/<slug>/runs/<run_id>/checkpoints/<name>`,
+  where a CPU kernel found such a mount the same day
+  ([the probe](../spikes/kaggle-gpu/README.md)). The laptop puts each pulled run in the Hub
+  run store with `forge runs push`. `checkpoints/best` is written on the laptop by
+  `forge runs promote`, so no kernel output holds it: a push names the checkpoint its
+  `best.json` names instead, and the kernel checks the files it copies against the digest
+  the run's manifest records.

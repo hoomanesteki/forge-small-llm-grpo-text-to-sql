@@ -193,25 +193,41 @@ SFT. An SFT job trains as `forge train sft` does, with the config as `forge kagg
 checked it, defaults filled in, and its manifest's platform is the kernel's host. Its
 preflight trains 2 steps of the same config in `preflight/`, saving the adapter as the job
 will, then frees the GPU for the job, which loads the model again. The rows are built in
-the temp folder; the checkpoints stay in the run's folder, which the upload stage puts in
-the run store when the job ends. The job's time guard counts `ops.time_guard_minutes`
-from the job's start, or less when the push's timeout comes first: counted from the
-kernel's start, as an eval job's deadline is, with the same tenth of it kept back, here
-for the guard's last save and the upload. A training run writes no `sessions.json` of its
-own, so the kernel's session is added to the run with the run's status.
+the temp folder, and the checkpoints go to the run's folder, which is the training
+callbacks' run store, so the kernel output holds every checkpoint the run keeps (the latest
+2 steps, each `ops.keep_checkpoints_at` share and `final`) at
+`runs/<run_id>/checkpoints/<name>`: what `forge runs pull <run_id> --store kaggle` brings
+back and an eval job mounts. A kernel pushed with the CLI gets no `HF_TOKEN`, so the upload
+stage skips, and `forge runs push <run_id>` puts the pulled run in the Hub run store from
+the laptop. The job's time guard counts `ops.time_guard_minutes` from the job's start, or
+less when the push's timeout comes first: counted from the kernel's start, as an eval
+job's deadline is, with the same tenth of it kept back, here for the guard's last save and
+the upload. A training run writes no `sessions.json` of its own, so the kernel's session is
+added to the run with the run's status.
 
 `--adapter` gives an eval job its adapter when the config names none, so a checkpoint is
 scored with its base model's val config at the prompt version the run trained on, which
 ADR-0007 makes p2 for every SFT run (`configs/eval/<name>-val-p2.yaml`), and the two runs
 differ in the adapter alone. An adapter that is a training run's checkpoint,
-`runs/<run_id>/checkpoints/<name>` as on the laptop, is fetched from the run store to the
-same path in the kernel before the model loads, so it needs the `HF_TOKEN` secret; the
-manifest names the adapter by that path, which `forge runs promote` reads, and records the
-`adapter_sha256` of the files it loaded. The push reads the adapter as both of those do
-(`forge.ops.adapters.checkpoint_ref`) and refuses, before any upload, a checkpoint outside
-`runs/`, a path in `runs/` that names no checkpoint, such as `runs/<run_id>` (whatever this
-machine's `runs/` holds), a folder on this machine, and a checkpoint of a run this machine
-knows trained another model. A trailing `/` or a leading `./` is pushed spelled the one way.
+`runs/<run_id>/checkpoints/<name>` as on the laptop, travels as the output of the kernel
+that trained the run, with no `HF_TOKEN` (ADR-0005): the push mounts that kernel, the run's
+last in its `kernels.json` here, at the version recorded, as a kernel source, and the
+kernel copies the checkpoint's adapter files from it to the same path before the model
+loads (`forge.ops.kaggle_job.adapter_kernel_sources`). A run made anywhere but on Kaggle,
+such as the local pilot, is refused, since no kernel output holds its checkpoints, and so
+is a run this machine has no `kernels.json` for. `forge runs promote` writes
+`checkpoints/best` on the laptop, so no kernel output holds it either: the push names the
+checkpoint its `best.json` names instead, and the eval run records that one. When the run's
+manifest is here, the checkpoint must be one the run kept, and the kernel checks the files
+it copies against the `adapter_sha256:<checkpoint>` the manifest records. Only when no
+mounted output holds the checkpoint does the kernel read the run store, which needs an
+`HF_TOKEN`, as a Colab notebook can have. The manifest names the adapter by that path,
+which `forge runs promote` reads, and records the `adapter_sha256` of the files it loaded.
+The push reads the adapter as both of those do (`forge.ops.adapters.checkpoint_ref`) and
+refuses, before any upload, a checkpoint outside `runs/`, a path in `runs/` that names no
+checkpoint, such as `runs/<run_id>` (whatever this machine's `runs/` holds), a folder on
+this machine, and a checkpoint of a run this machine knows trained another model. A
+trailing `/` or a leading `./` is pushed spelled the one way.
 
 vLLM. An eval job's `backend: vllm` loads the model with `forge.infer.vllm_backend`: fp16
 (`dtype="half"`, since a T4 has no bf16), up to 2,048 tokens of prompt and reply, 85% of the
@@ -481,9 +497,12 @@ FG-404 trains the LoRA SFT adapters on Kaggle T4s and picks the main run's on va
 story's budget of about 4.5 GPU hours (FG-404 in the plan); plan section 3.8's rows give
 4.4 of them, 1 for the pilot, 2.5 for the main run and 0.90 for its two checkpoints on
 val, and have none for the pilot's val run. Push the jobs in this order, from one clean
-commit that passed `make smoke`, with the `HF_TOKEN` secret attached to each kernel: the
-runs go to the run store, and an eval job fetches its checkpoint from there. After each,
-`forge kaggle wait <run_id>`, then `forge runs pull <run_id>`, which adds its ledger row.
+commit that passed `make smoke`. A kernel pushed with the CLI gets no `HF_TOKEN`, so
+nothing is attached: each run comes back as its kernel's output, and an adapter travels the
+same way, an eval job's kernel mounting the output of the SFT kernel that holds its
+checkpoint. After each, `forge kaggle wait <run_id>`, then `forge runs pull <run_id>
+--store kaggle`, which adds its ledger row, and `forge runs push <run_id>`, which puts the
+run, checkpoints and all, in the Hub run store from the laptop.
 
 Every SFT run trains on p2, which ADR-0007 fixed for every later phase, and its checkpoints
 are scored with its base model's val config at p2, as `forge runs promote` requires. The
@@ -497,11 +516,11 @@ and still train on p1, and the main one names Qwen3-4B, so each needs the change
 2. Its final adapter on val, with that candidate's FG-307 config at p2, so the two runs
    differ in the adapter alone: `uv run forge kaggle run --job eval --config
    configs/eval/qwen3-1-7b-val-p2.yaml --adapter runs/<pilot_run_id>/checkpoints/final
-   --run-id <date>-qwen3-1-7b-sft-val-<sha7>`. The push checks the adapter first: a run's
-   checkpoint in `runs/`, as here, which the kernel fetches, or a Hub repo@revision. Then
-   `uv run forge runs promote <pilot_run_id> --config configs/eval/qwen3-1-7b-val-p2.yaml
-   --eval <that run id>` sets the pilot's `checkpoints/best`, where FG-507's GRPO pilot
-   starts.
+   --run-id <date>-qwen3-1-7b-sft-val-<sha7>`. The push checks the adapter first, a run's
+   checkpoint in `runs/` as here or a Hub repo@revision, and mounts the output of the
+   pilot's kernel, which holds the checkpoint. Then `uv run forge runs promote
+   <pilot_run_id> --config configs/eval/qwen3-1-7b-val-p2.yaml --eval <that run id>` sets
+   the pilot's `checkpoints/best`, where FG-507's GRPO pilot starts.
 3. The main run, 1 epoch on the chosen model: `uv run forge kaggle run --job sft --config
    <main config>`, the main SFT config once it trains `Qwen/Qwen2.5-Coder-1.5B-Instruct` on
    p2. Until that change it is `configs/sft/qwen3-4b-main.yaml`, Qwen3-4B on p1. It keeps
