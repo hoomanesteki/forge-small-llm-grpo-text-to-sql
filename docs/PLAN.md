@@ -528,11 +528,11 @@ forge-small-llm-grpo-text-to-sql/
 
 | Layer | Choice | Why |
 |---|---|---|
-| Language | Python 3.11 or 3.12 (match Kaggle's image; FG-301 checks), `uv` | Kaggle compatibility |
+| Language | Python 3.11 to 3.13 (Kaggle's image runs 3.13.16, FG-301), `uv` | Kaggle compatibility |
 | Data | `datasets`, `pydantic`, `sqlglot` (SQL parsing for guards and taxonomy) | Typed records; SQL parsing that handles real-world queries |
 | Execution | Python `sqlite3` with a read-only URI, an authorizer callback and a progress handler | Fast, safe, no extra services |
 | Official metric | Spider test-suite evaluator (vendored) | Comparable with published numbers |
-| GPU training | Unsloth (4-bit LoRA, fast GRPO with vLLM generation) on top of TRL | Fits T4 memory |
+| GPU training | TRL + PEFT with transformers generation, 4-bit LoRA through bitsandbytes (ADR-0006) | Fits T4 memory: GRPO on Qwen3 4B peaked at 4.94 GB allocated (FG-301) |
 | CPU training | TRL + PEFT with a tiny model | Same code path, testable in CI |
 | GPU inference | vLLM (fp16 on T4) | Throughput for evals |
 | CPU inference | transformers; llama.cpp via `llama-cpp-python` for GGUF | Smoke tests; local demo |
@@ -550,7 +550,7 @@ forge-small-llm-grpo-text-to-sql/
 | 0003 | Spider 1.0 as primary dataset; BIRD mini-dev as optional OOD check | License or access problem |
 | 0004 | Val split by database from train; dev touched at most 6 times, logged | - |
 | 0005 | Kaggle T4 script kernels as primary compute; Hub as run store; Colab fallback | Kaggle quota or policy change |
-| 0006 | One `TrainBackend` interface: Unsloth on GPU, TRL+PEFT on CPU | Unsloth breaks on Kaggle (fallback: TRL+PEFT+bitsandbytes on GPU, slower) |
+| 0006 | One `TrainBackend` interface: TRL+PEFT on GPU (4-bit, transformers generation) and on CPU, accepted on FG-301's measurements | An Unsloth release supports TRL 1.16 or later, or a vLLM release loads bitsandbytes weights again |
 | 0007 | Non-thinking output, SQL in a code block, prompt version fixed after FG-307 | - |
 | 0008 | Fast comparator for rewards, official test-suite EX for reported numbers | Agreement under 98% |
 | 0009 | SFT data from gold SQL only; no frontier-model outputs | - |

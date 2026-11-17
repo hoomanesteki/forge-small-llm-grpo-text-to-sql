@@ -61,8 +61,9 @@ If the GPU kernel fails in its first 10 minutes, stop, read the log and reproduc
 before pushing again (plan section 5.3). The report says which stage failed and why.
 
 The 4-bit question is answered, so no second push is needed: `vllm:Qwen/Qwen3-8B:bnb`
-failed at once, since vLLM 0.33.0 has no bitsandbytes (question 4). FG-398 moves FG-307's
-reference to an AWQ checkpoint, which the reference's own run is the first to try on a T4.
+failed at once, since vLLM 0.33.0 has no bitsandbytes (question 4). FG-398 moved FG-307's
+reference to an AWQ checkpoint, which the reference's val run of 2026-11-17 was the first
+to load on a T4, and it did (ADR-0012).
 
 ## What the spike script measures
 
@@ -342,8 +343,9 @@ runs push`, first done for the 50-question run (`docs/runbook.md`, Run store).
   the quantizations vLLM runs on Turing. That holds for the vLLM 0.11.2 in Unsloth's
   stack, which loaded 4-bit weights in the same session (`'load_format': 'bitsandbytes'`
   in its log), and not for 0.33.0. The 8B's weights were downloaded (16.4 GB in 80.2 s,
-  `download:Qwen/Qwen3-8B`) and never loaded. AWQ is on 0.33.0's list, and FG-398 moves
-  FG-307's reference to the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`; no run has tried it on a T4.
+  `download:Qwen/Qwen3-8B`) and never loaded. AWQ is on 0.33.0's list, and FG-398 moved
+  FG-307's reference to the AWQ checkpoint `Qwen/Qwen3-8B-AWQ`, which the reference's runs
+  of 2026-11-17 loaded and scored on a T4 (ADR-0012).
 
 ## 5. GRPO on the T4 with 4-bit models
 
@@ -457,6 +459,7 @@ Plan section 3.8's GPU hour budget is redone from these numbers. The throughput 
 row is its ledger row, 0.59 h. GRPO rows use the `trl` stack's median step for the model's
 size (`grpo:trl:<model>`), and evaluation rows a kernel eval job's measured setup (the
 50-question job's `status.json`, the model's download and vLLM's load) and vLLM's tokens a
-second (`vllm:<model>`). The note under the table gives each formula; SFT, the ablations
-and the reserve keep their estimates. The total is 39.34 h, within the 45 h the Phase 3
-gate allows.
+second (`vllm:<model>`). The note under the table gives each formula. The total came to
+39.34 h on 2026-11-16, with SFT, the ablations and the reserve kept as estimates. FG-307
+then worked the rows out again for the model ADR-0012 chose, and the ablations by the same
+formulas, for 40.79 h, within the 45 h the Phase 3 gate allows.

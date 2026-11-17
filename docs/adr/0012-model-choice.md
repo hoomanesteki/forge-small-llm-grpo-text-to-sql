@@ -58,8 +58,10 @@ on 2026-11-16, reading metadata only, and checks them again whenever it is run:
 5. If no candidate is eligible, nothing is chosen: the rule has no answer, so the story
    stops and asks the product owner.
 
-The runs, their configs and their estimates are listed in `docs/runs/pending.yaml` and
-`docs/runbook.md` ("Baselines"), within FG-307's 3 GPU hours.
+The runs and their configs are in `docs/runbook.md` ("Baselines"), and each run is
+committed under `docs/runs/`, within FG-307's 3 GPU hours (plan section 3.8's note gives
+their ledger hours). `docs/runs/pending.yaml` listed each run, with its estimate, until it
+was committed.
 
 ## Measured
 

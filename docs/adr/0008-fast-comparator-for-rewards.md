@@ -132,6 +132,18 @@ no fault here for GRPO's reward to inherit. The reference writes `DISTINCT` more
 the candidates (the replies column), and its dev run, with the most such replies, is the
 one run that falls short on its own.
 
+The two committed runs outside the pool are not baselines. Their agreement, by
+`forge.eval.agreement.score_agreement` over each run's stored scores, as
+`test_i5_agreement_on_committed_runs` reads them:
+
+| Run | Samples | Disagree | Agreement |
+|---|---:|---:|---:|
+| 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7 (FG-291's pilot on the laptop, ADR-0016) | 872 | 5 | 99.43% |
+| 2026-11-16-smoke-kaggle-50-val-c8f4b41 (FG-303's 50-question job) | 50 | 0 | 100.00% |
+
+The pilot's report says the same: "The checkers disagree on 5 samples: only fast EX
+matches 3, and only official EX 2."
+
 The product owner's decision, on these numbers:
 
 - I5 is plan section 4's "fast comparator agreement with the official evaluator is ≥ 98%

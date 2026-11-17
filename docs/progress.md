@@ -673,6 +673,7 @@ Work discovered along the way that is not a plan story.
 - Plan sections 3.12 and 3.13 still name Unsloth as the GPU trainer. ADR-0006 makes TRL the default
   once FG-301's numbers confirm it; update both rows then (FG-301). ADR-0006 was accepted on
   2026-11-16, and the rows change at Gate 3, as the note on sections 3.12 and 3.13 below says.
+  Gate 3 changed them on 2026-11-17.
 - The spike's session-limit probe is a CPU kernel killed by its own `-t 900` timeout, so it spends no
   GPU quota. That it behaves like the 12-hour cut is an assumption the run can't prove (FG-301).
 - kaggle 2.2.5's `datasets create` and `version` print a refused upload, such as a slug already in
@@ -932,7 +933,7 @@ Work discovered along the way that is not a plan story.
   skipped, as `test_phase3_kaggle_eval_job_rebuilds` does (FG-303).
 - Plan sections 3.12 and 3.13 still give Python 3.11 or 3.12 and Unsloth for GPU training,
   against the measured Python 3.13.16 image and ADR-0006's TRL stack; they change at Gate 3
-  (FG-301).
+  (FG-301). Gate 3 changed them on 2026-11-17 (`docs/gates/phase-3.md`).
 - The Hub counts `Qwen/Qwen3-8B-AWQ`'s safetensors parameters as 8,190,735,360, the same
   as `Qwen/Qwen3-8B`'s, its packed 4-bit weights as 6,945,767,424 I32 values beside
   1,244,967,936 BF16 ones, so `params` in `configs/models.yaml` can't tell a checkpoint from
@@ -975,7 +976,7 @@ Work discovered along the way that is not a plan story.
   run; `test_models_config.py` counts them as such. A later story can delete them with the
   `pick` handling in `docs/runs/pending.yaml`'s header (FG-307).
 - A kernel's pip install of `requirements-gpu.txt` took from 247.7 s (the p2 run) to 446.4 s
-  (Qwen3-1.7B's) over the eight eval jobs committed so far (each `status.json`), where section
+  (Qwen3-1.7B's) over the nine kernel eval jobs committed (each `status.json`), where section
   3.8's eval formula takes the 50-question job's 391.6 s (FG-307).
 - The reference's dev run missed I5 as `test_i5_agreement_on_committed_runs` first read it,
   run by run: its report's checkers disagree on 25 of its 1,034 samples (only fast EX matches
