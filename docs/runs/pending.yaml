@@ -5,26 +5,4 @@
 # tests/integration/test_artifacts.py skips a story's run checks only while the story has
 # an entry here. An entry whose run was made, with its ledger row, but can't be committed
 # yet names it in run_id.
-pending:
-  - story: FG-307
-    run: reference-dev
-    run_id: 2026-11-17-qwen3-8b-awq-dev-d2d6a3a
-    platform: kaggle
-    accelerator: NvidiaTeslaT4
-    configs:
-      - configs/eval/qwen3-8b-dev.yaml
-    est_gpu_hours: 0.5
-    status: blocked
-    since: 2026-11-17
-    blocked_on:
-      - the product owner's decision on I5 for this run. It ran from d2d6a3a on 2026-11-17
-        as dev look 2 (docs/dev-usage.md), and its ledger row is in, but its report says
-        "The checkers disagree on 25 samples" of its 1,034, more than the 2% that
-        tests/integration/test_invariants.py::test_i5_agreement_on_committed_runs allows
-        each committed run (I5, plan section 4), so committing it fails that test, which
-        CONTRIBUTING rule 3 keeps as it is. Until then the run stays in runs/<run_id>/,
-        as forge runs pull --store kaggle left it
-    how: docs/runbook.md, "Baselines", step 5, whose run is made, so render its report and copy it
-    fills:
-      - docs/runs/<run_id>/, the run whole with its report rendered on the laptop
-      - docs/adr/0012-model-choice.md, the reference's dev EX in its Measured section
+pending: []

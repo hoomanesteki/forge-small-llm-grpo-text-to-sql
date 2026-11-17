@@ -403,9 +403,9 @@ def test_baseline_adrs_quote_the_reports() -> None:
             assert first == (prompt if names == "prompt" else f"`{model}`"), line
             assert quoted == rates[: len(quoted)], line
             rows += 1
-    # p1 and p2 in ADR-0007; the candidates, the reference on val and the chosen model on
-    # dev in ADR-0012.
-    assert rows == 7
+    # p1 and p2 in ADR-0007; the candidates, the reference on val, and the chosen model and
+    # the reference on dev in ADR-0012.
+    assert rows == 8
     # ADR-0012's I5 lines, each after a link to the report it is quoted from, are that
     # report's own.
     i5 = re.findall(
@@ -413,7 +413,7 @@ def test_baseline_adrs_quote_the_reports() -> None:
         _adr("0012-model-choice"),
         flags=re.MULTILINE,
     )
-    assert len(i5) == 5
+    assert len(i5) == 6
     for run_id, report_name, line in i5:
         report = (RUNS / run_id / "eval" / report_name).read_text(encoding="utf-8")
         assert f"\n{line}\n" in report, line

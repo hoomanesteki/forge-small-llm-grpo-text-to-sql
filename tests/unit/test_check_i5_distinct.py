@@ -24,6 +24,19 @@ from forge.eval.runner import run_eval
 from forge.infer.base import FakeBackend
 from forge.sql.sandbox import SandboxPool
 
+ROOT = Path(__file__).resolve().parents[2]
+RUNS = ROOT / "docs" / "runs"
+# FG-307's baselines (ADR-0012), whose disagreements ADR-0008's note of 2026-11-17 settles.
+FG307_RUNS = (
+    "2026-11-16-qwen3-1-7b-val-c8f4b41",
+    "2026-11-16-qwen3-4b-val-c8f4b41",
+    "2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41",
+    "2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41",
+    "2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41",
+    "2026-11-17-qwen3-8b-awq-val-2f77281",
+    "2026-11-17-qwen2-5-coder-1-5b-dev-2f77281",
+    "2026-11-17-qwen3-8b-awq-dev-d2d6a3a",
+)
 # Replies the two checkers read differently, on the fixture's val questions; every other
 # question gets its gold query. Gold is the one origin with the most flights, and only
 # fast EX matches the one origin with DISTINCT, which the evaluator drops to give eight
@@ -107,3 +120,18 @@ def test_replies_with_distinct_are_those_the_evaluator_rewrites() -> None:
     assert drops_distinct("select distinct name from head")
     for sql in ("SELECT 'distinct' FROM head", "SELECT 1; SELECT DISTINCT 2", None):
         assert not drops_distinct(sql), sql
+
+
+@pytest.mark.phase(3)
+@pytest.mark.requires_full_data
+def test_adr_0008_quotes_the_check_on_fg307s_runs(capsys: pytest.CaptureFixture[str]) -> None:
+    # The I5 decision rests on the script's output on the committed runs, never typed by
+    # hand, and none of their disagreements outlasts DISTINCT kept.
+    assert main([str(RUNS / run) for run in FG307_RUNS]) == 0
+    printed = capsys.readouterr().out
+    adr = (ROOT / "docs" / "adr" / "0008-fast-comparator-for-rewards.md").read_text(
+        encoding="utf-8"
+    )
+    assert printed in adr.split("\n## Notes\n", 1)[1]
+    assert f"\n| {len(FG307_RUNS)} runs pooled | " in printed
+    assert "\nDisagreements that remain with DISTINCT kept:\n- none\n" in printed
