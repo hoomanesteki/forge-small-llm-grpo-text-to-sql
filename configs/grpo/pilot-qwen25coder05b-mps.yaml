@@ -9,9 +9,9 @@
 #     --grpo-dir docs/runs/grpo
 #
 # The watermarks are the SFT pilot's (configs/sft/pilot-qwen25coder05b-mps.yaml); they
-# change no number the run computes. Before the run no virtual machine was running,
-# memory_pressure put free memory at 62% and 5.0 of the 6.0 GB of swap held older pages,
-# which left room for the probe's batch and completion length, so they stay as probed.
+# change no number the run computes. Before the run no virtual machine was running, and
+# memory_pressure put free memory at 61%, with 5.3 of the 6.0 GB of swap holding older
+# pages: the cap, not the laptop, set the batch below, and the completion length stays.
 run:
   kind: grpo
   model_ref: Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25
@@ -36,21 +36,24 @@ grpo:
   # The first 40% of steps draw from easy and medium questions alone (plan FG-505).
   curriculum: {share: 0.4, hardness: [easy, medium]}
   # 8 completions a step, 2 prompts with 4 replies each: TRL generates all 8 at once and
-  # trains on them 2 at a time. A first probe that trained on 4 at a time ran out of the
-  # 5.33 GiB the watermark allows at its step 8, in the backward pass of TRL's chunked
-  # log-probabilities; 2 at a time fit.
+  # trains on them one at a time, since two at a time didn't fit the 5.33 GiB the high
+  # watermark allows. A first probe on every GRPO row, 4 at a time, ran out of it at its
+  # step 8, in the backward pass of TRL's chunked log-probabilities; a second, 2 at a time,
+  # ran its 10 steps at 31.6 s a step, but the first start of this run, at a23607a, 2 at a
+  # time on the filter's rows, ran out of it at step 24 in the same place (5.08 GiB held,
+  # 328 MiB asked for). Its folder was removed and the run made again from the next commit.
   num_generations: 4
   max_prompt_length: 1536
   max_completion_length: 128
   learning_rate: 5.0e-6
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 4
-  # The timing probe: 10 steps of these settings from the same adapter, on every GRPO row
-  # before the filter existed, with an in-training eval at its last step, took 31.6 s a
-  # step (14.0 to 83.9 s) and 193 s for the eval of 200 val questions. At that pace 250
-  # steps with an eval every 50 take 250 x 31.6 + 5 x 193 = 8,865 s, about 2.5 h, inside
-  # the 2 to 3 h the pilot may take (FG-591).
-  max_steps: 250
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  # The timing probe: 10 steps of these settings from the same adapter on the filter's rows,
+  # with an in-training eval at its last step, took 20.2 s a step (11.7 to 40.5 s) and 115 s
+  # for the eval of 200 val questions. At that pace 350 steps with an eval every 50 take
+  # 350 x 20.2 + 7 x 115 = 7,875 s, about 2.2 h: inside the 2 to 3 h the pilot may take,
+  # with room for steps that run as slow as the second probe's (FG-591).
+  max_steps: 350
   beta: library_default
   # Each in-training eval falls on a checkpoint, so its EX is that checkpoint's.
   eval_every: 50
@@ -62,8 +65,9 @@ rewards:
   guards: {non_select: -1.0, multiple_statements: -0.5, constant_query: -0.5, comment_payload: -0.2}
 ops:
   checkpoint_every: 50
-  # Every checkpoint stays: steps 50 to 200 beside checkpoints/final, step 250, so the one
-  # with the best in-training val EX can be scored on all of val.
-  keep_checkpoints_at: [0.2, 0.4, 0.6, 0.8]
+  # Every checkpoint stays: steps 50 to 300 beside checkpoints/final, step 350, so the one
+  # with the best in-training val EX can be scored on all of val. Each share is a little
+  # over k/7, so that its step, rounded down, is the checkpoint's.
+  keep_checkpoints_at: [0.143, 0.286, 0.429, 0.572, 0.715, 0.858]
   # Not a Kaggle budget: what the probe puts the run at.
-  est_gpu_hours: 2.5
+  est_gpu_hours: 2.2

@@ -554,10 +554,10 @@ def test_grpo_pilot_config_is_sized_by_its_probe() -> None:
     assert grpo.curriculum is not None
     assert (grpo.curriculum.share, grpo.curriculum.hardness) == (0.4, ("easy", "medium"))
     # The story's shape: 4 replies of at most 128 tokens a prompt, at ADR-0011's learning
-    # rate and rewards, 2 prompts a step and 2 completions a micro-batch, as probed.
+    # rate and rewards, 2 prompts a step and 1 completion a micro-batch, as probed.
     assert (grpo.num_generations, grpo.max_completion_length) == (4, 128)
     assert (grpo.learning_rate, config.rewards) == (5e-6, RewardsConfig())
-    assert (grpo.per_device_train_batch_size, grpo.gradient_accumulation_steps) == (2, 4)
+    assert (grpo.per_device_train_batch_size, grpo.gradient_accumulation_steps) == (1, 8)
     assert grpo.prompts_per_step == 2
     # A checkpoint and an in-training eval every 50 steps, and every checkpoint kept: those
     # before the last by retention, the last as checkpoints/final.
