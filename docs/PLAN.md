@@ -829,11 +829,11 @@ Write docs/gates/final-review.md, ranked by severity.
 | E07 | Kaggle and Hub operations | T3 | 3 | 22 |
 | E08 | Baselines and model choice | T2 | 3 | 3 |
 | E09 | Supervised fine-tuning | T4 | 4 | 19 |
-| E10 | Rewards and GRPO | T4 | 5 | 30 |
+| E10 | Rewards and GRPO | T4 | 5 | 33 |
 | E11 | Integrity, audit and ablations | T5 | 6 | 21 |
 | E12 | Packaging and demo | T6 | 7 | 16 |
 | E13 | Results and release | T6 | 8 | 11 |
-| | **Total** | | | **196** |
+| | **Total** | | | **199** |
 
 ### 6.3 Phase summary
 
@@ -844,11 +844,11 @@ Write docs/gates/final-review.md, ranked by severity.
 | 2 | Evaluation harness | 8 | 28 | 0 | v0.2.0 | `make smoke` runs the whole eval pipeline on CPU and renders a report |
 | 3 | Free-GPU ops and baselines | 7 | 25 | 4.5 | v0.3.0 | One command runs a GPU eval on Kaggle and pulls the report; model chosen |
 | 4 | Supervised fine-tuning | 6 | 19 | 4.5 | v0.4.0 | SFT adapter beats base on val |
-| 5 | Rewards and GRPO | 8 | 30 | 17.5 | v0.5.0 | GRPO adapter beats SFT on val; dev evaluated once |
+| 5 | Rewards and GRPO | 9 | 33 | 17.5 | v0.5.0 | GRPO adapter beats SFT on val; dev evaluated once |
 | 6 | Integrity and ablations | 6 | 21 | 11 | v0.6.0 | Audit report with 3+ hacks fixed; ablation table |
 | 7 | Packaging and demo | 5 | 16 | 0 | v0.7.0 | `ollama run forge-sql` answers locally; public Space works |
 | 8 | Results and release | 4 | 11 | 0 | v1.0.0 | Results page from manifests; fresh-clone smoke passes |
-| | **Total** | **58** | **196** | **about 37.5 + 6 reserve** | | |
+| | **Total** | **59** | **199** | **about 37.5 + 6 reserve** | | |
 
 Velocity assumption: about 12 to 18 points per working day, plus waiting for GPU runs, so about 3 to 4 weeks part-time. GPU phases overlap with CPU work on the next phase's stories while runs are going.
 
@@ -875,7 +875,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 **Demo at the end.**
 - CI is green on a PR to `dev`.
 - `uv run forge doctor` prints a table with Python, uv, Kaggle auth, Hugging Face auth, the run store repo and free disk space, all OK.
-- `scripts/import_backlog.py --dry-run` lists 58 stories and 196 points.
+- `scripts/import_backlog.py --dry-run` lists 59 stories and 199 points.
 - `uv run forge ledger summary` shows 0 GPU hours and $0.
 
 **Entry criteria.** A GitHub account with `gh` authenticated, `uv` installed, and Docker not required.
@@ -958,7 +958,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
   - `scripts/import_backlog.py`: creates milestones, labels and one issue per story. Idempotent by story ID. Options `--dry-run` and `--phase`.
   - `scripts/check_story_tests.py --phase N`: confirms each named test exists, using `ast` for Python.
 - **Acceptance criteria:**
-  - [ ] The dry run shows 58 stories, 196 points, 9 phases, and 11 stories labeled GPU.
+  - [ ] The dry run shows 59 stories, 199 points, 9 phases, and 11 stories labeled GPU.
   - [ ] A second import run creates nothing new.
 - **Tests:** `tests/unit/test_plan_parser.py::test_parses_story_blocks`, `tests/unit/test_plan_parser.py::test_totals_match_plan`, `tests/unit/test_check_story_tests.py::test_reports_missing_test`
 - **Files:** `scripts/plan_parser.py`, `scripts/import_backlog.py`, `scripts/check_story_tests.py`
@@ -1704,6 +1704,7 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
 | FG-506 | Training telemetry and alerts | E10 | 3 |
 | FG-507 | GRPO runs on Kaggle | E10 | 5 |
 | FG-508 | Checkpoint selection and dev evaluation | E10 | 3 |
+| FG-591 | Local GRPO pilot on Apple silicon | E10 | 3 |
 
 #### FG-501 · Reward functions
 - **Epic:** E10 · **Points:** 5 · **Branch:** `feat/fg-501-rewards` · **Depends on:** FG-108, FG-402
@@ -1862,6 +1863,23 @@ Stories marked **GPU job** push work to Kaggle and must follow the GPU job rules
   - [ ] M1 and M2 are evaluated, pass or fail.
 - **Tests:** `tests/integration/test_artifacts.py::test_phase5_dev_reports_present`, `tests/integration/test_invariants.py::test_dev_usage_within_budget`
 - **Files:** `docs/runs/**`
+
+#### FG-591 · Local GRPO pilot on Apple silicon
+- **Epic:** E10 · **Points:** 3 · **Branch:** `exp/fg-591-local-pilot-grpo` · **Depends on:** FG-505, FG-506, FG-491
+- **Story:** As the product owner, with the Kaggle and Hugging Face accounts still pending, I want the pilot model trained for real with GRPO on the laptop's GPU from its FG-491 SFT adapter and scored on val beside its base and SFT runs, so the GRPO path meets a real model, real rewards and real telemetry before any GPU hour is spent.
+- **Build:** a found story; its runs are pilots, as ADR-0016 decides:
+  - The filter eval (FG-505): the FG-491 adapter, greedy, on the first 3,000 train questions, with FG-291's eval config and `--split train --limit 3000 --adapter`; `forge data build-grpo --out docs/runs/grpo` keeps its rows beside the runs, where `forge train grpo --grpo-dir docs/runs/grpo` reads them.
+  - `configs/grpo/pilot-qwen25coder05b-mps.yaml` trains `configs/models.yaml`'s `pilot` at its commit on `mps` from the FG-491 adapter, on those rows with FG-505's curriculum, at ADR-0011's learning rate and rewards, with 4 generations of at most 128 tokens a prompt and a batch that fits the laptop's memory. A checkpoint and an in-training val eval come every 50 steps, and each checkpoint stays. A 10-step timing probe sets `max_steps` so the run takes about 2 to 3 h, and the file records the probe and the choice.
+  - Train from a clean commit in the background, with telemetry. Evaluate the checkpoint with the best in-training val EX, the latest of a tie, on the full val split with FG-291's eval config and `--adapter`; write its report and `forge report compare` against the FG-291 base run and the FG-491 SFT run (base against SFT is FG-491's). `forge runs plot` draws the training metrics.
+  - Commit the filter eval run whole, the GRPO run without its weights (manifest, config, sessions, metrics, alerts, samples and plots) and the adapter's val run whole, each with a `local-mps` ledger row from its manifest. `docs/notes/grpo-run-log.md` says what the pilot did and found, citing only report numbers, or exactly what failed if MPS can't run GRPO; no result is made up. Pilot numbers are val only; FG-507 still trains the Kaggle runs.
+- **Acceptance criteria:**
+  - [ ] The pilot GRPO config trains the pinned pilot model on `mps` from the FG-491 adapter, on the filter's rows, at ADR-0011's learning rate and rewards, and records its timing probe and the `max_steps` it chose.
+  - [ ] The filter eval is committed whole: the FG-491 adapter on the first 3,000 train questions, greedy, `local-mps`, with a ledger row, and the rows it picked are the ones the GRPO run's manifest hashes.
+  - [ ] The GRPO run is committed without weights: finished, `local-mps`, made from the clean commit its id ends with, from the FG-491 adapter, on the train rows its manifest hashes, with a metrics line every step, in-training val EX at every checkpoint, sample dumps, plots and a `local-mps` ledger row.
+  - [ ] The adapter's val run is committed whole: FG-291's settings plus the checkpoint with the best in-training val EX, every val question once, `local-mps`, a ledger row, and a report and comparisons with the base and SFT pilots that rebuild from their files, every number of the report traced (I4).
+  - [ ] The notes cite only report numbers.
+- **Tests:** `tests/unit/test_train_config.py::test_grpo_pilot_config_is_sized_by_its_probe`, `tests/integration/test_artifacts.py::test_grpo_pilot_filter_eval_is_committed_whole`, `tests/integration/test_artifacts.py::test_grpo_pilot_run_is_committed_without_weights`, `tests/integration/test_artifacts.py::test_grpo_pilot_trained_on_the_rows_it_names`, `tests/integration/test_artifacts.py::test_grpo_pilot_adapter_run_is_committed_whole`, `tests/integration/test_artifacts.py::test_grpo_pilot_reports_rebuild_and_trace_to_their_files`, `tests/integration/test_artifacts.py::test_grpo_notes_cite_only_report_numbers`
+- **Files:** `configs/grpo/pilot-qwen25coder05b-mps.yaml`, `docs/runs/**`, `docs/notes/grpo-run-log.md`
 
 ### Integration checkpoint 5
 - `make gate PHASE=5`: all CPU tests, I1 to I7, and `make smoke` (eval, SFT, GRPO, eval).
@@ -2316,7 +2334,7 @@ Gap closed (M3) = (GRPO − base) / (reference − base).
 | Base model already near ceiling (contamination) | Medium | Medium | Model choice requires headroom; BIRD OOD check; claim relative uplift |
 | Reward hacking slips through | Medium | High | Adversarial tests, audit detectors, official-evaluator agreement on rewarded samples |
 | A token leaks through a notebook or log | Low | High | Secrets only via Kaggle Secrets or env; doctor canary test; gitleaks; never print env |
-| Executor drift across 58 stories | Medium | Medium | Contract-drift check at each gate; small stories; CONTRIBUTING.md rules |
+| Executor drift across 59 stories | Medium | Medium | Contract-drift check at each gate; small stories; CONTRIBUTING.md rules |
 
 ### 9.2 Assumptions
 
