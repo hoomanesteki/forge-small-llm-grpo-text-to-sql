@@ -1,15 +1,17 @@
 # The local GRPO pilot on Apple silicon's GPU (ADR-0016, FG-591): configs/models.yaml's
-# pilot from the adapter of the FG-491 SFT pilot, trained on train rows only, with its
-# in-training eval on val. The run says local-mps, and its numbers are a pilot's, on val
-# only.
+# pilot from the adapter of the FG-491 SFT pilot, trained on the train rows its filter
+# eval picked, with its in-training eval on val. The run says local-mps, and its numbers
+# are a pilot's, on val only.
 #
 #   FORGE_DATA_DIR=data/spider PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.45 \
 #     PYTORCH_MPS_LOW_WATERMARK_RATIO=0.35 \
-#     uv run forge train grpo --config configs/grpo/pilot-qwen25coder05b-mps.yaml
+#     uv run forge train grpo --config configs/grpo/pilot-qwen25coder05b-mps.yaml \
+#     --grpo-dir docs/runs/grpo
 #
-# The watermarks are the SFT pilot's (configs/sft/pilot-qwen25coder05b-mps.yaml). These are
-# starting values: FG-591 fits the batch and the completion length to the memory the
-# laptop has free before its run, and records here what it changed.
+# The watermarks are the SFT pilot's (configs/sft/pilot-qwen25coder05b-mps.yaml); they
+# change no number the run computes. Before the run no virtual machine was running,
+# memory_pressure put free memory at 62% and 5.0 of the 6.0 GB of swap held older pages,
+# which left room for the probe's batch and completion length, so they stay as probed.
 run:
   kind: grpo
   model_ref: Qwen/Qwen2.5-Coder-0.5B-Instruct@ea3f2471cf1b1f0db85067f1ef93848e38e88c25
@@ -28,17 +30,40 @@ grpo:
   # checkpoint, so it has no checkpoints/best. Its folder goes in runs/ whole, with its
   # manifest.
   init_adapter: runs/2026-11-16-qwen2-5-coder-0-5b-instruct-sft-db0d8d8/checkpoints/final
-  # 8 completions a step: 2 prompts with 4 replies each, for the laptop's memory.
+  # That adapter's greedy replies to the first 3,000 train questions (FG-505), whose rows
+  # forge data build-grpo kept in docs/runs/grpo/<this id>/.
+  filter_from: 2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde
+  # The first 40% of steps draw from easy and medium questions alone (plan FG-505).
+  curriculum: {share: 0.4, hardness: [easy, medium]}
+  # 8 completions a step, 2 prompts with 4 replies each: TRL generates all 8 at once and
+  # trains on them 2 at a time. A first probe that trained on 4 at a time ran out of the
+  # 5.33 GiB the watermark allows at its step 8, in the backward pass of TRL's chunked
+  # log-probabilities; 2 at a time fit.
   num_generations: 4
   max_prompt_length: 1536
   max_completion_length: 128
   learning_rate: 5.0e-6
-  per_device_train_batch_size: 4
-  gradient_accumulation_steps: 2
-  max_steps: 100
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 4
+  # The timing probe: 10 steps of these settings from the same adapter, on every GRPO row
+  # before the filter existed, with an in-training eval at its last step, took 31.6 s a
+  # step (14.0 to 83.9 s) and 193 s for the eval of 200 val questions. At that pace 250
+  # steps with an eval every 50 take 250 x 31.6 + 5 x 193 = 8,865 s, about 2.5 h, inside
+  # the 2 to 3 h the pilot may take (FG-591).
+  max_steps: 250
   beta: library_default
-  # The main run's curriculum (plan FG-505), on every train row: no filter eval here.
-  curriculum: {share: 0.4, hardness: [easy, medium]}
-  eval_every: 25
+  # Each in-training eval falls on a checkpoint, so its EX is that checkpoint's.
+  eval_every: 50
+  eval_examples: 200
+rewards:
+  execution: 1.0
+  validity: 0.1
+  format: 0.05
+  guards: {non_select: -1.0, multiple_statements: -0.5, constant_query: -0.5, comment_payload: -0.2}
 ops:
-  checkpoint_every: 25
+  checkpoint_every: 50
+  # Every checkpoint stays: steps 50 to 200 beside checkpoints/final, step 250, so the one
+  # with the best in-training val EX can be scored on all of val.
+  keep_checkpoints_at: [0.2, 0.4, 0.6, 0.8]
+  # Not a Kaggle budget: what the probe puts the run at.
+  est_gpu_hours: 2.5

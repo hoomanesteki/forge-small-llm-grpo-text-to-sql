@@ -531,3 +531,50 @@ def test_grpo_configs_start_from_adr_0011() -> None:
     evals = range(main.grpo.eval_every or 0, main.grpo.max_steps, main.grpo.eval_every or 1)
     kept = kept_steps(main.ops.keep_checkpoints_at, main.grpo.max_steps)
     assert sorted(kept.values()) == list(evals) == [100, 200, 300, 400, 500]
+
+
+# What the pilot's comment says of its timing probe, and the estimate it makes of it.
+_PROBE = re.compile(
+    r"10 steps of these settings .*? took (?P<step>\d+\.\d) s a step .*? and (?P<eval>\d+) s "
+    r"for the eval of (?P<asked>\d+) val questions\. At that pace (?P<steps>\d+) steps with an "
+    r"eval every (?P<every>\d+) take (?P=steps) x (?P=step) \+ (?P<evals>\d+) x (?P=eval) = "
+    r"(?P<total>[\d,]+) s, about (?P<hours>\d+\.\d) h"
+)
+
+
+@pytest.mark.phase(5)
+def test_grpo_pilot_config_is_sized_by_its_probe() -> None:
+    path = ROOT / "configs" / "grpo" / LOCAL_PILOT
+    config = load_train_config(path)
+    grpo = config.grpo
+    assert grpo is not None
+    # On the filter's rows: an eval run's id, made from a commit, in FG-505's curriculum.
+    assert grpo.filter_from is not None
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}-[a-z0-9-]+-eval-[0-9a-f]{7}", grpo.filter_from)
+    assert grpo.curriculum is not None
+    assert (grpo.curriculum.share, grpo.curriculum.hardness) == (0.4, ("easy", "medium"))
+    # The story's shape: 4 replies of at most 128 tokens a prompt, at ADR-0011's learning
+    # rate and rewards, 2 prompts a step and 2 completions a micro-batch, as probed.
+    assert (grpo.num_generations, grpo.max_completion_length) == (4, 128)
+    assert (grpo.learning_rate, config.rewards) == (5e-6, RewardsConfig())
+    assert (grpo.per_device_train_batch_size, grpo.gradient_accumulation_steps) == (2, 4)
+    assert grpo.prompts_per_step == 2
+    # A checkpoint and an in-training eval every 50 steps, and every checkpoint kept: those
+    # before the last by retention, the last as checkpoints/final.
+    assert grpo.eval_every == config.ops.checkpoint_every == 50
+    kept = kept_steps(config.ops.keep_checkpoints_at, grpo.max_steps)
+    assert sorted(kept.values()) == list(range(50, grpo.max_steps, 50))
+    assert grpo.max_steps % grpo.eval_every == 0
+
+    # The file records the probe, and max_steps is what its pace puts at 2 to 3 h.
+    text = " ".join(line.strip().lstrip("# ") for line in path.read_text().splitlines())
+    found = _PROBE.search(text)
+    assert found is not None, "the config records no timing probe"
+    step, evaluation = float(found["step"]), int(found["eval"])
+    assert int(found["asked"]) == grpo.eval_examples
+    assert (int(found["steps"]), int(found["every"])) == (grpo.max_steps, grpo.eval_every)
+    assert int(found["evals"]) == grpo.max_steps // grpo.eval_every
+    seconds = grpo.max_steps * step + int(found["evals"]) * evaluation
+    assert int(found["total"].replace(",", "")) == round(seconds)
+    assert 2 * 3600 <= seconds <= 3 * 3600
+    assert float(found["hours"]) == config.ops.est_gpu_hours == round(seconds / 3600, 1)

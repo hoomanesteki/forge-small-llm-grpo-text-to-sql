@@ -478,6 +478,10 @@ def test_grpo_configs_take_the_curriculum() -> None:
     for path in sorted(root.glob("*.yaml")):
         grpo = load_train_config(path).grpo
         assert grpo is not None and grpo.curriculum == CurriculumConfig(), path.name
-        # Only the main run filters, by the eval FG-507 makes and names here.
-        expected = "<filter-eval-run-id>" if path.name == "qwen3-4b-main.yaml" else None
-        assert grpo.filter_from == expected, path.name
+        # The main run filters by the eval FG-507 makes and names here, and the local pilot
+        # by FG-591's, committed under docs/runs; the others train on every row.
+        filters = {
+            "qwen3-4b-main.yaml": "<filter-eval-run-id>",
+            "pilot-qwen25coder05b-mps.yaml": "2026-11-17-qwen2-5-coder-0-5b-instruct-eval-a27afde",
+        }
+        assert grpo.filter_from == filters.get(path.name), path.name
