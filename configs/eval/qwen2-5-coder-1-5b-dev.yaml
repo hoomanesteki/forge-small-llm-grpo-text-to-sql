@@ -1,0 +1,15 @@
+# FG-307 baseline on Spider dev, for the chosen model only, which ADR-0012 names: one of
+# the six dev looks, pushed with --reason baseline, which logs it (ADR-0004, docs/runbook.md
+# "Baselines"). The model is configs/models.yaml's candidates.qwen2-5-coder-1-5b, pinned to
+# the same commit. The prompt is p2, which ADR-0007 fixed for every later phase from the
+# p1 and p2 val runs: the trained model's dev evaluation uses it, so its baseline must too.
+model: Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a
+backend: vllm
+split: dev
+limit: null
+prompt_version: p2
+n: 1
+temperature: 0.0
+retry: 0
+ops:
+  est_gpu_hours: 0.35

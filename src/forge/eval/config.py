@@ -6,12 +6,25 @@ written. ``manifest_config`` is what a run's manifest records and hashes: every 
 that can change a score, the sandbox and official-EX bounds among them (ADR-0008), so a
 resumed run has to match it exactly. That includes the device, since greedy decoding on
 another device can pick another token where two are nearly tied; the manifest's platform
-follows it (ADR-0016). ``read_config_file`` reads the options a file in ``configs/eval/``
-sets, which ``forge eval run --config`` takes as its defaults.
+follows it (ADR-0016). The hf backend runs on the laptop, and vllm only in a kernel job,
+whose host is the platform; its device stays the default, as for the fake backend, since
+the option says where hf runs. ``read_config_file`` reads the options a file in
+``configs/eval/`` sets, which ``forge eval run --config`` takes as its defaults. A file may
+also hold an ``ops`` section saying how a job is run rather than what it computes, such as
+the GPU hours ``forge kaggle run`` budgets for it; ``read_config_sections`` returns it
+apart. ``quantization`` loads a vllm model's 4-bit weights from an AWQ checkpoint, for a
+reference model too big for a T4 in fp16 (plan section 3.13, FG-307, FG-398); bitsandbytes,
+which vLLM 0.33.0 doesn't have, is refused with why. The manifest records it, as it changes
+the scores, but only when set, so a run made before the option keeps its config hash.
+``gpu_memory_utilization`` is the share of the GPU's memory vllm's engine takes, the
+backend's default when unset; the manifest records it the same way, as the memory left for
+the KV cache sets how many requests vLLM batches together, and a batch can change which
+token fp16 rounding picks where two nearly tie.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,6 +40,7 @@ from forge.data.splits import SPLITS
 from forge.eval.agreement import GOLD_TIMEOUT_MS
 from forge.eval.gold_cache import MAX_ROWS
 from forge.infer.base import check_params
+from forge.infer.vllm_backend import check_quantization
 from forge.ops.manifest import Platform
 from forge.sql.executor import DEFAULT_TIMEOUT_MS
 
@@ -34,14 +48,21 @@ Backend = Literal["hf", "vllm", "llamacpp", "fake"]
 # Where the hf backend runs the model: the CPU, or Apple silicon's GPU through MPS.
 Device = Literal["cpu", "mps"]
 Store = Literal["local", "hub"]
+# The hosted machines a kernel job runs on: kaggle/entry.py names the one it is on.
+Host = Literal["kaggle", "colab"]
+# How vllm may load weights in fewer bits: an AWQ checkpoint's 4-bit, as
+# forge.infer.vllm_backend allows, and nothing else.
+Quantization = Literal["awq"]
 BACKENDS: tuple[Backend, ...] = get_args(Backend)
 DEVICES: tuple[Device, ...] = get_args(Device)
 STORES: tuple[Store, ...] = get_args(Store)
+HOSTS: tuple[Host, ...] = get_args(Host)
+QUANTIZATIONS: tuple[Quantization, ...] = get_args(Quantization)
 # The fake backend's models: one answers with each question's gold query, the other
 # always with SELECT 1. Tests build other fakes with FakeBackend(fn).
 FAKE_MODELS = ("gold", "select-1")
 # Backends that later stories build, with the story that brings each.
-LATER_BACKENDS: Mapping[str, str] = {"vllm": "FG-306", "llamacpp": "FG-702"}
+LATER_BACKENDS: Mapping[str, str] = {"llamacpp": "FG-702"}
 
 PRED_TIMEOUT_MS = DEFAULT_TIMEOUT_MS
 # Spider's gold queries run in milliseconds, so 10 s is ample for an item, where the
@@ -63,13 +84,19 @@ FILE_OPTIONS: Mapping[str, str] = {
     "n": "a whole number",
     "temperature": "a number",
     "retry": "a whole number",
+    "quantization": "text",
+    "gpu_memory_utilization": "a number",
 }
 _KINDS: Mapping[str, tuple[type, ...]] = {
     "text": (str,),
     "a whole number": (int,),
     "a number": (int, float),
 }
-_NULLABLE = frozenset({"adapter", "limit"})
+_NULLABLE = frozenset({"adapter", "limit", "quantization", "gpu_memory_utilization"})
+# The key of a config file's ops section, and what that section may set. Ops change no
+# score, so they stay out of the manifest's config and out of forge eval run's options.
+OPS_SECTION = "ops"
+OPS_OPTIONS: Mapping[str, str] = {"est_gpu_hours": "a positive number"}
 
 # Run ids name folders here and in the Hub run store, so they keep to make_run_id's
 # alphabet, and nothing like "../x" can leave the runs folder.
@@ -78,6 +105,13 @@ _RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 class NotAvailable(RuntimeError):
     """An option that a later story builds."""
+
+
+@dataclass(frozen=True)
+class Ops:
+    """A config file's ops section: how a job is run, which no score depends on."""
+
+    est_gpu_hours: float | None = None  # what forge kaggle run budgets for the job
 
 
 @dataclass(frozen=True)
@@ -95,8 +129,15 @@ class EvalConfig:
     n: int = 1
     temperature: float = 0.0
     retry: int = 0
+    quantization: Quantization | None = None
+    gpu_memory_utilization: float | None = None
     run_id: str | None = None
     store: Store = "local"
+    # Set only by kaggle/entry.py, for a job in a kernel; no option or config file sets it.
+    host: Host | None = None
+    # A kernel job that forge kaggle run pushed past the week's GPU budget says so in its
+    # manifest's config, as the plan asks; a resumed run has to say it again.
+    allow_over_budget: bool = False
 
     @property
     def params(self) -> GenParams:
@@ -104,16 +145,21 @@ class EvalConfig:
 
     @property
     def platform(self) -> Platform:
-        """Where the run's model runs, as its manifest names it: a run on MPS is a
-        ``local-mps`` pilot (ADR-0016)."""
+        """Where the run's model runs, as its manifest names it: the host of a kernel job,
+        else the laptop, where a run on MPS is a ``local-mps`` pilot (ADR-0016)."""
+        if self.host is not None:
+            return self.host
         return "local-mps" if self.device == "mps" else "local-cpu"
 
     def manifest_config(self) -> dict[str, Any]:
         """What the manifest records and hashes: everything that can change a score.
 
-        The reason is in the dev usage log, and the store says only where files go.
+        The reason is in the dev usage log, and the store says only where files go. A run
+        pushed over budget has ``allow_over_budget``, a model loaded in fewer bits its
+        ``quantization``, and an engine given its share of memory its
+        ``gpu_memory_utilization``, which no other run's config holds.
         """
-        return {
+        config: dict[str, Any] = {
             "backend": self.backend,
             "device": self.device,
             "model": self.model,
@@ -131,6 +177,14 @@ class EvalConfig:
                 "official_item_timeout_s": OFFICIAL_ITEM_TIMEOUT_S,
             },
         }
+        if self.quantization is not None:
+            config["quantization"] = self.quantization
+        if self.gpu_memory_utilization is not None:
+            # A float, so a file's 1 hashes as the command line's 1.0 does.
+            config["gpu_memory_utilization"] = float(self.gpu_memory_utilization)
+        if self.allow_over_budget:
+            config["allow_over_budget"] = True
+        return config
 
 
 def check_config(config: EvalConfig) -> None:
@@ -159,6 +213,37 @@ def check_config(config: EvalConfig) -> None:
         )
     if config.store not in STORES:
         raise ValueError(f"store must be one of {', '.join(STORES)}, got {config.store!r}")
+    if config.host is not None:
+        if config.host not in HOSTS:
+            raise ValueError(f"host must be one of {', '.join(HOSTS)}, got {config.host!r}")
+        if config.device == "mps":
+            raise ValueError(f"--device mps is Apple silicon's GPU, which {config.host} has not")
+        if config.backend == "hf":
+            # HfBackend runs on the CPU or MPS, so on a T4 host it would leave the GPU idle.
+            raise ValueError(f"backend hf runs on the CPU or MPS; a job on {config.host} uses vllm")
+    elif config.allow_over_budget:
+        raise ValueError("allow_over_budget is for a kernel job: only those spend GPU budget")
+    elif config.backend == "vllm":
+        # On the laptop the manifest would call a GPU run local-cpu (ADR-0016).
+        raise ValueError(
+            "backend vllm runs on a CUDA GPU, which Forge uses in kernel jobs only: run it "
+            "with forge kaggle run --job eval"
+        )
+    if config.quantization is not None:
+        # The backend's own check, so a config is refused before a push with its reason.
+        check_quantization(config.quantization)
+        if config.backend != "vllm":
+            # hf runs on the CPU or MPS, and the AWQ kernels are vLLM's, on CUDA.
+            raise ValueError(f"quantization is for backend vllm, not {config.backend}")
+    if config.gpu_memory_utilization is not None:
+        # Negated so that NaN fails too.
+        if not 0 < config.gpu_memory_utilization <= 1:
+            raise ValueError(
+                "gpu_memory_utilization must be above 0 and at most 1, got "
+                f"{config.gpu_memory_utilization}"
+            )
+        if config.backend != "vllm":
+            raise ValueError(f"gpu_memory_utilization is for backend vllm, not {config.backend}")
     check_version(config.prompt_version)
     if config.limit is not None and config.limit < 1:
         raise ValueError(f"limit must be at least 1, got {config.limit}")
@@ -184,8 +269,6 @@ def check_config(config: EvalConfig) -> None:
             f"the {config.backend} backend is not available yet: it comes with "
             f"{LATER_BACKENDS[config.backend]}"
         )
-    if config.store == "hub":
-        raise NotAvailable("--store hub is available after FG-304 (Hub run store)")
 
 
 def check_run_id(run_id: str) -> None:
@@ -200,9 +283,19 @@ def check_run_id(run_id: str) -> None:
 def read_config_file(path: Path) -> dict[str, Any]:
     """The options the eval config file at ``path`` sets, by option name.
 
+    Its ops section is checked, then left out: it says how a job is run, which
+    ``forge eval run`` doesn't need. Raises as ``read_config_sections`` does.
+    """
+    return read_config_sections(path)[0]
+
+
+def read_config_sections(path: Path) -> tuple[dict[str, Any], Ops]:
+    """The eval options the config file at ``path`` sets, by option name, and its ops.
+
     Raises ``OSError`` when the file can't be read, and ``ValueError`` unless it is a YAML
-    mapping of ``FILE_OPTIONS`` to values of their kinds. Whether a value is one its option
-    takes, such as a known backend, is checked as for the command line's.
+    mapping of ``FILE_OPTIONS`` to values of their kinds, with at most an ``ops`` mapping
+    of ``OPS_OPTIONS`` besides. Whether a value is one its option takes, such as a known
+    backend, is checked as for the command line's.
     """
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -210,18 +303,45 @@ def read_config_file(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path} is not valid YAML: {exc}") from exc
     if not isinstance(loaded, dict):
         raise ValueError(f"{path} must be a mapping of options, such as 'model: org/name'")
-    unknown = sorted(str(name) for name in loaded if name not in FILE_OPTIONS)
+    options = {name: value for name, value in loaded.items() if name != OPS_SECTION}
+    unknown = sorted(str(name) for name in options if name not in FILE_OPTIONS)
     if unknown:
         raise ValueError(
             f"{path} sets {', '.join(unknown)}, which a config file can't: it takes "
-            f"{', '.join(FILE_OPTIONS)}, and the run id, store and dev reason go on the "
-            "command line"
+            f"{', '.join(FILE_OPTIONS)} and an {OPS_SECTION} section, and the run id, store "
+            "and dev reason go on the command line"
         )
-    for name, value in loaded.items():
+    for name, value in options.items():
         kind = FILE_OPTIONS[name]
         if value is None and name in _NULLABLE:
             continue
         # YAML reads true and false as booleans, which Python also counts as whole numbers.
         if isinstance(value, bool) or not isinstance(value, _KINDS[kind]):
             raise ValueError(f"{path}: {name} must be {kind}, got {value!r}")
-    return dict(loaded)
+    return options, read_ops(path, loaded.get(OPS_SECTION, {}))
+
+
+def read_ops(path: Path, section: object) -> Ops:
+    """The ops section ``section`` of the config file at ``path``, checked."""
+    if not isinstance(section, dict):
+        raise ValueError(f"{path}: {OPS_SECTION} must be a mapping, such as 'est_gpu_hours: 0.5'")
+    unknown = sorted(str(name) for name in section if name not in OPS_OPTIONS)
+    if unknown:
+        raise ValueError(
+            f"{path} sets {', '.join(f'{OPS_SECTION}.{name}' for name in unknown)}, which a "
+            f"config file can't: its {OPS_SECTION} section takes {', '.join(OPS_OPTIONS)}"
+        )
+    if "est_gpu_hours" not in section:
+        return Ops()
+    hours = section["est_gpu_hours"]
+    if (
+        isinstance(hours, bool)
+        or not isinstance(hours, int | float)
+        or not math.isfinite(hours)
+        or hours <= 0
+    ):
+        raise ValueError(
+            f"{path}: {OPS_SECTION}.est_gpu_hours must be {OPS_OPTIONS['est_gpu_hours']}, "
+            f"got {hours!r}"
+        )
+    return Ops(est_gpu_hours=float(hours))

@@ -149,6 +149,38 @@ def test_official_match_sees_the_statement_sqlite_runs(spider_mini: Path) -> Non
     ) == [False, True, True]
 
 
+@pytest.mark.phase(3)
+def test_official_match_can_keep_distinct(
+    spider_mini: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Official EX drops DISTINCT from both queries, so five distinct states match ten rows
+    # of them. Kept, as scripts/check_i5_distinct.py asks, they don't, as fast EX says.
+    items = [
+        (DB, "SELECT DISTINCT born_state FROM head", "SELECT born_state FROM head"),
+        (DB, "SELECT count(DISTINCT born_state) FROM head", "SELECT count(*) FROM head"),
+    ]
+    assert official_exec_match(items) == [True, True]
+    assert official_exec_match(items, keep_distinct=True) == [False, False]
+
+    # Kept, what the evaluator would run is still vetted first, and the option reaches it.
+    calls: list[dict[str, object]] = []
+
+    def recorder(**kwargs: object) -> int:
+        calls.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(exec_eval, "eval_exec_match", recorder)
+    planted = "ATTACH DATABASE CASE WHEN 1 > = 1 THEN 'planted.sqlite' END AS e"
+    names = "SELECT name FROM head"
+    verdicts = official_exec_match(
+        [(DB, planted, EMPTY_GOLD), (DB, names, EMPTY_GOLD)],
+        pool=InlineSandbox(spider_mini),
+        keep_distinct=True,
+    )
+    assert verdicts == [False, True]
+    assert [(call["p_str"], call["keep_distinct"]) for call in calls] == [(names, True)]
+
+
 @pytest.mark.phase(1)
 def test_official_match_runs_inside_an_event_loop(spider_mini: Path) -> None:
     async def in_a_notebook_cell(call: str) -> object:

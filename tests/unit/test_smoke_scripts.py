@@ -101,6 +101,63 @@ def test_phase_2_smoke_runs_the_checkpoint_steps() -> None:
     )
 
 
+@pytest.mark.phase(3)
+def test_phase_3_smoke_runs_a_kaggle_job_only_with_credentials(tmp_path: Path) -> None:
+    text = _check_script("phase_3.sh")
+    # Integration checkpoint 3 in docs/PLAN.md, in order: push, wait, pull, rebuild.
+    steps = [
+        'uv run forge kaggle run --job eval --config "$config" --run-id "$run_id" --yes',
+        'uv run forge kaggle wait "$run_id"',
+        'uv run forge runs pull "$run_id" --store kaggle',
+        'uv run forge report rebuild "$run_id"',
+    ]
+    _in_order(text, ["kaggle_credential_source(ctx)", *steps])
+    assert "config=configs/eval/smoke-kaggle-50-val.yaml" in text
+
+    fake = tmp_path / "bin" / "uv"
+    fake.parent.mkdir()
+    fake.write_text(FAKE_UV, encoding="utf-8")
+    fake.chmod(0o755)
+    log = tmp_path / "uv.log"
+    home = tmp_path / "home"
+    home.mkdir()
+    # Set empty rather than left out, so a developer's .env can't fill them in.
+    unset = ("KAGGLE_API_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY", "KAGGLE_CONFIG_DIR")
+    env = {
+        **os.environ,
+        **dict.fromkeys([*unset, "FORGE_KAGGLE_USER"], ""),
+        "PATH": f"{fake.parent}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_PYTHON": sys.executable,
+        "FAKE_LOG": str(log),
+        "HOME": str(home),
+    }
+
+    def smoke() -> subprocess.CompletedProcess[str]:
+        script = SMOKE / "phase_3.sh"
+        return subprocess.run([str(script), "run-1"], env=env, capture_output=True, text=True)
+
+    # No token anywhere: it says what to do and pushes nothing.
+    missing = smoke()
+    assert missing.returncode == 2, missing.stderr
+    assert "no Kaggle credentials: phone-verify your Kaggle account" in missing.stderr
+    assert "nothing was pushed" in missing.stderr and not log.exists()
+    # A token, which names no user, without FORGE_KAGGLE_USER: still nothing.
+    (home / ".kaggle").mkdir()
+    (home / ".kaggle" / "access_token").write_text("token", encoding="utf-8")
+    nameless = smoke()
+    assert nameless.returncode == 2 and "set FORGE_KAGGLE_USER" in nameless.stderr
+    assert not log.exists()
+
+    env["FORGE_KAGGLE_USER"] = "forge-owner"
+    passed = smoke()
+    assert passed.returncode == 0, passed.stderr
+    assert "credentials in ~/.kaggle/access_token, datasets of forge-owner" in passed.stdout
+    run = [step.replace('"$config"', "configs/eval/smoke-kaggle-50-val.yaml") for step in steps]
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        step.removeprefix("uv run ").replace('"$run_id"', "run-1") for step in run
+    ]
+
+
 @pytest.mark.phase(2)
 def test_make_smoke_marks_only_a_clean_commit_that_passed(tmp_path: Path) -> None:
     _check_script("pipeline.sh")

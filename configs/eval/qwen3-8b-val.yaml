@@ -1,0 +1,23 @@
+# FG-307 baseline, the reference model: Qwen3-8B on the whole val split, greedy, with the p2
+# prompt, as a kernel job on a Kaggle T4 (ADR-0012, docs/runbook.md "Baselines"):
+#
+#   uv run forge kaggle run --job eval --config configs/eval/qwen3-8b-val.yaml
+#
+# The model is configs/models.yaml's reference.qwen3-8b, Qwen's 4-bit AWQ checkpoint of
+# Qwen3-8B, pinned to the same commit. vLLM 0.33.0 has no bitsandbytes (FG-301). This
+# config's run on 2026-11-17 was the first to load the AWQ checkpoint on a T4, and took
+# 0.21 h by its ledger row. The prompt is p2, which ADR-0007 fixed for every later phase,
+# so the reference shows what a larger model scores with the prompt and harness the chosen
+# model is trained and evaluated with. The estimate is not worked out by plan section 3.8's
+# eval formula, which has no rates for an 8B model, and stays as it was set before the run.
+model: Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79
+backend: vllm
+quantization: awq
+split: val
+limit: null
+prompt_version: p2
+n: 1
+temperature: 0.0
+retry: 0
+ops:
+  est_gpu_hours: 0.45

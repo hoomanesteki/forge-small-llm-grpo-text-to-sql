@@ -27,6 +27,14 @@ A run evaluates one model on one split:
    database's columns, which are read in process like gold.
 9. Each batch's first tries, generations and scores are stored before the next batch
    starts.
+10. With a run store (``--store hub``), the store's copy of the run comes first when it
+    is newer than this machine's or this machine has none, and the run's folder goes to
+    it when the run ends, finished or failed, unless the store's copy has moved on since
+    (``forge.ops.run_copies``). Copies that went separate ways are refused.
+11. With a deadline (``forge.ops.timeguard``), the run asks it before each batch and
+    stops once that batch might not end in time. The batches stored stay, official EX
+    waits for the attempt that resumes the run, and the manifest says
+    ``stopped_time_guard``; the run goes to the store as one that ended.
 
 The options and their checks are ``forge.eval.config``; the run's folder, its manifest
 and how a killed run resumes are ``forge.eval.run_files``.
@@ -63,8 +71,11 @@ from forge.eval.run_files import Key, RunFiles, RunPaths, finish, hold, key, sta
 from forge.eval.scoring import no_sql, score_generation
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend, InferenceBackend
-from forge.ops.manifest import build_manifest
-from forge.ops.paths import cache_dir, repo_root, runs_dir
+from forge.ops.hub import RunStore, hub_store
+from forge.ops.manifest import CODE_SHA_ENV, accelerator, build_manifest
+from forge.ops.paths import RepoRootNotFound, cache_dir, repo_root, runs_dir
+from forge.ops.run_copies import StoreNewer, fetch_newer, put_run
+from forge.ops.timeguard import Deadline
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
 
@@ -72,6 +83,8 @@ log = logging.getLogger(__name__)
 
 BATCH_SIZE = 32
 WORKERS = min(4, os.cpu_count() or 1)
+# The backends that load a model, which a run builds from its config unless given one.
+MODEL_BACKENDS = ("hf", "vllm")
 
 
 @dataclass(frozen=True)
@@ -87,6 +100,7 @@ class EvalRun:
     # share its time as latency_ms, so summing the generations would count a batch once
     # per row.
     generate_s: float
+    stored: str | None = None  # the run store that holds the run's folder, by name
 
 
 class _TimedBackend:
@@ -139,13 +153,18 @@ def run_eval(
     workers: int = WORKERS,
     batch_size: int = BATCH_SIZE,
     progress: Callable[[int, int], None] | None = None,
+    store: RunStore | None = None,
+    deadline: Deadline | None = None,
 ) -> EvalRun:
     """Evaluate as ``config`` says, storing everything as the module docstring describes.
 
     ``backend`` replaces the one ``config`` names, such as a ``FakeBackend(fn)`` in a
     test; ``count_tokens`` measures its prompts, and counts words by default.
-    ``progress`` is called after each batch with the scores stored and the total.
-    Raises ``DirtyTreeError`` on uncommitted changes unless ``allow_dirty``.
+    ``store`` likewise replaces the run store ``config.store`` names, ``hub_store()`` for
+    ``hub``. ``progress`` is called after each batch with the scores stored and the total.
+    ``deadline`` stops the run between batches, as step 11 of the module docstring says.
+    Raises ``DirtyTreeError`` on uncommitted changes unless ``allow_dirty``, and
+    ``OSError`` when a finished run can't be stored.
     """
     check_config(config)
     if batch_size < 1:
@@ -159,15 +178,20 @@ def run_eval(
         run_id=config.run_id,
         platform=config.platform,
         adapter_ref=config.adapter,
+        gpu=accelerator(config.platform),
         allow_dirty=allow_dirty,
-        repo=repo_root(),
+        repo=_code_root(),
         data_dir=root,
     )
+    if store is None and config.store == "hub":
+        store = hub_store()
     paths = RunPaths((runs_root or runs_dir()) / fresh.run_id, config.split)
     with hold(paths):
+        if store is not None and fetch_newer(store, paths.root):
+            log.info("fetched run %s from %s to resume it", paths.root.name, store)
         manifest = start(paths, fresh)
         try:
-            questions, files, generate_s = _evaluate(
+            questions, files, generate_s, stopped = _evaluate(
                 config,
                 manifest,
                 paths,
@@ -178,13 +202,47 @@ def run_eval(
                 workers=workers,
                 batch_size=batch_size,
                 progress=progress,
+                deadline=deadline,
             )
         except BaseException as exc:
             # KeyboardInterrupt too: a run stopped by hand is failed, not still running.
             finish(paths, manifest, exc)
+            if store is not None:
+                _store_failed(store, paths)
             raise
-        final = finish(paths, manifest, None)
-    return EvalRun(final, paths, questions, tuple(files.scores), files.resumed, generate_s)
+        final = finish(paths, manifest, None, stopped=stopped)
+        if store is not None:
+            _store(store, paths)
+    stored = None if store is None else str(store)
+    return EvalRun(final, paths, questions, tuple(files.scores), files.resumed, generate_s, stored)
+
+
+def _store(store: RunStore, paths: RunPaths) -> None:
+    """Make ``store``'s copy of the run its folder, saying how to try again when that fails.
+
+    The folder is the whole run: the store's copy was fetched into it first when newer.
+    ``StoreNewer``, a store whose copy moved on meanwhile, says what to do itself.
+    """
+    run = paths.root.name
+    try:
+        put_run(store, paths.root, replace=True)
+    except StoreNewer:
+        raise
+    except OSError as exc:
+        raise OSError(
+            f"run {run} is in {paths.root}, but storing it in {store} failed: {exc}; "
+            f"upload it with forge runs push {run}"
+        ) from exc
+
+
+def _store_failed(store: RunStore, paths: RunPaths) -> None:
+    """Store a failed run's folder, so another machine can resume it."""
+    try:
+        _store(store, paths)
+    # Whatever went wrong here is logged and not raised: the run's own error is the one
+    # its caller needs.
+    except Exception as exc:
+        log.warning("%s", exc)
 
 
 def _evaluate(
@@ -199,10 +257,13 @@ def _evaluate(
     workers: int,
     batch_size: int,
     progress: Callable[[int, int], None] | None,
-) -> tuple[int, RunFiles, float]:
-    if backend is None and config.backend == "hf":
+    deadline: Deadline | None,
+) -> tuple[int, RunFiles, float, bool]:
+    """Score the run's pending questions: how many it asks, its files, the seconds spent
+    generating, and whether the deadline stopped it."""
+    if backend is None and config.backend in MODEL_BACKENDS:
         # Loaded before dev, so a model that fails to load spends no look at dev.
-        backend, count_tokens = _hf_backend(config)
+        backend, count_tokens = model_backend(config)
     loaded = _load_split(config, manifest.run_id, root)
     kept = [e for e in loaded if e.id not in FAILING_GOLD_IDS]
     # By id, train_others would come first, and its gold results are all empty, 0 or NULL.
@@ -229,8 +290,21 @@ def _evaluate(
         )
     schemas = _schemas(pending, root)
     timed = _TimedBackend(backend)
+    stopped = False
     with SandboxPool(workers, data_dir=root, imports=(testsuite.__name__,)) as pool:
+        if deadline is not None:
+            deadline.mark()  # a batch is timed from here, not from loading the model
         for begin in range(0, len(pending), batch_size):
+            if deadline is not None and deadline.near():
+                log.warning(
+                    "time guard: stopping %s with %d of %d scores stored; %s",
+                    manifest.run_id,
+                    len(files.scores),
+                    len(files.expected),
+                    deadline.describe(),
+                )
+                stopped = True
+                break
             batch = pending[begin : begin + batch_size]
             prompts = [
                 fit_prompt(example, config.prompt_version, measure, data_dir=root).prompt
@@ -254,16 +328,34 @@ def _evaluate(
             files.append(generations, scores, [first for first, _ in firsts.values()])
             if progress is not None:
                 progress(len(files.scores), len(files.expected))
-        _fill_official(files, by_id, pool)
-    return len(chosen), files, timed.seconds
+            if deadline is not None:
+                deadline.lap()
+        if not stopped:
+            _fill_official(files, by_id, pool)
+    return len(chosen), files, timed.seconds, stopped
 
 
-def _hf_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
-    # Imported here: torch and transformers take seconds to load, and only this needs them.
-    from forge.infer.hf_backend import HfBackend
+def model_backend(config: EvalConfig) -> tuple[InferenceBackend, TokenCounter]:
+    """The backend of ``config``, one in ``MODEL_BACKENDS``, with its model loaded, and the
+    counter that measures prompts with that model's tokenizer."""
+    # Imported here: torch, transformers and vLLM take seconds to load, and only this needs them.
+    if config.backend == "hf":
+        from forge.infer.hf_backend import HfBackend
 
-    hf = HfBackend(config.model, adapter_ref=config.adapter, device=config.device)
-    return hf, chat_token_counter(hf.tokenizer)
+        hf = HfBackend(config.model, adapter_ref=config.adapter, device=config.device)
+        return hf, chat_token_counter(hf.tokenizer)
+    if config.backend == "vllm":
+        from forge.infer.vllm_backend import GPU_MEMORY_UTILIZATION, VllmBackend
+
+        memory = config.gpu_memory_utilization
+        vllm = VllmBackend(
+            config.model,
+            adapter_ref=config.adapter,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION if memory is None else memory,
+            quantization=config.quantization,
+        )
+        return vllm, chat_token_counter(vllm.tokenizer)
+    raise ValueError(f"backend {config.backend} loads no model of its own")
 
 
 def _schemas(examples: Sequence[Example], root: Path) -> dict[str, Columns]:
@@ -364,3 +456,18 @@ def _fill_official(files: RunFiles, examples: Mapping[str, Example], pool: Sandb
     for (i, field, _), verdict in zip(todo, verdicts, strict=True):
         scores[i] = scores[i].model_copy(update={field: verdict})
     files.replace_scores(scores)
+
+
+def _code_root() -> Path | None:
+    """Where the run's commit is read: the Forge root, or None on a Kaggle kernel.
+
+    A kernel runs the installed wheel with no Forge checkout, and its entry script names
+    the code dataset's commit in ``FORGE_CODE_SHA``, which ``code_sha`` then takes. Anywhere
+    else a missing Forge root is an error, so a run never records a commit it can't name.
+    """
+    try:
+        return repo_root()
+    except RepoRootNotFound:
+        if os.environ.get(CODE_SHA_ENV):
+            return None
+        raise

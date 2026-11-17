@@ -21,12 +21,16 @@ from forge.eval.config import (
     BACKENDS,
     DEVICES,
     FILE_OPTIONS,
+    QUANTIZATIONS,
     STORES,
     EvalConfig,
     NotAvailable,
+    Ops,
     check_config,
     read_config_file,
+    read_config_sections,
 )
+from forge.infer import vllm_backend
 
 BASE = EvalConfig(model="org/model")
 
@@ -61,9 +65,9 @@ BASE = EvalConfig(model="org/model")
             "--backend fake runs no model, so it takes no --device mps",
         ),
         ({"n": 4}, ValueError, "n=4 needs a temperature above 0"),
-        ({"backend": "vllm"}, NotAvailable, "the vllm backend is not available yet"),
-        ({"backend": "llamacpp"}, NotAvailable, "comes with FG-702"),
-        ({"store": "hub"}, NotAvailable, "--store hub is available after FG-304"),
+        # On the laptop a vLLM run's manifest would say local-cpu (ADR-0016).
+        ({"backend": "vllm"}, ValueError, "backend vllm runs on a CUDA GPU"),
+        ({"backend": "llamacpp"}, NotAvailable, "the llamacpp backend is not available yet"),
     ],
 )
 def test_config_refused_before_anything_runs(
@@ -109,6 +113,127 @@ def test_manifest_config_records_what_changes_a_score() -> None:
     assert dataclasses.replace(BASE, store="hub").manifest_config() == config
     dev = dataclasses.replace(BASE, split="dev", reason="a look").manifest_config()
     assert "reason" not in dev and dev == {**config, "split": "dev"}
+
+
+@pytest.mark.phase(3)
+def test_platform_is_the_host_of_a_kernel_job() -> None:
+    # kaggle/entry.py names the machine it runs on; the manifest's config doesn't change.
+    on_kaggle = dataclasses.replace(BASE, host="kaggle")
+    assert on_kaggle.platform == "kaggle"
+    assert dataclasses.replace(BASE, host="colab").platform == "colab"
+    assert on_kaggle.manifest_config() == BASE.manifest_config()
+    check_config(dataclasses.replace(on_kaggle, backend="fake", model="gold"))
+    # A kernel job runs its model on the host's GPU through vLLM (FG-306).
+    on_vllm = dataclasses.replace(on_kaggle, backend="vllm")
+    check_config(on_vllm)
+    check_config(dataclasses.replace(on_vllm, host="colab", adapter="runs/x/best"))
+    with pytest.raises(ValueError, match="host must be one of kaggle, colab, got 'modal'"):
+        check_config(dataclasses.replace(BASE, host="modal"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Apple silicon's GPU, which kaggle has not"):
+        check_config(dataclasses.replace(on_kaggle, backend="vllm", device="mps"))
+    # The hf backend runs on the CPU or MPS, which would leave a T4 idle.
+    with pytest.raises(ValueError, match="backend hf runs on the CPU or MPS; a job on kaggle"):
+        check_config(on_kaggle)
+
+
+@pytest.mark.phase(3)
+def test_a_kernel_job_pushed_over_budget_says_so_in_its_config() -> None:
+    kernel = EvalConfig(model="gold", backend="fake", host="kaggle")
+    over = dataclasses.replace(kernel, allow_over_budget=True)
+    check_config(over)
+    assert over.manifest_config() == {**kernel.manifest_config(), "allow_over_budget": True}
+    # A laptop run spends no GPU budget, so it can't be over it.
+    with pytest.raises(ValueError, match="allow_over_budget is for a kernel job"):
+        check_config(dataclasses.replace(over, host=None))
+
+
+@pytest.mark.phase(3)
+def test_quantization_loads_a_vllm_model_in_4bit_and_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FG-307's reference model is too big for a T4 in fp16, so vllm loads its 4-bit AWQ
+    # checkpoint.
+    kernel = EvalConfig(model="org/model-AWQ", backend="vllm", host="kaggle")
+    four_bit = dataclasses.replace(kernel, quantization="awq")
+    check_config(four_bit)
+    recorded = {**kernel.manifest_config(), "quantization": "awq"}
+    assert four_bit.manifest_config() == recorded
+    # Left out when unset, so a run made before the option keeps its config hash.
+    assert "quantization" not in BASE.manifest_config()
+    # vLLM 0.33.0 has no bitsandbytes (FG-301): a config asking for it is refused before a
+    # push, in one line that says why.
+    with pytest.raises(ValueError) as refused:
+        check_config(dataclasses.replace(four_bit, quantization="bitsandbytes"))  # type: ignore[arg-type]
+    assert "\n" not in str(refused.value)
+    assert "vLLM 0.33.0 has none" in str(refused.value)
+    assert "docs/spikes/kaggle-gpu.md, question 4" in str(refused.value)
+    for wrong, message in (
+        (dataclasses.replace(four_bit, quantization="gptq"), "one of awq, got 'gptq'"),
+        (dataclasses.replace(BASE, quantization="awq"), "for backend vllm, not hf"),
+        (
+            EvalConfig(model="gold", backend="fake", quantization="awq"),
+            "for backend vllm, not fake",
+        ),
+    ):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            check_config(wrong)  # type: ignore[arg-type]
+    # The backend allows the same ones, and a config file and the command line set it.
+    assert QUANTIZATIONS == vllm_backend.QUANTIZATIONS
+    hint = get_type_hints(cli.eval_run, include_extras=False)["quantization"]
+    assert get_args(get_args(hint)[0]) == QUANTIZATIONS
+    path = tmp_path / "eval.yaml"
+    path.write_text("model: org/model\nbackend: vllm\nquantization: awq\n")
+    assert read_config_file(path)["quantization"] == "awq"
+    configs = _captured(monkeypatch)
+    CliRunner().invoke(cli.app, ["eval", "run", "--model", "x", "--quantization", "awq"])
+    assert [config.quantization for config in configs] == ["awq"]
+
+
+@pytest.mark.phase(3)
+def test_gpu_memory_utilization_is_a_vllm_option_recorded_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = EvalConfig(model="org/model", backend="vllm", host="kaggle")
+    tuned = dataclasses.replace(kernel, gpu_memory_utilization=0.7)
+    check_config(tuned)
+    check_config(dataclasses.replace(kernel, gpu_memory_utilization=1))
+    assert tuned.manifest_config() == {**kernel.manifest_config(), "gpu_memory_utilization": 0.7}
+    # Left out when unset, so a run made before the option keeps its config hash.
+    assert "gpu_memory_utilization" not in kernel.manifest_config()
+    share = "gpu_memory_utilization must be above 0 and at most 1"
+    for wrong, message in (
+        (dataclasses.replace(tuned, gpu_memory_utilization=0.0), f"{share}, got 0.0"),
+        (dataclasses.replace(tuned, gpu_memory_utilization=1.2), f"{share}, got 1.2"),
+        (dataclasses.replace(tuned, gpu_memory_utilization=float("nan")), f"{share}, got nan"),
+        # hf runs on the CPU or MPS, and vLLM's share of a GPU means nothing there.
+        (
+            dataclasses.replace(BASE, gpu_memory_utilization=0.7),
+            "gpu_memory_utilization is for backend vllm, not hf",
+        ),
+    ):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            check_config(wrong)
+    # A config file and the command line set it.
+    path = tmp_path / "eval.yaml"
+    path.write_text("model: org/model\nbackend: vllm\ngpu_memory_utilization: 0.7\n")
+    assert read_config_file(path)["gpu_memory_utilization"] == 0.7
+    path.write_text("model: org/model\ngpu_memory_utilization: most\n")
+    with pytest.raises(ValueError, match="gpu_memory_utilization must be a number, got 'most'"):
+        read_config_file(path)
+    configs = _captured(monkeypatch)
+    CliRunner().invoke(cli.app, ["eval", "run", "--model", "x", "--gpu-memory-utilization", "0.6"])
+    CliRunner().invoke(cli.app, ["eval", "run", "--model", "x"])
+    assert [config.gpu_memory_utilization for config in configs] == [0.6, None]
+
+
+@pytest.mark.phase(3)
+def test_a_temperature_vllm_would_raise_is_refused_up_front() -> None:
+    # vLLM would decode it at 0.01 while the manifest's generation said 0.005.
+    kernel = EvalConfig(model="org/model", backend="vllm", host="kaggle")
+    for config in (BASE, kernel):
+        with pytest.raises(ValueError, match=re.escape("temperature must be 0 or at least 0.01")):
+            check_config(dataclasses.replace(config, temperature=0.005))
+        check_config(dataclasses.replace(config, temperature=0.01))
 
 
 @pytest.mark.phase(2)
@@ -248,6 +373,61 @@ def test_cli_refuses_a_bad_config_file_before_anything_runs(
     gone = cli_runner.invoke(cli.app, ["eval", "run", "--config", str(tmp_path / "none.yaml")])
     assert gone.exit_code == 2 and "does not exist" in _unboxed(gone.stderr)
     assert configs == []
+
+
+@pytest.mark.phase(3)
+def test_ops_section_is_read_apart_from_the_options(tmp_path: Path) -> None:
+    path = tmp_path / "eval.yaml"
+    path.write_text("model: gold\nbackend: fake\nops:\n  est_gpu_hours: 0.25\n", encoding="utf-8")
+    options, ops = read_config_sections(path)
+    assert (options, ops) == ({"model": "gold", "backend": "fake"}, Ops(est_gpu_hours=0.25))
+    # forge eval run's reader checks the section and leaves it out.
+    assert read_config_file(path) == options
+    # A whole number of hours is a number too, and a file without the section has no ops.
+    path.write_text("model: gold\nops: {est_gpu_hours: 2}\n", encoding="utf-8")
+    assert read_config_sections(path)[1] == Ops(est_gpu_hours=2.0)
+    path.write_text("model: gold\n", encoding="utf-8")
+    assert read_config_sections(path)[1] == Ops()
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    ("ops", "message"),
+    [
+        ("ops: null", "ops must be a mapping"),
+        ("ops: [est_gpu_hours]", "ops must be a mapping"),
+        ("ops: {est_gpu_hours: 1, checkpoint_every: 50}", "sets ops.checkpoint_every, which"),
+        ("ops: {est_gpu_hours: 0}", "ops.est_gpu_hours must be a positive number, got 0"),
+        ("ops: {est_gpu_hours: -1.5}", "must be a positive number, got -1.5"),
+        ("ops: {est_gpu_hours: .inf}", "must be a positive number, got inf"),
+        ("ops: {est_gpu_hours: .nan}", "must be a positive number, got nan"),
+        ("ops: {est_gpu_hours: true}", "must be a positive number, got True"),
+        ("ops: {est_gpu_hours: '1'}", "must be a positive number, got '1'"),
+        ("ops: {est_gpu_hours: null}", "must be a positive number, got None"),
+    ],
+)
+def test_ops_section_refused_unless_it_holds_known_ops(
+    tmp_path: Path, ops: str, message: str
+) -> None:
+    path = tmp_path / "eval.yaml"
+    path.write_text(f"model: gold\n{ops}\n", encoding="utf-8")
+    for read in (read_config_sections, read_config_file):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            read(path)
+
+
+@pytest.mark.phase(3)
+def test_eval_run_takes_a_config_with_ops_and_ignores_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configs = _captured(monkeypatch)
+    path = tmp_path / "eval.yaml"
+    path.write_text(
+        "model: gold\nbackend: fake\nlimit: 3\nops:\n  est_gpu_hours: 0.5\n", encoding="utf-8"
+    )
+    result = CliRunner().invoke(cli.app, ["eval", "run", "--config", str(path)])
+    assert (result.exit_code, result.stderr) == (1, "error: stopped before any work\n")
+    assert configs == [EvalConfig(model="gold", backend="fake", limit=3)]
 
 
 def _unboxed(text: str) -> str:

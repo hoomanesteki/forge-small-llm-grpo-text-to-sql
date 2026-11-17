@@ -1,23 +1,34 @@
 from __future__ import annotations
 
-from datetime import date
+import json
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 import pytest
+from typer.testing import CliRunner
 
+from forge import cli
+from forge.core.types import RunManifest
+from forge.ops.hub import manifest_bytes
 from forge.ops.ledger import (
     GPU_PLATFORMS,
+    GPU_RUN_PLATFORMS,
     HEADER,
     PLATFORMS,
     QUOTA_PLATFORMS,
     LedgerRow,
     append,
+    append_once,
     has_run,
     read_rows,
+    record_run,
+    session_row,
     summary,
 )
 from forge.ops.manifest import Platform
+from forge.ops.sessions import Session
+from tests.fakes import FakeHub
 
 TODAY = date(2026, 11, 14)
 
@@ -152,3 +163,174 @@ def test_ledger_takes_every_manifest_platform() -> None:
     assert frozenset(get_args(Platform)) == PLATFORMS
     assert QUOTA_PLATFORMS <= GPU_PLATFORMS < PLATFORMS
     assert not {"local-cpu", "local-mps"} & GPU_PLATFORMS
+
+
+RUN = "2026-11-16-qwen3-4b-eval-abc1234"
+# 23:30 in California is 07:30 the next day in UTC, the date a row takes.
+STARTED = datetime(2026, 11, 15, 23, 30, tzinfo=timezone(timedelta(hours=-8)))
+
+
+def _manifest(**changes: Any) -> RunManifest:
+    fields: dict[str, Any] = {
+        "run_id": RUN,
+        "kind": "eval",
+        "git_sha": "b" * 40,
+        "config": {"split": "val", "prompt_version": "p1", "limit": 50, "adapter": None},
+        "config_hash": "2" * 64,
+        "data_manifest_hash": "3" * 64,
+        "model_ref": "Qwen/Qwen3-4B",
+        "platform": "kaggle",
+        "gpu": "Tesla T4",
+        "seed": 0,
+        "started_at": STARTED,
+        "ended_at": STARTED + timedelta(hours=1, minutes=30),
+        "status": "stopped_time_guard",
+        **changes,
+    }
+    return RunManifest(**fields)
+
+
+@pytest.fixture
+def hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeHub:
+    """A fake Hub run store, runs/ and the ledger under tmp_path, and no token."""
+    fake = FakeHub()
+    monkeypatch.setattr("huggingface_hub.HfApi", fake.client)
+    monkeypatch.setenv("FORGE_RUN_STORE", "owner/forge-runs")
+    monkeypatch.setenv("FORGE_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setenv("FORGE_LEDGER", str(tmp_path / "compute-ledger.md"))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    return fake
+
+
+def _pull(hub: FakeHub, manifest: RunManifest, sessions: list[Session] | None = None) -> str:
+    hub.files[f"runs/{manifest.run_id}/manifest.json"] = manifest_bytes(manifest)
+    if sessions is not None:
+        record = json.dumps([session.to_json() for session in sessions]).encode()
+        hub.files[f"runs/{manifest.run_id}/sessions.json"] = record
+    result = CliRunner().invoke(cli.app, ["runs", "pull", manifest.run_id])
+    assert result.exit_code == 0, result.output
+    return str(result.stdout)
+
+
+@pytest.mark.phase(3)
+def test_pull_appends_once(hub: FakeHub, tmp_path: Path) -> None:
+    ledger = tmp_path / "compute-ledger.md"
+
+    first = _pull(hub, _manifest())
+    second = _pull(hub, _manifest())
+
+    assert first.endswith(f"ledger: added 1.50 h on kaggle for run {RUN}\n")
+    assert second.endswith(f"ledger: run {RUN} has its row already\n")
+    purpose = "eval Qwen/Qwen3-4B on val, prompt p1, limit 50, stopped_time_guard"
+    expected = LedgerRow(date(2026, 11, 16), "kaggle", "Tesla T4", 1.5, RUN, purpose)
+    assert read_rows(ledger) == [expected]
+    assert ledger.read_text().startswith("# Compute ledger\n\n" + HEADER)
+
+
+@pytest.mark.phase(3)
+def test_pull_adds_no_row_without_a_gpu_or_an_end(hub: FakeHub, tmp_path: Path) -> None:
+    running = _manifest(status="running", ended_at=None)
+    assert _pull(hub, running).endswith(
+        f"ledger: no row yet, run {RUN} is running; pull it once it ends\n"
+    )
+    laptop = _manifest(run_id="2026-11-16-m-eval-abc1234", platform="local-cpu", gpu=None)
+    assert _pull(hub, laptop).endswith("ledger: no row, a local-cpu run holds no GPU\n")
+    assert read_rows(tmp_path / "compute-ledger.md") == []
+
+    # A pilot on the laptop's GPU is written down (ADR-0016), with its chip and adapter.
+    pilot = _manifest(
+        platform="local-mps",
+        gpu="Apple M4",
+        adapter_ref="runs/sft/checkpoints/best",
+        config={"split": "val"},
+        status="finished",
+        cost_usd=0.0,
+    )
+    rows, notes = record_run(pilot, path=tmp_path / "compute-ledger.md")
+    assert notes == [f"ledger: added 1.50 h on local-mps for run {RUN}"]
+    (row,) = rows
+    assert (row.platform, row.gpu, row.hours) == ("local-mps", "Apple M4", 1.5)
+    assert row.purpose == "eval Qwen/Qwen3-4B with runs/sft/checkpoints/best on val, finished"
+    # Every platform but the laptop's CPU holds a GPU.
+    assert {p for p in PLATFORMS if p not in GPU_RUN_PLATFORMS} == {"local-cpu"}
+
+
+@pytest.mark.phase(3)
+def test_append_once_holds_under_concurrent_pulls(ledger: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    row = LedgerRow(TODAY, "kaggle", "T4", 0.5, "run-x", "pulled twice at once")
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        added = list(pool.map(lambda _: append_once(row, ledger), range(64)))
+    assert added.count(True) == 1
+    assert read_rows(ledger) == [row]
+    assert not append_once(LedgerRow(TODAY, "colab", "T4", 1.0, "run-x", "other"), ledger)
+    assert append_once(LedgerRow(TODAY, "colab", "T4", 1.0, "run-y", "another run"), ledger)
+
+
+# A run stopped by the time guard after 11 h 15 min, resumed two days later for an hour.
+FIRST = Session(STARTED, STARTED + timedelta(hours=11, minutes=15), "stopped_time_guard")
+LATER = STARTED + timedelta(days=2)
+SECOND = Session(LATER, LATER + timedelta(hours=1), "finished")
+RESUMED = _manifest(status="finished", ended_at=SECOND.ended_at, gpu_hours=12.25)
+PURPOSE = "eval Qwen/Qwen3-4B on val, prompt p1, limit 50"
+
+
+@pytest.mark.phase(3)
+def test_a_resumed_run_gets_a_row_for_each_session(hub: FakeHub, tmp_path: Path) -> None:
+    ledger = tmp_path / "compute-ledger.md"
+    stopped = _manifest(ended_at=FIRST.ended_at)
+    assert _pull(hub, stopped, [FIRST]).endswith(f"added 11.25 h on kaggle for run {RUN}\n")
+
+    # The second session gets a row of its own with its own hour, and pulling again adds none.
+    after = _pull(hub, RESUMED, [FIRST, SECOND])
+    assert after.endswith(
+        f"ledger: session 1 of run {RUN} has its row already\n"
+        f"ledger: added 1.00 h on kaggle for session 2 of run {RUN}\n"
+    )
+    _pull(hub, RESUMED, [FIRST, SECOND])
+    rows = read_rows(ledger)
+    assert [(row.date, row.hours, row.session) for row in rows] == [
+        (date(2026, 11, 16), 11.25, 1),
+        (date(2026, 11, 18), 1.0, 2),
+    ]
+    assert [row.purpose for row in rows] == [
+        f"{PURPOSE}, stopped_time_guard",
+        f"{PURPOSE}, finished (session 2)",
+    ]
+
+    # Pulled only once it has finished, it gets the same two rows, never the 49 h from its
+    # first start to its last end.
+    ledger.unlink()
+    assert _pull(hub, RESUMED, [FIRST, SECOND]).endswith(
+        f"ledger: added 11.25 h on kaggle for session 1 of run {RUN}\n"
+        f"ledger: added 1.00 h on kaggle for session 2 of run {RUN}\n"
+    )
+    assert read_rows(ledger) == rows
+    assert summary(path=ledger, today=date(2026, 11, 18)).quota_hours_window == 12.25
+
+
+@pytest.mark.phase(3)
+def test_session_rows_name_what_they_cannot_log(ledger: Path) -> None:
+    killed = Session(STARTED, None, "failed")  # its attempt died before it could end it
+    running = Session(LATER)
+    rows, notes = record_run(RESUMED, [FIRST, killed, running], ledger)
+    assert [row.session for row in rows] == [1]
+    assert notes == [
+        f"ledger: added 11.25 h on kaggle for session 1 of run {RUN}",
+        f"ledger: session 2 of run {RUN} never recorded its end; add its hours with forge "
+        "ledger add, ending its purpose with (session 2)",
+        f"ledger: session 3 of run {RUN} is running; pull it once it ends",
+    ]
+    # A row added by hand for the session that never ended counts as that session's.
+    append(LedgerRow(TODAY, "kaggle", "T4", 0.5, RUN, "killed by the host (session 2)"), ledger)
+    assert [row.session for row in read_rows(ledger)] == [1, 2]
+    assert not append_once(session_row(RESUMED, 2, SECOND), ledger)
+
+    # A run's cost goes once, on its latest row, less what earlier rows hold.
+    paid = RESUMED.model_copy(update={"cost_usd": 3.0, "platform": "modal"})
+    rows, _ = record_run(paid, [FIRST], ledger.with_name("paid.md"))
+    rows += record_run(
+        paid.model_copy(update={"cost_usd": 5.0}), [FIRST, SECOND], ledger.with_name("paid.md")
+    )[0]
+    assert [(row.session, row.cost_usd) for row in rows] == [(1, 3.0), (2, 2.0)]

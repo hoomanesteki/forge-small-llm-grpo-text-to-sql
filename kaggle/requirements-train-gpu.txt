@@ -1,0 +1,19 @@
+# GPU packages for Forge's training jobs (SFT and GRPO) on Kaggle's T4 image, installed
+# with pip over the image's own, on its torch 2.11.0+cu130 (ADR-0002, ADR-0006). Evaluation
+# jobs install requirements-gpu.txt instead. There is no vLLM here: vLLM 0.33.0 has no
+# bitsandbytes, so it can't load the 4-bit policy, and its torch 2.14.0 would replace the
+# image's.
+#
+# These are uv.lock's versions, the ones CI tests, and bitsandbytes for the 4-bit base,
+# which the lock doesn't have. kaggle/spike/throughput.py installs and times this list as
+# its "trl" stack, and a unit test keeps the two the same. FG-301 measured it on a T4 on
+# 2026-11-16 (docs/spikes/kaggle-gpu.md, questions 3 and 5): pip installed it in 20.0 s into
+# a venv over the image's packages (install:trl), and GRPO ran Qwen3 1.7B and 4B on it in
+# 4-bit with fp16, the 4B at 4.94 GB allocated at most (grpo:trl:<model>).
+trl==1.18.0
+transformers==5.23.0
+peft==0.21.3
+accelerate==1.15.0
+datasets==5.2.0
+huggingface-hub==2.4.0
+bitsandbytes==0.50.2

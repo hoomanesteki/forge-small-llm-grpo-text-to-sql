@@ -96,3 +96,71 @@ a large share of the disagreements there. Also if a correct prediction is ever c
 by the 2 s or 10 s bound, and when the test-suite databases land (FG-508): an item then
 runs gold and the prediction on every database in the folder, so its 10 s must scale
 with their number (ADR-0014).
+
+## Notes
+
+2026-11-17, I5 on real model outputs (FG-307). This is the check the section above asks
+for. The reference's dev run, `2026-11-17-qwen3-8b-awq-dev-d2d6a3a`, is the one baseline
+whose checkers agree on fewer than 98% of its samples. `scripts/check_i5_distinct.py`
+scores each sample of FG-307's eight baseline runs where the two verdicts differ with the
+official evaluator again, once as the run scored it and once with `keep_distinct` on,
+nothing else changed. Its output, from
+`FORGE_DATA_DIR=data/spider uv run python scripts/check_i5_distinct.py` on the eight runs
+under `docs/runs/`:
+
+| Run | Samples | Replies with DISTINCT | Disagree | Only fast EX | Only official EX | Agreement | Scored as stored again | Disagree with DISTINCT kept |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2026-11-16-qwen3-1-7b-val-c8f4b41 | 872 | 59 | 17 | 5 | 12 | 98.05% | 17 | 0 |
+| 2026-11-16-qwen3-4b-val-c8f4b41 | 872 | 91 | 4 | 1 | 3 | 99.54% | 4 | 0 |
+| 2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41 | 872 | 62 | 9 | 4 | 5 | 98.97% | 9 | 0 |
+| 2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41 | 872 | 60 | 9 | 5 | 4 | 98.97% | 9 | 0 |
+| 2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41 | 100 | 11 | 0 | 0 | 0 | 100.00% | 0 | 0 |
+| 2026-11-17-qwen3-8b-awq-val-2f77281 | 872 | 170 | 14 | 7 | 7 | 98.39% | 14 | 0 |
+| 2026-11-17-qwen2-5-coder-1-5b-dev-2f77281 | 1,034 | 121 | 17 | 6 | 11 | 98.36% | 17 | 0 |
+| 2026-11-17-qwen3-8b-awq-dev-d2d6a3a | 1,034 | 215 | 25 | 13 | 12 | 97.58% | 25 | 0 |
+| 8 runs pooled | 6,528 | 789 | 95 | 41 | 54 | 98.54% | 95 | 0 |
+
+Disagreements that remain with DISTINCT kept:
+- none
+
+Disagreements that don't score as stored again:
+- none
+
+Each disagreement gets its stored verdict when scored again, and each one goes away once
+the evaluator keeps `DISTINCT`. None comes from anything else, so the fast comparator has
+no fault here for GRPO's reward to inherit. The reference writes `DISTINCT` more often than
+the candidates (the replies column), and its dev run, with the most such replies, is the
+one run that falls short on its own.
+
+The two committed runs outside the pool are not baselines. Their agreement, by
+`forge.eval.agreement.score_agreement` over each run's stored scores, as
+`test_i5_agreement_on_committed_runs` reads them:
+
+| Run | Samples | Disagree | Agreement |
+|---|---:|---:|---:|
+| 2026-11-15-qwen2-5-coder-0-5b-instruct-eval-da3eff7 (FG-291's pilot on the laptop, ADR-0016) | 872 | 5 | 99.43% |
+| 2026-11-16-smoke-kaggle-50-val-c8f4b41 (FG-303's 50-question job) | 50 | 0 | 100.00% |
+
+The pilot's report says the same: "The checkers disagree on 5 samples: only fast EX
+matches 3, and only official EX 2."
+
+The product owner's decision, on these numbers:
+
+- I5 is plan section 4's "fast comparator agreement with the official evaluator is ≥ 98%
+  on stored baseline outputs", measured over FG-307's baseline outputs pooled: the table's
+  last row.
+- Each run of the chosen model, `Qwen/Qwen2.5-Coder-1.5B-Instruct` (ADR-0012: val with p1
+  and with p2, the I6 repeat and dev), must also reach 98% on its own, since GRPO's reward
+  stands in for official EX on that model's outputs. All four do. A run of another model
+  may fall short alone, as the reference's dev run does.
+- Every committed run's agreement is still reported: each run's report counts where its
+  checkers disagree, and the test names every committed run's rate when it fails.
+- Official EX keeps the evaluator's default, `keep_distinct` off, so reported numbers stay
+  comparable with published Spider numbers. `official_exec_match(keep_distinct=True)` is
+  for this check only.
+- `tests/integration/test_invariants.py::test_i5_agreement_on_committed_runs` checks I5 so,
+  and plan section 4's table stays as it is.
+
+The first consequence above holds on real outputs: rewards and reported numbers part on
+`DISTINCT`, so FG-601's audit should look for fast EX gains that official EX doesn't show,
+a trained model adding or dropping `DISTINCT` among them.

@@ -1,0 +1,49 @@
+{
+  "run_id": "2026-11-17-qwen3-8b-awq-dev-d2d6a3a-preflight",
+  "kind": "eval",
+  "git_sha": "d2d6a3a2f9921cc1f7c3fc9dcea1b43d5becec1f",
+  "config": {
+    "adapter": null,
+    "backend": "vllm",
+    "device": "cpu",
+    "execution": {
+      "gold_timeout_ms": 10000,
+      "max_rows": 100000,
+      "official_item_timeout_s": 10.0,
+      "timeout_ms": 2000
+    },
+    "generation": {
+      "max_new_tokens": 256,
+      "n": 1,
+      "seed": 0,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "limit": 5,
+    "max_prompt_tokens": 1536,
+    "model": "Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79",
+    "prompt_version": "p2",
+    "quantization": "awq",
+    "retry": 0,
+    "split": "val"
+  },
+  "config_hash": "ecf62ecc686a222800586fab4c2f69c53a8eea268a1c4e8c536a759024548084",
+  "data_manifest_hash": "e10958d3b7a9490c15623285275d2840fbce551c32432fc62c0ad440cb06651e",
+  "model_ref": "Qwen/Qwen3-8B-AWQ@4da05a8edb55c6046cce958586c33b61da07bb79",
+  "adapter_ref": null,
+  "parent_run": null,
+  "platform": "kaggle",
+  "gpu": "Tesla T4",
+  "seed": 0,
+  "started_at": "2026-11-17T01:32:52.916757Z",
+  "ended_at": "2026-11-17T01:33:10.246252Z",
+  "gpu_hours": 0.004813748611111112,
+  "cost_usd": 0.0,
+  "outputs": {
+    "config": "config.yaml",
+    "sessions": "sessions.json",
+    "generations": "eval/val-generations.jsonl",
+    "scores": "eval/val-scores.jsonl"
+  },
+  "status": "finished"
+}

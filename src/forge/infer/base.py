@@ -5,8 +5,8 @@ generations in prompt order, then sample order. Each one carries the SQL that
 ``extract_sql`` finds in its text, its token counts and its latency, so the eval runner
 can treat every backend alike.
 
-``FakeBackend`` stands in for a model in tests, and ``render_chat`` turns a prompt into
-the text a model continues.
+``FakeBackend`` stands in for a model in tests, ``render_chat`` turns a prompt into the
+text a model continues, and ``split_ref`` reads a model or adapter ref.
 """
 
 from __future__ import annotations
@@ -14,7 +14,10 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from huggingface_hub.utils import HFValidationError, validate_repo_id
 
 from forge.core.hashing import canonical_json
 from forge.core.types import Generation, GenParams, Prompt
@@ -23,6 +26,10 @@ from forge.sql.extract import extract_sql
 # The chat template variable Qwen3 reads: false pre-fills an empty think block, so the
 # model answers without reasoning first (plan section 3.7).
 THINKING_FLAG = "enable_thinking"
+# vLLM decodes a temperature above 0 but below this one at this one (SamplingParams), with
+# a warning in the log only, so a run's manifest would record a temperature it never used.
+# Every backend refuses those, so a config decodes alike on each.
+MIN_TEMPERATURE = 0.01
 
 # A fake model: (prompt, params, sample_idx) -> reply text.
 ReplyFn = Callable[[Prompt, GenParams, int], str]
@@ -50,6 +57,12 @@ def check_params(params: GenParams) -> None:
     # Negated so that a NaN temperature fails too.
     if not params.temperature >= 0:
         raise ValueError(f"temperature must be 0 or more, got {params.temperature}")
+    if 0 < params.temperature < MIN_TEMPERATURE:
+        raise ValueError(
+            f"temperature must be 0 or at least {MIN_TEMPERATURE}, got {params.temperature}: "
+            f"vLLM would decode at {MIN_TEMPERATURE} instead, which the run's manifest "
+            "wouldn't say"
+        )
     if not 0 < params.top_p <= 1:
         raise ValueError(f"top_p must be above 0 and at most 1, got {params.top_p}")
     if params.max_new_tokens < 1:
@@ -91,6 +104,24 @@ def render_chat(tokenizer: ChatTemplateTokenizer, messages: Sequence[Mapping[str
     if not isinstance(text, str):
         raise TypeError(f"apply_chat_template returned {type(text).__name__}, not the prompt text")
     return text
+
+
+def split_ref(ref: str) -> tuple[str, str | None]:
+    """A model or adapter ref as ``from_pretrained`` and vLLM take it: a local directory
+    with no revision, or a Hub repo id with the revision after an optional ``@``."""
+    if Path(ref).is_dir():
+        return ref, None
+    repo, at, revision = ref.partition("@")
+    try:
+        validate_repo_id(repo)
+    except HFValidationError:
+        # Otherwise a mistyped local path fails as a malformed repo id.
+        raise FileNotFoundError(
+            f"{ref!r} is neither a directory nor a Hub repo id with an optional @revision"
+        ) from None
+    if at and not revision:
+        raise ValueError(f"{ref!r} has nothing after its '@'; give a revision or drop the '@'")
+    return repo, revision or None
 
 
 class FakeBackend:

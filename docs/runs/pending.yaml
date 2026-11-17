@@ -1,0 +1,8 @@
+# Runs a story needs that haven't been made and committed yet. Each entry says what blocks
+# it and since when, how to run it and what it fills in. The story that makes the run
+# removes its entry in the same change and adds its ledger row. Nothing here is a result.
+# An entry with configs runs each of them, or, with pick, the one it names;
+# tests/integration/test_artifacts.py skips a story's run checks only while the story has
+# an entry here. An entry whose run was made, with its ledger row, but can't be committed
+# yet names it in run_id.
+pending: []

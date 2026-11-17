@@ -1,7 +1,8 @@
 """The dev split budget: at most six looks at Spider dev, each logged with a reason.
 
 Every look at the reported split is a chance to tune against it, so the log is
-append-only and the seventh request is refused outright.
+append-only and the seventh request is refused outright. A row is dated by today's UTC
+date, as the run id it names is (``forge.ops.clock``).
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from forge.ops.clock import utc_today
 from forge.ops.logfile import locked_append
 from forge.ops.paths import dev_usage_path
 
@@ -41,7 +43,10 @@ def count_dev_uses(path: Path | None = None) -> int:
 def log_dev_use(
     run_id: str, reason: str, *, path: Path | None = None, today: date | None = None
 ) -> int:
-    """Record one dev evaluation and return how many have been used, this one included."""
+    """Record one dev evaluation and return how many have been used, this one included.
+
+    The row's date is ``today``, by default today's UTC date.
+    """
     if not reason or not reason.strip():
         raise ValueError("a dev evaluation needs a non-empty reason")
     if not run_id.strip():
@@ -50,7 +55,7 @@ def log_dev_use(
     if "|" in clean_id:
         raise ValueError(f"run_id must not contain '|': {run_id!r}")
     clean_reason = " ".join(reason.replace("|", "/").split())
-    day = (today or date.today()).isoformat()
+    day = (today or utc_today()).isoformat()
 
     def within_budget(before: str) -> None:
         used = len(_parse(before))

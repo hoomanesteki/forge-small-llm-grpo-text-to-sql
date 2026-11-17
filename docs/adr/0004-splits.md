@@ -72,3 +72,14 @@ Both commands print a one-line note saying so when given `--split dev`.
 
 Val proves too small or too noisy to separate checkpoints. The change then takes a new
 seed version and freshly written manifests, never hand edits.
+
+## Notes
+
+- 2026-11-15, Kaggle dev jobs (FG-392). A kernel has no checkout, so `forge kaggle run`
+  writes a dev job's row in `docs/dev-usage.md` itself, as soon as Kaggle accepts the push
+  and before anything else that could fail: a kernel that may read dev always has its row,
+  and a push Kaggle refuses spends nothing. A `--resume` push carries on the same run, from
+  the same commit with the same options, and can't tell whether the attempt before it
+  reached dev, so it is the same look: one row a run id, and a resume goes even once the
+  six looks are spent. On the laptop `load_dev` still writes a row each time dev loads, a
+  resume of a cut-off run included, as above.

@@ -45,3 +45,46 @@ To make it again, from the commit in its manifest:
 FORGE_DATA_DIR=data/spider uv run forge eval run --config configs/eval/pilot-qwen25coder05b-val.yaml
 FORGE_DATA_DIR=data/spider uv run forge report run <run_id>
 ```
+
+## Kaggle runs
+
+A run whose manifest says `platform: kaggle` ran as a kernel job on a T4 (ADR-0005) and came
+back with `forge runs pull <run_id> --store kaggle`. Its folder also holds what the kernel
+kept beside the run: `kernels.json` (the pushes `forge kaggle run` made), `status.json` (each
+stage of `kaggle/entry.py`, with its seconds and result) and the preflight's files in
+`kernel/`. The kernel's log stays out of git. Its ledger row is the kernel's session, from
+its start to its end.
+
+| Run | Model | Made with | Report |
+|---|---|---|---|
+| [2026-11-16-smoke-kaggle-50-val-c8f4b41](2026-11-16-smoke-kaggle-50-val-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/smoke-kaggle-50-val.yaml`: the first 50 val questions, greedy, prompt p1, vLLM in fp16 on a T4. Integration checkpoint 3's job (`scripts/smoke/phase_3.sh`) and FG-303's real eval job: a check of the GPU path, not a baseline | [val-report.md](2026-11-16-smoke-kaggle-50-val-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen3-1-7b-val-c8f4b41](2026-11-16-qwen3-1-7b-val-c8f4b41/) | `Qwen/Qwen3-1.7B` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen3-1-7b-val.yaml`: FG-307's candidate on the whole val split, greedy, prompt p1, non-thinking, vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen3-1-7b-val-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen3-4b-val-c8f4b41](2026-11-16-qwen3-4b-val-c8f4b41/) | `Qwen/Qwen3-4B` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen3-4b-val.yaml`: FG-307's candidate on the whole val split, greedy, prompt p1, non-thinking, vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen3-4b-val-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41](2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen2-5-coder-1-5b-val.yaml`: FG-307's candidate on the whole val split, greedy, prompt p1, vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41](2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen2-5-coder-1-5b-val-100.yaml`: the first 100 val questions again, for I6, vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen2-5-coder-1-5b-i6-c8f4b41/eval/val-report.md) |
+| [2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41](2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen2-5-coder-1-5b-val-p2.yaml`: the whole val split, greedy, prompt p2 (ADR-0007), vLLM in fp16 on a T4 | [val-report.md](2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41/eval/val-report.md), and p2 against p1: [compare-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41.md](2026-11-16-qwen2-5-coder-1-5b-p2-c8f4b41/eval/compare-2026-11-16-qwen2-5-coder-1-5b-val-c8f4b41.md) |
+| [2026-11-17-qwen3-8b-awq-val-2f77281](2026-11-17-qwen3-8b-awq-val-2f77281/) | `Qwen/Qwen3-8B-AWQ` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen3-8b-val.yaml`: FG-307's reference on the whole val split, greedy, prompt p2, non-thinking, Qwen's 4-bit AWQ checkpoint of Qwen3-8B through vLLM on a T4 | [val-report.md](2026-11-17-qwen3-8b-awq-val-2f77281/eval/val-report.md) |
+| [2026-11-17-qwen2-5-coder-1-5b-dev-2f77281](2026-11-17-qwen2-5-coder-1-5b-dev-2f77281/) | `Qwen/Qwen2.5-Coder-1.5B-Instruct` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen2-5-coder-1-5b-dev.yaml`: the model ADR-0012 chose on the whole dev split, greedy, prompt p2, vLLM in fp16 on a T4. Dev look 1, `--reason baseline`; `kernel/dev-usage.md` is the kernel's own log of it | [dev-report.md](2026-11-17-qwen2-5-coder-1-5b-dev-2f77281/eval/dev-report.md) |
+| [2026-11-17-qwen3-8b-awq-dev-d2d6a3a](2026-11-17-qwen3-8b-awq-dev-d2d6a3a/) | `Qwen/Qwen3-8B-AWQ` (Apache-2.0), pinned in `configs/models.yaml` | `configs/eval/qwen3-8b-dev.yaml`: FG-307's reference on the whole dev split, greedy, prompt p2, non-thinking, the AWQ checkpoint through vLLM on a T4. Dev look 2, `--reason baseline`; `kernel/dev-usage.md` is the kernel's own log of it | [dev-report.md](2026-11-17-qwen3-8b-awq-dev-d2d6a3a/eval/dev-report.md) |
+
+The 50-question job's report was written in the kernel and matches its rebuild on the laptop
+with the full data; its chart was drawn on Linux, which a Mac's rebuild says it can't compare.
+FG-307's baselines were rendered again on the laptop from their stored files
+(`FORGE_RUNS_DIR=docs/runs FORGE_DATA_DIR=data/spider uv run forge report run <run_id>`), so a
+Mac's rebuild compares their charts too, and the p2 run's folder holds `forge report compare`'s
+report of it against the p1 run. The runs of 2026-11-16 were made from `c8f4b41`, a commit on
+`dev`, so they need no `run/` tag. The reference's val run and the chosen model's dev run were
+made from `2f77281` and the reference's dev run from `d2d6a3a`, commits of FG-307's branch,
+so each needs its tag there once the branch lands. To make one again from its commit: the
+50-question job with `scripts/smoke/phase_3.sh <run_id>`, a baseline as docs/runbook.md's
+"Baselines" says.
+
+## Pending runs
+
+[pending.yaml](pending.yaml) lists the runs a story needs that haven't been made and
+committed yet, what blocks each one, since when, and what it will fill in. None is listed
+now. FG-307's runs left it when they were committed, the reference's dev run last, on
+2026-11-17, once ADR-0008's note of that day settled I5 for it, and FG-301's spike, FG-302's
+publish and FG-303's eval job on 2026-11-16. `tests/integration/test_artifacts.py` finds a GPU
+story's runs here by the configs they were made from, and skips its checks on them only
+while the story has an entry in pending.yaml; once it has none, a missing run fails.

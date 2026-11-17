@@ -1,0 +1,18 @@
+# FG-307 baseline, a candidate: Qwen2.5-Coder-1.5B-Instruct on the whole val split, greedy,
+# with the p1 prompt, as a kernel job on a Kaggle T4 (ADR-0012, docs/runbook.md
+# "Baselines"):
+#
+#   uv run forge kaggle run --job eval --config configs/eval/qwen2-5-coder-1-5b-val.yaml
+#
+# The model is configs/models.yaml's candidates.qwen2-5-coder-1-5b, pinned to the same
+# commit.
+model: Qwen/Qwen2.5-Coder-1.5B-Instruct@2e1fd397ee46e1388853d2af2c993145b0f1098a
+backend: vllm
+split: val
+limit: null
+prompt_version: p1
+n: 1
+temperature: 0.0
+retry: 0
+ops:
+  est_gpu_hours: 0.3

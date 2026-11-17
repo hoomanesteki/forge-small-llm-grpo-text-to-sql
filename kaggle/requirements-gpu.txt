@@ -1,0 +1,29 @@
+# GPU packages for Forge's evaluation jobs on Kaggle's T4 image, installed over the image's
+# own (ADR-0002, ADR-0006). Training jobs install requirements-train-gpu.txt, the spike's
+# "trl" stack, instead, so no training job gets vLLM.
+#
+# vLLM sets the stack (FG-306). vllm 0.33.0 pins torch 2.14.0, whose wheel is built for
+# CUDA 13.0 like the image's (v173 has torch 2.11.0+cu130), and needs transformers
+# >=5.16.1,<5.21, so transformers is 5.20.2, the newest below 5.21. The rest are uv.lock's
+# versions, which take both: trl 1.18.0 needs transformers>=4.56.2, peft 0.21.3 any, and
+# transformers 5.20.2 and datasets 5.2.0 take huggingface-hub>=1.31,<3. CI tests torch
+# 2.15.0 and transformers 5.23.0; the transformers code Forge runs in a kernel
+# (apply_chat_template, get_chat_template and the trainer callback classes) does the same
+# in 5.20.2 for the arguments Forge passes.
+#
+# kaggle/spike/throughput.py installs and times this list as its "trl-vllm" stack, and a
+# unit test keeps the two the same. FG-301 measured it on a T4 on 2026-11-16
+# (docs/spikes/kaggle-gpu.md, questions 3 to 5): uv installed it in 96 s (install:trl-vllm),
+# and vLLM 0.33.0 generated in fp16 for Qwen3 1.7B and 4B on the same vllm, torch,
+# transformers and bitsandbytes versions (vllm:<model>). Only GRPO through it failed, at
+# vLLM's load of the 4-bit policy (grpo:trl-vllm:<model>), since vLLM 0.33.0 has no
+# bitsandbytes quantization.
+vllm==0.33.0
+torch==2.14.0
+transformers==5.20.2
+trl==1.18.0
+peft==0.21.3
+accelerate==1.15.0
+datasets==5.2.0
+huggingface-hub==2.4.0
+bitsandbytes==0.50.2

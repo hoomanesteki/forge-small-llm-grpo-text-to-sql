@@ -6,6 +6,9 @@ non-SELECT statements are denied.
 I4 (a run's report, for now): every number in it traces to the run's stored scores and
 manifest.
 I5: the fast comparator agrees with the official evaluator on at least 98% of predictions.
+I6: the same greedy eval run twice agrees within 0.5 points of official EX.
+I7: every session of a GPU run kept here has a ledger row, and the ledger's cash stays
+within $50.
 """
 
 from __future__ import annotations
@@ -15,14 +18,16 @@ import math
 import re
 import shutil
 from collections import Counter
-from datetime import UTC, datetime
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from itertools import combinations
 from pathlib import Path
 
 import pytest
 from test_suite_eval import exec_eval
 
-from forge.core.types import ErrorKind, Example, GenParams, Prompt
+from forge.core.types import ErrorKind, Example, GenParams, Prompt, RunManifest
 from forge.data.spider import db_path, load_raw
 from forge.data.splits import (
     MANIFEST_DIR,
@@ -39,18 +44,33 @@ from forge.data.splits import (
     split_examples,
     val_databases,
 )
-from forge.eval.agreement import AGREEMENT_TARGET, agreement_mutations, agreement_rate, score
+from forge.eval.agreement import (
+    AGREEMENT_TARGET,
+    agreement_mutations,
+    agreement_rate,
+    score,
+    score_agreement,
+)
 from forge.eval.config import EvalConfig
 from forge.eval.mutations import CHANGES
 from forge.eval.report import write_run_report
+from forge.eval.reproducibility import Reproducibility, compare_runs
+from forge.eval.run_files import read_run
 from forge.eval.runner import run_eval
 from forge.eval.testsuite import official_exec_match
 from forge.infer.base import FakeBackend
+from forge.ops.hub import LocalRunStore
+from forge.ops.ledger import LedgerRow, append, audit, read_rows, record_run
+from forge.ops.paths import ledger_path, runs_dir
+from forge.ops.sessions import Session, begin, end, sessions_of
 from forge.sql import sandbox
 from forge.sql.executor import SqliteExecutor
 from forge.sql.sandbox import SandboxPool
+from tests.integration.test_artifacts import BASELINES, gpu_story_runs
 from tests.report_trace import untraced
 from tests.sandbox_jobs import review_query, run_with_fg191_limits
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.phase(1)
@@ -434,3 +454,193 @@ def test_i5_agreement_on_full_val() -> None:
     scores = score(agreement_mutations(load_val(), 2000, seed=0))
 
     assert agreement_rate(scores) >= AGREEMENT_TARGET
+
+
+@pytest.mark.phase(3)
+def test_i5_agreement_on_committed_runs() -> None:
+    """I5 on real model replies, each with both verdicts stored. Plan section 4 asks for 98%
+    agreement on stored baseline outputs, so it is measured over FG-307's baselines pooled.
+    Each run of the chosen model must also reach it on its own, since GRPO's reward stands
+    in for official EX on that model's replies. Another model's run may fall short alone:
+    every disagreement on FG-307's runs goes away once the evaluator keeps DISTINCT, which
+    it drops by default and the 8B reference writes more often (scripts/check_i5_distinct.py,
+    ADR-0008's note of 2026-11-17). Official EX keeps the default, for comparability with
+    published Spider numbers. Every committed run's agreement is still computed, which needs
+    both verdicts on each of its samples, and reported when the test fails.
+    """
+    store = LocalRunStore(ROOT / "docs" / "runs")
+    rates = {run: score_agreement(read_run(store.root / run).scores) for run in store.runs()}
+    reported = ", ".join(f"{run} {rate:.2%}" for run, rate in rates.items())
+    baselines = gpu_story_runs("FG-307", BASELINES)
+    pooled = score_agreement([score for run in baselines.values() for score in run.scores])
+    assert pooled >= AGREEMENT_TARGET, f"FG-307's runs pooled agree on {pooled:.2%}; {reported}"
+    chosen = baselines["chosen dev"].manifest.model_ref
+    own = [run.manifest.run_id for run in baselines.values() if run.manifest.model_ref == chosen]
+    assert len(own) == 4, own  # val with p1 and with p2, the I6 repeat and dev
+    assert all(rates[run] >= AGREEMENT_TARGET for run in own), reported
+
+
+def _repeat(
+    config: EvalConfig, runs: Path, cache: Path, reply: Callable[[Prompt, GenParams, int], str]
+) -> Path:
+    run = run_eval(
+        config,
+        backend=FakeBackend(reply, model_ref=config.model),
+        allow_dirty=True,
+        runs_root=runs,
+        cache_root=cache,
+        workers=1,
+    )
+    return run.paths.root
+
+
+@pytest.mark.phase(3)
+def test_i6_greedy_eval_reproducible(
+    spider_mini: Path, tiny_model_ref: str, tmp_path: Path
+) -> None:
+    runs, cache = tmp_path / "runs", tmp_path / "cache"
+    val = sorted(load_val(), key=lambda example: example.id)
+    gold = {example.id: example.gold_sql for example in val}
+    wrong = {example.id for example in val[::3]}  # a third answered wrong, the same each run
+
+    def reply(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        sql = "SELECT 1" if prompt.example_id in wrong else gold[prompt.example_id]
+        return f"```sql\n{sql}\n```"
+
+    # Two fixture runs of the fake backend: the same scores, and the first ten questions
+    # alone repeat the start of the whole split.
+    config = EvalConfig(model="gold", backend="fake")
+    a = read_run(_repeat(replace(config, run_id="a"), runs, cache, reply))
+    b = read_run(_repeat(replace(config, run_id="b"), runs, cache, reply))
+    first = read_run(_repeat(replace(config, run_id="first", limit=10), runs, cache, reply))
+    same = compare_runs(a, b)
+    assert same.ok, same.describe()
+    assert (same.samples, same.verdicts_differ, same.replies_differ) == (len(val), (), ())
+    assert same.hits == (len(val) - len(wrong),) * 2
+    start = compare_runs(first, a)
+    assert (start.ok, start.samples) == (True, 10)
+
+    # A run whose reply to one question changed is caught: one sample of 20 is 5 points.
+    flipped = val[1].id
+    assert flipped not in wrong
+
+    def drifted(prompt: Prompt, params: GenParams, sample_idx: int) -> str:
+        return (
+            "```sql\nSELECT 2\n```"
+            if prompt.example_id == flipped
+            else reply(prompt, params, sample_idx)
+        )
+
+    c = read_run(_repeat(replace(config, run_id="c"), runs, cache, drifted))
+    drift = compare_runs(a, c)
+    assert not drift.ok and drift.gap_points == 100 / len(val)
+    assert drift.verdicts_differ == drift.replies_differ == ((flipped, 0),)
+    assert "5.0 points apart (I6 allows 0.5)" in drift.describe()
+    # Only a repeat of the same eval compares: another prompt is another eval.
+    p2 = read_run(_repeat(replace(config, run_id="p2", prompt_version="p2"), runs, cache, reply))
+    with pytest.raises(ValueError, match="differ in prompt_version: a repeat changes only"):
+        compare_runs(a, p2)
+    # The tolerance holds at its edge: half a point is allowed, a whole one not.
+    assert Reproducibility(("x", "y"), 200, (100, 101), (), ()).ok
+    assert not Reproducibility(("x", "y"), 200, (100, 102), (), ()).ok
+
+    # Two real CPU runs of the tiny model on the fixture's val split, greedy: the same
+    # reply to every question, token for token.
+    tiny = EvalConfig(model=tiny_model_ref, backend="hf")
+    real = [
+        read_run(
+            run_eval(
+                replace(tiny, run_id=run_id),
+                allow_dirty=True,
+                runs_root=runs,
+                cache_root=cache,
+                workers=1,
+            ).paths.root
+        )
+        for run_id in ("tiny-a", "tiny-b")
+    ]
+    checked = compare_runs(*real)
+    assert checked.ok, checked.describe()
+    assert (checked.samples, checked.replies_differ) == (len(val), ())
+
+
+def _gpu_run(run_id: str, platform: str, gpu: str | None) -> RunManifest:
+    started = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
+    return RunManifest(
+        run_id=run_id,
+        kind="eval",
+        git_sha="c" * 40,
+        config={"split": "val"},
+        config_hash="4" * 64,
+        data_manifest_hash="5" * 64,
+        model_ref="Qwen/Qwen3-4B",
+        platform=platform,  # type: ignore[arg-type]
+        gpu=gpu,
+        seed=0,
+        started_at=started,
+        ended_at=started + timedelta(minutes=30),
+        status="finished",
+    )
+
+
+def _with_sessions(store: LocalRunStore) -> list[tuple[RunManifest, list[Session]]]:
+    """Each run ``store`` keeps, with its sessions, as I7 checks them."""
+    kept = []
+    for run in store.runs():
+        manifest = store.get_manifest(run)
+        kept.append((manifest, sessions_of(manifest, store.root / run)))
+    return kept
+
+
+@pytest.mark.phase(3)
+def test_i7_gpu_runs_in_ledger(tmp_path: Path) -> None:
+    # The gate's check: every session of every run committed under docs/runs or kept in
+    # the local runs store, against the real ledger: the FG-291 pilot, whose local-mps row
+    # must name its platform, and the Kaggle runs since FG-303's 50-question job.
+    stores = [LocalRunStore(ROOT / "docs" / "runs"), LocalRunStore(runs_dir())]
+    kept = [run for store in stores for run in _with_sessions(store)]
+    assert {manifest.platform for manifest, _ in kept} >= {"local-mps", "kaggle"}
+    assert audit(kept, read_rows(ledger_path())) == []
+
+    # On fixture runs, the same check catches what a gate must refuse.
+    store, ledger = LocalRunStore(tmp_path / "runs"), tmp_path / "compute-ledger.md"
+    kaggle = _gpu_run("2026-11-20-qwen3-4b-eval-abc1234", "kaggle", "Tesla T4")
+    pilot = _gpu_run("2026-11-20-qwen2-5-coder-eval-abc1234", "local-mps", "Apple M4")
+    laptop = _gpu_run("2026-11-20-tiny-eval-abc1234", "local-cpu", None)
+    for manifest in (kaggle, pilot, laptop):
+        store.put_manifest(manifest)
+    found = _with_sessions(store)
+    # Only a run on a budget platform needs a row: a pilot's is welcome, not required.
+    assert audit(found, read_rows(ledger)) == [
+        f"run {kaggle.run_id} ran on kaggle, and the ledger has no row for it"
+    ]
+    # Pulling the run writes the row that settles it.
+    rows, _ = record_run(kaggle, path=ledger)
+    assert [row.hours for row in rows] == [0.5]
+    assert audit(found, read_rows(ledger)) == []
+
+    # A resumed run needs a row for each session: one pulled after its first still lacks
+    # the second's.
+    resumed = _gpu_run("2026-11-20-qwen3-4b-eval-def5678", "kaggle", "Tesla T4")
+    folder = store.root / resumed.run_id
+    begin(folder, resumed.started_at)
+    end(folder, resumed.started_at + timedelta(hours=11), "stopped_time_guard")
+    record_run(resumed, sessions_of(resumed, folder), ledger)
+    begin(folder, resumed.started_at + timedelta(days=1))
+    end(folder, resumed.started_at + timedelta(days=1, hours=2), "finished")
+    store.put_manifest(resumed)
+    found = _with_sessions(store)
+    assert audit(found, read_rows(ledger)) == [
+        f"run {resumed.run_id} ran on kaggle, and the ledger has no row for its session 2"
+    ]
+    rows, _ = record_run(resumed, sessions_of(resumed, folder), ledger)
+    assert [(row.session, row.hours) for row in rows] == [(2, 2.0)]
+    assert audit(found, read_rows(ledger)) == []
+
+    day = date(2026, 11, 20)
+    append(LedgerRow(day, "kaggle", "Apple M4", 0.5, pilot.run_id, "mislabeled pilot"), ledger)
+    append(LedgerRow(day, "modal", "L4", 2.0, "boost", "boost run", cost_usd=50.01), ledger)
+    assert audit(found, read_rows(ledger)) == [
+        f"run {pilot.run_id} ran on local-mps, but its ledger row of 2026-11-20 says kaggle",
+        "the ledger spends $50.01, over the $50 limit",
+    ]
